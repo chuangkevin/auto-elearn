@@ -7,6 +7,12 @@ import { createBus } from "./bus";
 import { attachElearnView, detectLogin, dismissNuisancePopups } from "./browser/view";
 import { discover } from "./course/discovery";
 import type { Tracked } from "./course/types";
+import { runHeartbeatBatch } from "./heartbeat/engine";
+
+const HEARTBEAT_PARALLEL = 8;
+const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_JITTER_MS = 1000;
+const abortSignal = { aborted: false };
 
 const HOMEPAGE = "https://elearn.hrd.gov.tw/mooc/index.php";
 
@@ -86,30 +92,92 @@ function createWindow() {
       state.user = { name: user };
       log("info", `偵測到登入：${user}`);
       pushState();
-      // Dismiss the daily summary popup + any fancybox overlay
       await dismissNuisancePopups(elearnView!.webContents);
-      // Populate course list
-      await refreshCourses();
+      runSession().catch((e) =>
+        log("error", `Session 執行失敗：${e instanceof Error ? e.message : String(e)}`),
+      );
     })
     .catch((err) => {
       log("error", `登入偵測失敗：${err}`);
     });
 }
 
-async function refreshCourses() {
+async function runSession() {
   if (!elearnView) return;
-  try {
-    const tracked = await discover(elearnView.webContents.session);
-    state.courses = tracked.map(trackedToCard);
-    state.stats.total = tracked.length;
-    state.stats.done = tracked.filter((t) => t.phase === "done").length;
-    state.stats.progressPct = tracked.length === 0 ? 0 :
-      Math.round((state.stats.done / tracked.length) * 100);
-    log("info", `掃描完成：共 ${tracked.length} 門已報名課程`);
+  const session = elearnView.webContents.session;
+
+  // Phase 1: Discovery
+  log("info", "掃描已報名課程...");
+  const tracked = await discover(session);
+  const active = tracked.filter((t) => t.course.isClassing);
+  state.courses = tracked.map(trackedToCard);
+  updateStats();
+  pushState();
+  log(
+    "info",
+    `共 ${tracked.length} 門（進行中 ${active.length} / 歷史 ${tracked.length - active.length}）`,
+  );
+
+  // Phase 2: Heartbeat (only classes still open + reading not yet done)
+  const needReading = active.filter((t) => t.phase === "reading");
+  if (needReading.length === 0) {
+    log("info", "沒有需要閱讀的課程，跳過心跳階段");
+  } else {
+    log(
+      "info",
+      `${needReading.length} 門課需要閱讀，並行 ${HEARTBEAT_PARALLEL} 條心跳，每 ${
+        HEARTBEAT_INTERVAL_MS / 1000
+      }s 一次`,
+    );
+    state.now.action = "heartbeat";
     pushState();
-  } catch (e) {
-    log("error", `掃描課程失敗：${e instanceof Error ? e.message : String(e)}`);
+
+    await runHeartbeatBatch(session, needReading, {
+      parallel: HEARTBEAT_PARALLEL,
+      intervalMs: HEARTBEAT_INTERVAL_MS,
+      jitterMs: HEARTBEAT_JITTER_MS,
+      graceSec: 120,
+      signal: abortSignal,
+      onProgress: (cid, stage, extra) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        if (stage === "open") {
+          log("info", `開始閱讀：${card.name}`);
+        } else if (stage === "done") {
+          log("info", `閱讀結束：${card.name} (${String((extra as { pings?: number })?.pings ?? 0)} pings)`);
+          card.phase = "exam";
+        } else if (stage === "error") {
+          log(
+            "warn",
+            `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`,
+          );
+        }
+        pushState();
+      },
+      onTick: (cid, pings, elapsedSec) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        card.readSec = Math.min(card.requiredSec, elapsedSec);
+        card.lastPingAt = Date.now();
+        state.now.courseId = cid;
+        state.now.courseName = card.name;
+        state.now.action = "heartbeat";
+        state.now.detail = `${formatHms(card.readSec)} / ${formatHms(card.requiredSec)} (${pings} pings)`;
+        pushState();
+        if (pings === 1 || pings % 30 === 0) {
+          log("info", `${card.name}: ${pings} ping, 累積 ${formatHms(elapsedSec)}`);
+        }
+      },
+    });
+    log("info", "所有閱讀心跳完成");
   }
+
+  // Phase 3: Exam / Survey / Rating / Reflection — TODO
+  log("info", "TODO: 測驗 / 問卷 / 評價 / 心得階段尚未實作");
+  state.status = "done";
+  state.now.action = "idle";
+  updateStats();
+  pushState();
 }
 
 function trackedToCard(t: Tracked): CourseCard {
@@ -125,6 +193,21 @@ function trackedToCard(t: Tracked): CourseCard {
     reflectionDone: false,
     lastPingAt: t.lastPingAt,
   };
+}
+
+function updateStats() {
+  state.stats.total = state.courses.length;
+  state.stats.done = state.courses.filter((c) => c.phase === "done").length;
+  state.stats.progressPct =
+    state.stats.total === 0 ? 0 : Math.round((state.stats.done / state.stats.total) * 100);
+}
+
+function formatHms(sec: number): string {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
 // ── IPC ────────────────────────────────────────────────────────
@@ -153,10 +236,12 @@ ipcMain.on(IPC.ACTION_RESUME, () => {
   pushState();
 });
 ipcMain.on(IPC.ACTION_ABORT, () => {
+  abortSignal.aborted = true;
   state.status = "aborted";
   log("info", "使用者中止");
   pushState();
-  app.quit();
+  // Small delay so SSE broadcast reaches renderer before quit
+  setTimeout(() => app.quit(), 300);
 });
 
 // expose bus to future modules

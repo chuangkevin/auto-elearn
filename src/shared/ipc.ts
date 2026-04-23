@@ -6,7 +6,9 @@
 export type AppStatus =
   | "boot"
   | "await_login"
-  | "running"
+  | "selecting"     // user browsing + ticking courses, before enrollment
+  | "enrolling"    // POSTing /enploy/<cid> for each selected course
+  | "running"       // heartbeat / exam / survey / rating / reflection pipeline
   | "paused"
   | "done"
   | "aborted";
