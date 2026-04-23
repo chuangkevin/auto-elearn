@@ -53,6 +53,8 @@ export interface AppState {
   status: AppStatus;
   pauseReason?: string;
   user?: { name: string };
+  /** cids the user ticked and asked us to process this run */
+  pipelineCids?: string[];
   now: {
     courseId?: string;
     courseName?: string;
@@ -66,6 +68,7 @@ export interface AppState {
   };
   courses: CourseCard[];
   logs: LogEntry[];
+  /** Stats are scoped to pipelineCids if set, else all of state.courses. */
   stats: {
     done: number;
     total: number;
@@ -89,6 +92,10 @@ export const IPC = {
   ACTION_BACK: "action:back",
   /** renderer → main: keyword search of the elearn catalogue */
   SEARCH_COURSES: "search:courses",
+  /** renderer → main: category-code search (codes like 540, 522, 267) */
+  SEARCH_BY_CODES: "search:codes",
+  /** renderer → main: unenrol a single course */
+  UNENROLL_COURSE: "course:unenroll",
   /** renderer → main: enrol `cids` then run pipeline */
   PIPELINE_START: "pipeline:start",
   /** renderer → main: re-scan dashboard so "繼續上次進度" is fresh */

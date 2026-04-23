@@ -13,6 +13,7 @@ import { createBus } from "./bus";
 import { attachElearnView, detectLogin, dismissNuisancePopups } from "./browser/view";
 import { discover } from "./course/discovery";
 import { enrollMany } from "./course/enrollment";
+import { unenrollCourse } from "./course/unenroll";
 import type { Tracked } from "./course/types";
 import {
   getSigningCourses,
@@ -158,8 +159,12 @@ function trackedToCard(t: Tracked): CourseCard {
 }
 
 function updateStats() {
-  state.stats.total = state.courses.length;
-  state.stats.done = state.courses.filter((c) => c.phase === "done").length;
+  const scopeCids = state.pipelineCids ? new Set(state.pipelineCids) : null;
+  const scope = scopeCids
+    ? state.courses.filter((c) => scopeCids.has(c.cid))
+    : state.courses;
+  state.stats.total = scope.length;
+  state.stats.done = scope.filter((c) => c.phase === "done").length;
   state.stats.progressPct =
     state.stats.total === 0 ? 0 : Math.round((state.stats.done / state.stats.total) * 100);
 }
@@ -177,6 +182,11 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   if (!elearnView) return;
   const session = elearnView.webContents.session;
   abortSignal.aborted = false;
+
+  // Scope the dashboard + stats to what the user actually asked for
+  state.pipelineCids = [...cids];
+  updateStats();
+  pushState();
 
   // 1. Enrol any not-yet-enrolled cids
   const enrolled = new Set(state.courses.map((c) => c.cid));
@@ -349,6 +359,7 @@ ipcMain.on(IPC.ACTION_BACK, async () => {
   state.status = "selecting";
   state.pauseReason = undefined;
   state.now = { action: "idle" };
+  state.pipelineCids = undefined;
   log("info", "返回選課畫面");
   await refreshCourses();
   pushState();
@@ -367,6 +378,56 @@ ipcMain.handle(IPC.SEARCH_COURSES, async (_evt, keyword: string) => {
     log("error", `搜尋失敗：${e instanceof Error ? e.message : String(e)}`);
     return [] as CourseCandidate[];
   }
+});
+
+ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
+  if (!elearnView) return [] as CourseCandidate[];
+  const session = elearnView.webContents.session;
+  const clean = Array.from(new Set((codes || []).map((c) => String(c).trim()).filter(Boolean)));
+  if (clean.length === 0) return [] as CourseCandidate[];
+  log("info", `用代碼搜尋：${clean.join(", ")}`);
+  const byCid = new Map<string, Course>();
+  const mineCids = new Set(state.courses.map((c) => c.cid));
+  for (const code of clean) {
+    if (abortSignal.aborted) break;
+    try {
+      await primeExplorer(session, code);
+      const results = await searchCourses(session, code, "", 50);
+      for (const r of results) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
+    } catch (e) {
+      log("warn", `代碼 ${code} 查詢失敗：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  const out: CourseCandidate[] = Array.from(byCid.values())
+    .filter((c) => c.isClassing)
+    .map((c) => ({
+      cid: c.cid,
+      caption: c.caption,
+      certification_hours: c.certification_hours,
+      fromSchoolName: c.fromSchoolName,
+      studentTargetTypeCaption: c.studentTargetTypeCaption,
+      category_full_path: c.category_full_path,
+      classPeriod: c.classPeriod,
+      isClassing: !!c.isClassing,
+      already_enrolled: mineCids.has(c.cid),
+    }))
+    .sort((a, b) => a.certification_hours - b.certification_hours);
+  log("info", `代碼搜尋共 ${out.length} 筆`);
+  return out;
+});
+
+ipcMain.handle(IPC.UNENROLL_COURSE, async (_evt, cid: string) => {
+  const card = state.courses.find((c) => c.cid === cid);
+  const name = card?.name ?? cid;
+  log("info", `嘗試退選：${name}`);
+  const res = await unenrollCourse(cid);
+  if (res.ok) {
+    log("info", `退選完成：${name}`);
+    await refreshCourses();
+  } else {
+    log("warn", `退選失敗 ${name}：${res.error ?? "unknown"}`);
+  }
+  return res;
 });
 
 ipcMain.on(IPC.PIPELINE_START, (_evt, cids: string[]) => {

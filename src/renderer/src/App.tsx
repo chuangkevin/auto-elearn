@@ -14,9 +14,36 @@ declare global {
       backToSelect: () => void;
       refreshCourses: () => void;
       searchCourses: (keyword: string) => Promise<CourseCandidate[]>;
+      searchByCodes: (codes: string[]) => Promise<CourseCandidate[]>;
       startPipeline: (cids: string[]) => void;
+      unenrollCourse: (cid: string) => Promise<{ ok: boolean; error?: string }>;
     };
   }
+}
+
+/**
+ * Parse a free-form code string from the user.
+ * Accepts: "540, 541-546, 522, 539" → ["540","541","542","543","544","545","546","522","539"]
+ */
+function parseCodeList(raw: string): string[] {
+  const tokens = raw
+    .split(/[\s,、，;；]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const out: string[] = [];
+  for (const t of tokens) {
+    const range = t.match(/^(\d+)[-—~至](\d+)$/);
+    if (range) {
+      const a = parseInt(range[1], 10);
+      const b = parseInt(range[2], 10);
+      if (Number.isFinite(a) && Number.isFinite(b) && b >= a && b - a < 200) {
+        for (let i = a; i <= b; i++) out.push(String(i));
+        continue;
+      }
+    }
+    if (/^\d+$/.test(t)) out.push(t);
+  }
+  return Array.from(new Set(out));
 }
 
 const DEFAULT_BOTTOM_RATIO = 0.42;
@@ -153,17 +180,34 @@ function AwaitingLogin() {
 }
 
 // ── Selecting ────────────────────────────────────────────────
+type SearchMode = "keyword" | "codes";
+
 function Selecting({ state }: { state: AppState }) {
+  const [mode, setMode] = useState<SearchMode>("keyword");
   const [keyword, setKeyword] = useState("");
+  const [codes, setCodes] = useState("");
   const [results, setResults] = useState<CourseCandidate[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [onlyAnyone, setOnlyAnyone] = useState(true);
   const [hideEnrolled, setHideEnrolled] = useState(true);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [unenrolBusy, setUnenrolBusy] = useState<Set<string>>(new Set());
 
+  // "繼續上次進度" = courses the user is actively processing; exclude both
+  // 'done' and 'pending'. The latter are ghost records returned by
+  // getSigningCourses where isReadtimeValidCaption="未報名" (agency-assigned
+  // future offerings the user hasn't actually registered for yet) — showing
+  // those here confuses the user about what's in-progress.
+  const IN_PROGRESS_PHASES = new Set([
+    "enrolled",
+    "reading",
+    "exam",
+    "survey",
+    "rating",
+    "reflection",
+  ]);
   const pending = useMemo(
-    () => state.courses.filter((c) => c.phase !== "done"),
+    () => state.courses.filter((c) => IN_PROGRESS_PHASES.has(c.phase)),
     [state.courses],
   );
 
@@ -175,6 +219,17 @@ function Selecting({ state }: { state: AppState }) {
     didInit.current = true;
     setSelected(new Set(pending.map((c) => c.cid)));
   }, [pending]);
+
+  function togglePendingAll() {
+    const allCids = pending.map((c) => c.cid);
+    const allChecked = allCids.length > 0 && allCids.every((c) => selected.has(c));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allChecked) allCids.forEach((c) => next.delete(c));
+      else allCids.forEach((c) => next.add(c));
+      return next;
+    });
+  }
 
   const visibleResults = useMemo(() => {
     return results.filter((r) => {
@@ -199,14 +254,40 @@ function Selecting({ state }: { state: AppState }) {
     return h;
   }, [selected, pending, results]);
 
-  async function doSearch(k?: string) {
-    const q = (k ?? keyword).trim();
+  async function doSearch() {
     setSearching(true);
     try {
-      const res = await window.api.searchCourses(q);
-      setResults(res);
+      if (mode === "codes") {
+        const list = parseCodeList(codes);
+        if (list.length === 0) {
+          setResults([]);
+        } else {
+          const res = await window.api.searchByCodes(list);
+          setResults(res);
+        }
+      } else {
+        const res = await window.api.searchCourses(keyword.trim());
+        setResults(res);
+      }
     } finally {
       setSearching(false);
+    }
+  }
+
+  async function unenrol(cid: string) {
+    if (unenrolBusy.has(cid)) return;
+    setUnenrolBusy((prev) => new Set(prev).add(cid));
+    try {
+      const res = await window.api.unenrollCourse(cid);
+      if (!res.ok) {
+        alert(`退選失敗：${res.error ?? "未知原因"}`);
+      }
+    } finally {
+      setUnenrolBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(cid);
+        return next;
+      });
     }
   }
 
@@ -254,9 +335,19 @@ function Selecting({ state }: { state: AppState }) {
 
       {/* Section: 繼續上次進度 */}
       <section>
-        <h2 className="text-sm font-semibold text-slate-300 mb-2">
-          📂 繼續上次進度（已報名但未完成 {pending.length} 門）
-        </h2>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-slate-300">
+            📂 繼續上次進度（已報名但未完成 {pending.length} 門）
+          </h2>
+          {pending.length > 0 && (
+            <button
+              className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-xs"
+              onClick={togglePendingAll}
+            >
+              全選 / 全不選
+            </button>
+          )}
+        </div>
         {pending.length === 0 ? (
           <p className="text-slate-500 text-sm">目前沒有未完成課程</p>
         ) : (
@@ -271,6 +362,10 @@ function Selecting({ state }: { state: AppState }) {
                 checked={selected.has(c.cid)}
                 onToggle={() => toggle(c.cid)}
                 badge="已報名"
+                onUnenroll={() => {
+                  if (confirm(`確定要退選：${c.name}?`)) unenrol(c.cid);
+                }}
+                unenrollBusy={unenrolBusy.has(c.cid)}
               />
             ))}
           </div>
@@ -280,15 +375,42 @@ function Selecting({ state }: { state: AppState }) {
       {/* Section: 搜尋新課 */}
       <section>
         <h2 className="text-sm font-semibold text-slate-300 mb-2">🔍 搜尋新課</h2>
-        <div className="flex gap-2 mb-2">
-          <input
-            ref={inputRef}
-            className="flex-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-            placeholder="輸入關鍵字（例：資安、AI、個資、性別、人權、環境、國防）"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && doSearch()}
-          />
+        <div className="flex gap-2 mb-2 items-center">
+          <div className="inline-flex rounded border border-slate-700 bg-slate-800 p-0.5 text-xs">
+            <button
+              className={`px-2 py-1 rounded ${
+                mode === "keyword" ? "bg-emerald-600 text-white" : "text-slate-300 hover:bg-slate-700"
+              }`}
+              onClick={() => setMode("keyword")}
+            >
+              關鍵字
+            </button>
+            <button
+              className={`px-2 py-1 rounded ${
+                mode === "codes" ? "bg-emerald-600 text-white" : "text-slate-300 hover:bg-slate-700"
+              }`}
+              onClick={() => setMode("codes")}
+            >
+              類別代碼
+            </button>
+          </div>
+          {mode === "keyword" ? (
+            <input
+              className="flex-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
+              placeholder="輸入關鍵字（例：資安、AI、個資、性別、人權、環境、國防）"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && doSearch()}
+            />
+          ) : (
+            <input
+              className="flex-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 font-mono"
+              placeholder="輸入代碼：540, 541-546, 522, 539"
+              value={codes}
+              onChange={(e) => setCodes(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && doSearch()}
+            />
+          )}
           <button
             className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40"
             onClick={() => doSearch()}
@@ -297,6 +419,11 @@ function Selecting({ state }: { state: AppState }) {
             {searching ? "搜尋中..." : "搜尋"}
           </button>
         </div>
+        {mode === "codes" && (
+          <div className="text-xs text-slate-400 mb-2">
+            支援逗號、空白、破折號範圍（如：540, 541-546）
+          </div>
+        )}
         <div className="flex items-center gap-4 text-xs text-slate-300 mb-2">
           <label className="flex items-center gap-1 cursor-pointer">
             <input
@@ -384,6 +511,8 @@ function CourseRow({
   onToggle,
   badge,
   onPreview,
+  onUnenroll,
+  unenrollBusy,
 }: {
   cid: string;
   caption: string;
@@ -393,6 +522,8 @@ function CourseRow({
   onToggle: () => void;
   badge?: string;
   onPreview?: () => void;
+  onUnenroll?: () => void;
+  unenrollBusy?: boolean;
 }) {
   return (
     <label
@@ -430,6 +561,19 @@ function CourseRow({
           預覽
         </button>
       )}
+      {onUnenroll && (
+        <button
+          className="text-xs text-slate-400 hover:text-red-400 px-1 disabled:opacity-40"
+          onClick={(e) => {
+            e.preventDefault();
+            onUnenroll();
+          }}
+          disabled={unenrollBusy}
+          title="退選這門課"
+        >
+          {unenrollBusy ? "退選中..." : "退選"}
+        </button>
+      )}
       <span className="text-[10px] text-slate-600 ml-1">#{cid}</span>
     </label>
   );
@@ -460,7 +604,14 @@ function phaseLabel(p: string): string {
 
 // ── Monitor ──────────────────────────────────────────────────
 function Monitor({ state }: { state: AppState }) {
-  const running = state.courses.filter((c) => c.phase !== "done");
+  // Only show the courses the user actually picked for this run.
+  const scopeCids = state.pipelineCids
+    ? new Set(state.pipelineCids)
+    : null;
+  const scope = scopeCids
+    ? state.courses.filter((c) => scopeCids.has(c.cid))
+    : state.courses;
+  const running = scope.filter((c) => c.phase !== "done");
   return (
     <div className="p-6 space-y-4 text-slate-100">
       <header className="flex items-center justify-between">
@@ -537,7 +688,7 @@ function Monitor({ state }: { state: AppState }) {
 
       <section>
         <h2 className="text-sm font-semibold mb-2 text-slate-300">
-          📋 執行中課程 ({running.length} / {state.courses.length} 總計)
+          📋 執行中課程 ({running.length} / {scope.length} 本次)
         </h2>
         <div className="space-y-1 max-h-48 overflow-auto bg-slate-900/40 rounded p-2">
           {running.map((c) => (

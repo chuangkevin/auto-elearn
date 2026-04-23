@@ -22,7 +22,11 @@ const api = {
   refreshCourses: () => ipcRenderer.send(IPC.REFRESH_COURSES),
   searchCourses: (keyword: string): Promise<CourseCandidate[]> =>
     ipcRenderer.invoke(IPC.SEARCH_COURSES, keyword),
+  searchByCodes: (codes: string[]): Promise<CourseCandidate[]> =>
+    ipcRenderer.invoke(IPC.SEARCH_BY_CODES, codes),
   startPipeline: (cids: string[]) => ipcRenderer.send(IPC.PIPELINE_START, cids),
+  unenrollCourse: (cid: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.UNENROLL_COURSE, cid),
 };
 
 contextBridge.exposeInMainWorld("api", api);
