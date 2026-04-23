@@ -86,7 +86,29 @@ export const IPC = {
   ACTION_PAUSE: "action:pause",
   ACTION_RESUME: "action:resume",
   ACTION_ABORT: "action:abort",
+  ACTION_BACK: "action:back",
+  /** renderer → main: keyword search of the elearn catalogue */
+  SEARCH_COURSES: "search:courses",
+  /** renderer → main: enrol `cids` then run pipeline */
+  PIPELINE_START: "pipeline:start",
+  /** renderer → main: re-scan dashboard so "繼續上次進度" is fresh */
+  REFRESH_COURSES: "courses:refresh",
+  /** renderer → main: navigate the embedded BrowserView */
+  NAVIGATE_VIEW: "view:navigate",
 } as const;
+
+export interface CourseCandidate {
+  cid: string;
+  caption: string;
+  certification_hours: number;
+  fromSchoolName?: string;
+  studentTargetTypeCaption?: string;
+  category_full_path?: string;
+  classPeriod?: string;
+  isClassing: boolean;
+  /** true if the user already signed up previously */
+  already_enrolled: boolean;
+}
 
 export interface ViewBounds {
   x: number;

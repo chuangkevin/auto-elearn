@@ -2,16 +2,45 @@ import { app, BrowserWindow, BrowserView, ipcMain, shell } from "electron";
 import { join } from "node:path";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
-import { IPC, type AppState, type ViewBounds, type CourseCard } from "../shared/ipc";
+import {
+  IPC,
+  type AppState,
+  type CourseCandidate,
+  type CourseCard,
+  type ViewBounds,
+} from "../shared/ipc";
 import { createBus } from "./bus";
 import { attachElearnView, detectLogin, dismissNuisancePopups } from "./browser/view";
 import { discover } from "./course/discovery";
+import { enrollMany } from "./course/enrollment";
 import type { Tracked } from "./course/types";
+import {
+  getSigningCourses,
+  primeExplorer,
+  searchCourses,
+  type Course,
+} from "./http/elearn";
 import { runHeartbeatBatch } from "./heartbeat/engine";
 
 const HEARTBEAT_PARALLEL = 8;
 const HEARTBEAT_INTERVAL_MS = 5000;
 const HEARTBEAT_JITTER_MS = 1000;
+const ENROLL_DELAY_MS = 1000;
+
+/** Known category IDs from site exploration — used for keyword search fan-out. */
+const KNOWN_CATEGORIES = [
+  "10040389", // 公務人員 10 小時課程專區
+  "10036100", // 人工智慧
+  "10027390", // 資訊安全
+  "10027389", // 淨零永續
+  "10027913", // 外購課程
+  "10007170", // 科技素養 MRT
+  "10011548", // 媒體識讀
+  "10007169", // 家庭教育
+  "10014384", // 新冠肺炎
+  "10023342", // 全齡樂學
+];
+
 const abortSignal = { aborted: false };
 
 const HOMEPAGE = "https://elearn.hrd.gov.tw/mooc/index.php";
@@ -35,7 +64,6 @@ function pushState() {
 
 function log(level: "info" | "warn" | "error", msg: string) {
   state.logs.push({ ts: Date.now(), level, msg });
-  // keep last 200
   if (state.logs.length > 200) state.logs.splice(0, state.logs.length - 200);
   pushState();
   // eslint-disable-next-line no-console
@@ -60,10 +88,7 @@ function createWindow() {
     },
   });
 
-  mainWindow.on("ready-to-show", () => {
-    mainWindow?.show();
-  });
-
+  mainWindow.on("ready-to-show", () => mainWindow?.show());
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
     return { action: "deny" };
@@ -75,109 +100,46 @@ function createWindow() {
     mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
-  // Attach elearn BrowserView to the bottom half
   elearnView = attachElearnView(mainWindow, HOMEPAGE);
   const [winW, winH] = mainWindow.getContentSize();
-  elearnView.setBounds({ x: 0, y: Math.floor(winH * 0.45), width: winW, height: Math.ceil(winH * 0.55) });
+  elearnView.setBounds({
+    x: 0,
+    y: Math.floor(winH * 0.45),
+    width: winW,
+    height: Math.ceil(winH * 0.55),
+  });
   elearnView.setAutoResize({ width: true, height: false });
 
-  // Kick off login detection
   state.status = "await_login";
   log("info", "等待使用者登入 e 等公務園");
   pushState();
 
   detectLogin(elearnView.webContents)
     .then(async (user) => {
-      state.status = "running";
       state.user = { name: user };
       log("info", `偵測到登入：${user}`);
-      pushState();
       await dismissNuisancePopups(elearnView!.webContents);
-      runSession().catch((e) =>
-        log("error", `Session 執行失敗：${e instanceof Error ? e.message : String(e)}`),
-      );
+      await refreshCourses();
+      state.status = "selecting";
+      log("info", "請在上方搜尋 / 勾選要刷的課程，按「開始」即可");
+      pushState();
     })
-    .catch((err) => {
-      log("error", `登入偵測失敗：${err}`);
-    });
+    .catch((err) => log("error", `登入偵測失敗：${err}`));
 }
 
-async function runSession() {
+// ── Discovery helpers ─────────────────────────────────────────
+async function refreshCourses(): Promise<void> {
   if (!elearnView) return;
-  const session = elearnView.webContents.session;
-
-  // Phase 1: Discovery
-  log("info", "掃描已報名課程...");
-  const tracked = await discover(session);
-  const active = tracked.filter((t) => t.course.isClassing);
-  state.courses = tracked.map(trackedToCard);
-  updateStats();
-  pushState();
-  log(
-    "info",
-    `共 ${tracked.length} 門（進行中 ${active.length} / 歷史 ${tracked.length - active.length}）`,
-  );
-
-  // Phase 2: Heartbeat (only classes still open + reading not yet done)
-  const needReading = active.filter((t) => t.phase === "reading");
-  if (needReading.length === 0) {
-    log("info", "沒有需要閱讀的課程，跳過心跳階段");
-  } else {
-    log(
-      "info",
-      `${needReading.length} 門課需要閱讀，並行 ${HEARTBEAT_PARALLEL} 條心跳，每 ${
-        HEARTBEAT_INTERVAL_MS / 1000
-      }s 一次`,
-    );
-    state.now.action = "heartbeat";
+  try {
+    const tracked = await discover(elearnView.webContents.session);
+    state.courses = tracked.map(trackedToCard);
+    updateStats();
     pushState();
-
-    await runHeartbeatBatch(session, needReading, {
-      parallel: HEARTBEAT_PARALLEL,
-      intervalMs: HEARTBEAT_INTERVAL_MS,
-      jitterMs: HEARTBEAT_JITTER_MS,
-      graceSec: 120,
-      signal: abortSignal,
-      onProgress: (cid, stage, extra) => {
-        const card = state.courses.find((c) => c.cid === cid);
-        if (!card) return;
-        if (stage === "open") {
-          log("info", `開始閱讀：${card.name}`);
-        } else if (stage === "done") {
-          log("info", `閱讀結束：${card.name} (${String((extra as { pings?: number })?.pings ?? 0)} pings)`);
-          card.phase = "exam";
-        } else if (stage === "error") {
-          log(
-            "warn",
-            `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`,
-          );
-        }
-        pushState();
-      },
-      onTick: (cid, pings, elapsedSec) => {
-        const card = state.courses.find((c) => c.cid === cid);
-        if (!card) return;
-        card.readSec = Math.min(card.requiredSec, elapsedSec);
-        card.lastPingAt = Date.now();
-        state.now.courseId = cid;
-        state.now.courseName = card.name;
-        state.now.action = "heartbeat";
-        state.now.detail = `${formatHms(card.readSec)} / ${formatHms(card.requiredSec)} (${pings} pings)`;
-        pushState();
-        if (pings === 1 || pings % 30 === 0) {
-          log("info", `${card.name}: ${pings} ping, 累積 ${formatHms(elapsedSec)}`);
-        }
-      },
-    });
-    log("info", "所有閱讀心跳完成");
+    const active = tracked.filter((t) => t.course.isClassing).length;
+    log("info", `掃描完成：已報名 ${tracked.length} 門（進行中 ${active}）`);
+  } catch (e) {
+    log("error", `掃描失敗：${e instanceof Error ? e.message : String(e)}`);
   }
-
-  // Phase 3: Exam / Survey / Rating / Reflection — TODO
-  log("info", "TODO: 測驗 / 問卷 / 評價 / 心得階段尚未實作");
-  state.status = "done";
-  state.now.action = "idle";
-  updateStats();
-  pushState();
 }
 
 function trackedToCard(t: Tracked): CourseCard {
@@ -210,6 +172,138 @@ function formatHms(sec: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
+// ── Pipeline ──────────────────────────────────────────────────
+async function runPipelineFor(cids: string[]): Promise<void> {
+  if (!elearnView) return;
+  const session = elearnView.webContents.session;
+  abortSignal.aborted = false;
+
+  // 1. Enrol any not-yet-enrolled cids
+  const enrolled = new Set(state.courses.map((c) => c.cid));
+  const toEnrol = cids.filter((c) => !enrolled.has(c));
+  if (toEnrol.length > 0) {
+    state.status = "enrolling";
+    state.now.action = "enroll";
+    state.now.detail = `${toEnrol.length} 門課待報名`;
+    pushState();
+    log("info", `開始報名 ${toEnrol.length} 門新課程...`);
+    const results = await enrollMany(session, toEnrol, ENROLL_DELAY_MS);
+    const ok = results.filter((r) => r.ok).map((r) => r.cid);
+    const bad = results.filter((r) => !r.ok);
+    log("info", `報名完成：成功 ${ok.length} / 失敗 ${bad.length}`);
+    for (const b of bad) {
+      log("warn", `報名失敗 cid=${b.cid} status=${b.status} ${b.errorMsg ?? ""}`);
+    }
+    await refreshCourses();
+  }
+
+  // 2. Heartbeat for courses that need reading (user-ticked, currently open)
+  state.status = "running";
+  const tracked = await discover(session);
+  const selected = new Set(cids);
+  const needReading = tracked.filter(
+    (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
+  );
+
+  if (needReading.length === 0) {
+    log("info", "沒有需要閱讀的課程");
+  } else {
+    log(
+      "info",
+      `${needReading.length} 門課開始閱讀（並行 ${HEARTBEAT_PARALLEL}，每 ${
+        HEARTBEAT_INTERVAL_MS / 1000
+      }s 心跳）`,
+    );
+    state.now.action = "heartbeat";
+    pushState();
+
+    await runHeartbeatBatch(session, needReading, {
+      parallel: HEARTBEAT_PARALLEL,
+      intervalMs: HEARTBEAT_INTERVAL_MS,
+      jitterMs: HEARTBEAT_JITTER_MS,
+      graceSec: 120,
+      signal: abortSignal,
+      onProgress: (cid, stage, extra) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        if (stage === "open") {
+          log("info", `開始閱讀：${card.name}`);
+        } else if (stage === "done") {
+          const pings = (extra as { pings?: number })?.pings ?? 0;
+          log("info", `閱讀結束：${card.name} (${pings} pings)`);
+          card.phase = "exam";
+        } else if (stage === "error") {
+          log("warn", `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`);
+        }
+        pushState();
+      },
+      onTick: (cid, pings, elapsedSec) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        card.readSec = Math.min(card.requiredSec, elapsedSec);
+        card.lastPingAt = Date.now();
+        state.now.courseId = cid;
+        state.now.courseName = card.name;
+        state.now.action = "heartbeat";
+        state.now.detail = `${formatHms(card.readSec)} / ${formatHms(card.requiredSec)} (${pings} pings)`;
+        pushState();
+        if (pings === 1 || pings % 30 === 0) {
+          log("info", `${card.name}: ${pings} ping, 累積 ${formatHms(elapsedSec)}`);
+        }
+      },
+    });
+  }
+
+  // TODO: exam / survey / rating / reflection phases
+  log("info", "TODO: 測驗 / 問卷 / 評價 / 心得 — 尚未實作");
+  state.status = "done";
+  state.now.action = "idle";
+  state.now.courseId = undefined;
+  state.now.courseName = undefined;
+  state.now.detail = undefined;
+  await refreshCourses();
+  updateStats();
+  pushState();
+}
+
+// ── Search helper ─────────────────────────────────────────────
+async function keywordSearch(keyword: string): Promise<CourseCandidate[]> {
+  if (!elearnView) return [];
+  const session = elearnView.webContents.session;
+  const trimmed = keyword.trim();
+  const allByCid = new Map<string, Course>();
+  const mineCids = new Set(state.courses.map((c) => c.cid));
+
+  for (const cat of KNOWN_CATEGORIES) {
+    if (abortSignal.aborted) break;
+    try {
+      await primeExplorer(session, cat);
+      const results = await searchCourses(session, cat, trimmed, 50);
+      for (const r of results) {
+        if (!allByCid.has(r.cid)) allByCid.set(r.cid, r);
+      }
+    } catch (e) {
+      // Skip this category; search is best-effort
+      log("warn", `搜尋分類 ${cat} 失敗：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  return Array.from(allByCid.values())
+    .filter((c) => c.isClassing)
+    .map<CourseCandidate>((c) => ({
+      cid: c.cid,
+      caption: c.caption,
+      certification_hours: c.certification_hours,
+      fromSchoolName: c.fromSchoolName,
+      studentTargetTypeCaption: c.studentTargetTypeCaption,
+      category_full_path: c.category_full_path,
+      classPeriod: c.classPeriod,
+      isClassing: !!c.isClassing,
+      already_enrolled: mineCids.has(c.cid),
+    }))
+    .sort((a, b) => a.certification_hours - b.certification_hours);
+}
+
 // ── IPC ────────────────────────────────────────────────────────
 ipcMain.handle(IPC.STATE_GET, () => state);
 
@@ -223,28 +317,71 @@ ipcMain.on(IPC.VIEW_BOUNDS, (_evt, b: ViewBounds) => {
   elearnView.setBounds({ x, y, width, height });
 });
 
+ipcMain.on(IPC.NAVIGATE_VIEW, (_evt, url: string) => {
+  if (!elearnView) return;
+  elearnView.webContents.loadURL(url).catch(() => void 0);
+});
+
 ipcMain.on(IPC.ACTION_PAUSE, () => {
   state.status = "paused";
   state.pauseReason = "manual";
   log("info", "使用者手動暫停");
   pushState();
 });
+
 ipcMain.on(IPC.ACTION_RESUME, () => {
   state.status = "running";
   state.pauseReason = undefined;
   log("info", "使用者恢復");
   pushState();
 });
+
 ipcMain.on(IPC.ACTION_ABORT, () => {
   abortSignal.aborted = true;
   state.status = "aborted";
   log("info", "使用者中止");
   pushState();
-  // Small delay so SSE broadcast reaches renderer before quit
   setTimeout(() => app.quit(), 300);
 });
 
-// expose bus to future modules
+ipcMain.on(IPC.ACTION_BACK, async () => {
+  abortSignal.aborted = true;
+  state.status = "selecting";
+  state.pauseReason = undefined;
+  state.now = { action: "idle" };
+  log("info", "返回選課畫面");
+  await refreshCourses();
+  pushState();
+});
+
+ipcMain.on(IPC.REFRESH_COURSES, () => {
+  refreshCourses().catch(() => void 0);
+});
+
+ipcMain.handle(IPC.SEARCH_COURSES, async (_evt, keyword: string) => {
+  try {
+    const results = await keywordSearch(keyword);
+    log("info", `搜尋「${keyword || "(全部)"}」: ${results.length} 筆`);
+    return results;
+  } catch (e) {
+    log("error", `搜尋失敗：${e instanceof Error ? e.message : String(e)}`);
+    return [] as CourseCandidate[];
+  }
+});
+
+ipcMain.on(IPC.PIPELINE_START, (_evt, cids: string[]) => {
+  if (!Array.isArray(cids) || cids.length === 0) {
+    log("warn", "沒有選取任何課程");
+    return;
+  }
+  // Capture unique cids only
+  const unique = Array.from(new Set(cids.filter((c) => typeof c === "string" && c)));
+  log("info", `啟動 pipeline：${unique.length} 門課`);
+  runPipelineFor(unique).catch((e) =>
+    log("error", `Pipeline 執行失敗：${e instanceof Error ? e.message : String(e)}`),
+  );
+});
+
 export { bus, state, log, pushState };
 
 // ── App lifecycle ─────────────────────────────────────────────
