@@ -46,10 +46,20 @@ function parseCodeList(raw: string): string[] {
   return Array.from(new Set(out));
 }
 
-const DEFAULT_BOTTOM_RATIO = 0.42;
-const MIN_BOTTOM = 0.15;
-const MAX_BOTTOM = 0.85;
+const SELECTING_BOTTOM_RATIO = 0.42;  // split when the user is browsing / picking
+const RUNNING_BOTTOM_RATIO = 0.15;    // minimal while the bot is ticking
+const COLLAPSED_BOTTOM_PX = 28;       // collapsed "peek" height
+const MIN_BOTTOM = 0.10;
+const MAX_BOTTOM = 0.90;
 const DIVIDER_PX = 6;
+
+const STATES_THAT_DONT_NEED_BROWSER: Array<string> = [
+  "enrolling",
+  "running",
+  "paused",
+  "done",
+  "aborted",
+];
 
 function useAppState(): AppState | null {
   const [s, setS] = useState<AppState | null>(null);
@@ -76,8 +86,28 @@ function pushBrowserViewBounds() {
 export default function App() {
   const state = useAppState();
   const topRef = useRef<HTMLDivElement>(null);
-  const [bottomRatio, setBottomRatio] = useState(DEFAULT_BOTTOM_RATIO);
+  const [bottomRatio, setBottomRatio] = useState(SELECTING_BOTTOM_RATIO);
+  const [collapsed, setCollapsed] = useState(false);
+  const userAdjustedRatio = useRef(false);
+  const prevStatus = useRef<string | null>(null);
   const dragging = useRef(false);
+
+  // State-aware default: shrink the BrowserView during Monitor, unless the
+  // user has explicitly resized the divider this session.
+  useEffect(() => {
+    if (!state) return;
+    const s = state.status;
+    if (prevStatus.current !== s) {
+      prevStatus.current = s;
+      if (!userAdjustedRatio.current) {
+        if (STATES_THAT_DONT_NEED_BROWSER.includes(s)) {
+          setBottomRatio(RUNNING_BOTTOM_RATIO);
+        } else {
+          setBottomRatio(SELECTING_BOTTOM_RATIO);
+        }
+      }
+    }
+  }, [state]);
 
   useEffect(() => {
     const ro = new ResizeObserver(() => pushBrowserViewBounds());
@@ -92,7 +122,7 @@ export default function App() {
 
   useEffect(() => {
     pushBrowserViewBounds();
-  }, [bottomRatio]);
+  }, [bottomRatio, collapsed]);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
@@ -100,6 +130,8 @@ export default function App() {
       const h = window.innerHeight;
       const r = (h - e.clientY) / h;
       setBottomRatio(Math.min(MAX_BOTTOM, Math.max(MIN_BOTTOM, r)));
+      userAdjustedRatio.current = true;
+      if (collapsed) setCollapsed(false);
     }
     function onUp() {
       dragging.current = false;
@@ -112,7 +144,17 @@ export default function App() {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, []);
+  }, [collapsed]);
+
+  function toggleCollapse() {
+    setCollapsed((c) => {
+      if (c) {
+        // expanding again — respect current ratio
+        return false;
+      }
+      return true;
+    });
+  }
 
   if (!state) {
     return (
@@ -122,29 +164,56 @@ export default function App() {
     );
   }
 
+  const topFlex = collapsed ? `1 1 auto` : `1 1 ${(1 - bottomRatio) * 100}%`;
+  const bottomFlex = collapsed
+    ? `0 0 ${COLLAPSED_BOTTOM_PX}px`
+    : `1 1 ${bottomRatio * 100}%`;
+
   return (
-    <div className="h-screen flex flex-col">
+    <div className="h-screen flex flex-col relative">
       <div
         ref={topRef}
         className="overflow-auto"
-        style={{ flex: `1 1 ${(1 - bottomRatio) * 100}%`, minHeight: 0 }}
+        style={{ flex: topFlex, minHeight: 0 }}
       >
         <TopPanel state={state} />
       </div>
       <div
-        onMouseDown={() => {
+        onMouseDown={(e) => {
+          if (collapsed) return;
+          e.preventDefault();
           dragging.current = true;
           document.body.style.cursor = "row-resize";
           document.body.style.userSelect = "none";
         }}
-        className="bg-slate-700 hover:bg-emerald-500 transition-colors"
-        style={{ height: DIVIDER_PX, cursor: "row-resize", flex: `0 0 ${DIVIDER_PX}px` }}
-        title="拖曳調整上下分隔"
-      />
+        className={`${
+          collapsed ? "bg-slate-800" : "bg-slate-700 hover:bg-emerald-500"
+        } transition-colors flex items-center justify-center text-xs text-slate-400 select-none`}
+        style={{
+          height: collapsed ? 24 : DIVIDER_PX,
+          cursor: collapsed ? "default" : "row-resize",
+          flex: `0 0 ${collapsed ? 24 : DIVIDER_PX}px`,
+        }}
+        title={collapsed ? "瀏覽器已收起" : "拖曳調整上下分隔"}
+      >
+        {collapsed && <span>━━ 瀏覽器已收起 ━━</span>}
+      </div>
       <div
         id="browserview-mount"
-        style={{ flex: `1 1 ${bottomRatio * 100}%`, background: "#000", minHeight: 0 }}
+        style={{
+          flex: bottomFlex,
+          background: "#000",
+          minHeight: 0,
+        }}
       />
+      {/* Floating collapse toggle, bottom-right of the top panel area */}
+      <button
+        className="absolute right-4 top-3 z-50 px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur"
+        onClick={toggleCollapse}
+        title={collapsed ? "重新展開 e 等公務園瀏覽器" : "收起 e 等公務園瀏覽器，Monitor 吃滿畫面"}
+      >
+        {collapsed ? "🖥 展開瀏覽器" : "📴 收起瀏覽器"}
+      </button>
     </div>
   );
 }

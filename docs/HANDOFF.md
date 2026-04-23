@@ -25,36 +25,44 @@ Typecheck both sides: `npm run typecheck`.
 
 ---
 
-## 2. Current state — 2026-04-23
+## 2. Current state — 2026-04-23 (updated)
 
 ### ✅ Done
 
-- Electron scaffold (electron-vite + React + Tailwind + TypeScript)
-- Single-window layout with **draggable horizontal divider** between React dashboard (top) and embedded `BrowserView` loaded with elearn site (bottom).
-- Login detection by polling the DOM for `a[href="/mooc/user/learn_dashboard.php"]` containing `個人專區`; extracts the user's Chinese name from any of three regex patterns.
-- Auto-dismiss for the daily-summary fancybox popup and `game_card` modal (re-runs on every `did-finish-load`).
-- `undici` HTTP client that injects BrowserView session cookies, so we can call elearn APIs directly from the main process without opening a visible tab.
-- elearn API wrappers in `src/main/http/elearn.ts`:
-  - `getSigningCourses()` — my enrolled courses (JSON list of dicts keyed `'<sid><cid>'`)
-  - `primeExplorer(categoryId)` + `searchCourses(categoryId, keyword)` — site-wide search
-  - `enrollCourse(cid)` — `GET /enploy/<cid>` (same trick the original `E等閱讀家` used)
-  - `heartbeat(pTicket, encCid)` — single ping to `course_record.php?actype=end`
-- Course discovery that classifies each course into phase (`pending` / `reading` / `exam` / `survey` / `rating` / `done`) using the JSON's `isReadDones` / `isExamDones` / `isSurveyDones` / `exam_exists` flags.
-- **Hidden-window ticket extractor** (`src/main/heartbeat/reader.ts`): opens an invisible `BrowserWindow`, navigates to `/info/<cid>`, clicks `button.btnAction`, auto-dismisses fancybox/bootbox confirms (including "您已完成此課程，重新學習將無法重複取得時數"), and extracts `pTicket` + `cid` from the reader iframe.
-- **Parallel heartbeat engine** (`src/main/heartbeat/engine.ts`): tiny hand-rolled concurrency limiter (avoids pulling `p-limit` ESM from a CJS main), per-course lifecycle callbacks, graceful error backoff.
-- Central `AppState` + IPC broadcast on every change (no SSE — Electron IPC, `ipcMain.handle` + `webContents.send`).
-- `better-sqlite3` with migrations (`learned_answers`, `reflections`, `run_history`, `course_progress`) and first-boot seed from bundled `resources/mixed.db` (98,569 questions carried over from `E等閱讀家`).
-- `electron-builder` NSIS config (untested; never actually run `build:win` end-to-end).
+- **Electron scaffold** (electron-vite + React 18 + Tailwind + TypeScript). Typecheck + build both green.
+- **Single-window layout**: React dashboard top + embedded elearn `BrowserView` bottom, **draggable divider** with live `BrowserView` bounds sync via `ResizeObserver` + IPC.
+- **Login detection**: polls the embedded page for `a[href="/mooc/user/learn_dashboard.php"]` with text `個人專區`; extracts the user's Chinese name via three regex patterns.
+- **Popup auto-dismiss** for the daily summary fancybox, `game_card` modal, and any overlay matching common close selectors. Re-runs on every `did-finish-load`.
+- **`undici` HTTP client** that injects BrowserView session cookies, so we call elearn APIs directly from the main process with zero browser overhead per call.
+- **elearn API wrappers** (`src/main/http/elearn.ts`):
+  - `getSigningCourses()`
+  - `primeExplorer(categoryId)` + `searchCourses(categoryId, keyword)`
+  - `enrollCourse(cid)` — `GET /enploy/<cid>`
+  - `heartbeat(pTicket, encCid)` — `POST course_record.php?actype=end`
+- **Course discovery** with phase classifier (`pending` / `reading` / `exam` / `survey` / `rating` / `done`) from `isReadDones` / `isExamDones` / `isSurveyDones` / `exam_exists` flags.
+- **Hidden-window ticket extractor** (`src/main/heartbeat/reader.ts`): invisible `BrowserWindow`, navigates to `/info/<cid>`, clicks `button.btnAction`, auto-dismisses fancybox / bootbox confirms (including "您已完成此課程，重新學習將無法重複取得時數"), extracts `pTicket` + `cid` from the reader iframe.
+- **Parallel heartbeat engine** (`src/main/heartbeat/engine.ts`): hand-rolled concurrency limiter (ESM-free), 8 concurrent courses default, 5 s ± 1 s jitter interval matching the original `E等閱讀家`.
+- **Select-then-run UX** (`src/renderer/src/App.tsx`) — three screens chosen by `AppState.status`:
+  - `AwaitingLogin` while the embedded browser is not signed in yet.
+  - `Selecting` after login: two sections (繼續上次進度 + 🔍 搜尋新課), search mode toggle (關鍵字 / 類別代碼), checkbox list with per-row 預覽 + 退選 buttons, footer summary `已選 N 門 · 總計 X 小時`, big Go button.
+  - `Monitor` during enrolling / running / paused / done — NowPlaying card, live course list scoped to the selected set, log tail.
+- **Keyword search** via `ipcMain.handle(SEARCH_COURSES)` fans out through all 10 known category IDs → dedups by cid → filters `isClassing` → annotates `already_enrolled` from cached `state.courses`.
+- **類別代碼 search** via `ipcMain.handle(SEARCH_BY_CODES)`: parses strings like `"540, 541-546, 522, 539"` (comma / whitespace / 、 / dash ranges), sends each as `categoryId` to `searchCourses`, dedups.
+- **Unenrol** via `ipcMain.handle(UNENROLL_COURSE)`: hidden `BrowserWindow` tries `/info/<cid>` first, then paginates `learn_dashboard.php?tab=3`, clicks the 退選 button and auto-accepts bootbox / fancybox. Renderer shows a per-row 退選 button in 繼續上次進度.
+- **Pipeline scoping**: `AppState.pipelineCids` tracks only the cids the user ticked for this run; Monitor `執行中課程` list and progress bar are scoped to that set (fix for "70 ghosts showing as running").
+- **Better-sqlite3** with migrations (`learned_answers`, `reflections`, `run_history`, `course_progress`); seeded from bundled `resources/mixed.db` (98 569 questions carried over from `E等閱讀家`). Native module rebuilt for Electron via `electron-builder install-app-deps` (postinstall).
+- **electron-builder NSIS config** present but untested — `npm run build:win` has never been executed end-to-end.
 
-### 🚧 Not done / known unfinished
+### 🚧 Not done
 
-- **UX pivot in progress:** Dashboard currently auto-runs `runSession()` → discover → heartbeat. The spec was rewritten (see §6.10 of design spec) to a *select-then-run* flow — user searches keywords, ticks courses, clicks Go. **Renderer still matches the old "auto-run" behaviour.** Re-implementation pending.
-- Exam solver (`src/main/exam/*`) — not yet written. Design in §6.6 / §6.7 of spec.
-- Questionnaire / rating / reflection filler (`src/main/survey/*`, `src/main/reflection/*`) — not yet written.
-- Gemini LLM client (`src/main/llm/gemini.ts`) — not yet written.
-- Auto-top-up (Phase 2 round of auto-enroll when under quota) — spec exists, code doesn't.
-- Config loader (`src/main/config.ts`) — referenced by spec, not yet written. Current defaults are inlined constants in `src/main/index.ts`.
-- `electron-builder install-app-deps` runs during `postinstall`, but the actual `.exe` install flow has never been smoke-tested end-to-end. Expect minor adjustments (icon, version string, signing) before shipping.
+- **Exam solver** (`src/main/exam/*`) — not yet written. Design in §6.6 / §6.7 of spec. DOM interaction via `webContents.executeJavaScript`, matcher: SQLite LIKE → `fast-fuzzy` → Gemini LLM → random (with log).
+- **Questionnaire / rating / reflection filler** (`src/main/survey/*`, `src/main/reflection/*`) — not yet written.
+- **Gemini LLM client** (`src/main/llm/gemini.ts`) — not yet written. Skip LLM branch if no key.
+- **Auto-top-up** (auto-enroll when under annual quota) — `src/main/course/auto-enroll.ts` exists but is not wired to the pipeline. Spec keeps this opt-in under advanced settings.
+- **Config loader** (`src/main/config.ts`) — not yet written. Defaults live in `src/main/index.ts` as constants.
+- **Batch unenrol** — user-requested; current UI supports per-row only.
+- **Windows `.exe` installer smoke test** — `npm run build:win` untested; need icon + version metadata + signed binary.
+- **UI: layout polish** — split is fixed horizontal. User flagged that during 刷課 the Monitor feels cramped. Planned change: state-based default ratio (Selecting 50/50, Monitor 85/15) + a `📴 收起瀏覽器` toggle.
 
 ---
 
