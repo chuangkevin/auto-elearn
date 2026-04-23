@@ -39,73 +39,101 @@
 
 | 層 | 選擇 |
 |---|---|
-| Runtime | Node.js 20+ LTS |
+| 外殼 | **Electron 28+**（single-window Windows desktop app） |
+| Runtime | Node.js 20 LTS（Electron 內建） |
 | 語言 | TypeScript 5 |
-| 後端 | Fastify |
-| 瀏覽器自動化 | Playwright (chromium/chrome/edge channel) |
-| HTTP client | `undici` (Node built-in fetch) |
-| DB | SQLite via `better-sqlite3` |
-| 前端 | React + Vite + Tailwind |
-| 即時推送 | Server-Sent Events (SSE) |
-| 模糊比對 | `fast-fuzzy` 或 `fuse.js` |
+| 主程序後端 | Electron main process（無 Fastify，IPC 取代 HTTP） |
+| 瀏覽器自動化 | **Electron `BrowserView`**（內嵌 Chromium，透過 `webContents.executeJavaScript` / `session.cookies` / `webRequest` 攔截） |
+| HTTP client | `undici` (Node 內建 fetch)（純 HTTP 呼叫 elearn API 時用） |
+| DB | SQLite via `better-sqlite3`（native module，Electron 需 rebuild） |
+| 渲染層 | React 18 + Vite + Tailwind |
+| 狀態同步 | Electron IPC (`ipcMain` ↔ `ipcRenderer`) + `contextBridge` |
+| 模糊比對 | `fast-fuzzy` |
 | LLM | Gemini via `@kevinsisi/ai-core`（若 HomeProject key-pool-standard 可用）否則 `@google/generative-ai` |
-| Config | YAML via `yaml` |
-| 打包 | `tsx` dev、`tsc` build；執行以 `node --enable-source-maps dist/server/main.js` 為主，不做 single-binary |
+| Config | YAML via `yaml`（使用者家目錄 `~/.auto-elearn/config.yaml`） |
+| 建置 | `electron-vite`（dev + build 一條龍；支援 main / preload / renderer 三段） |
+| 打包 | `electron-builder` → NSIS `.exe` installer（含 auto-updater 基礎，v1 先不開啟） |
 
 UI 文字：**繁體中文**。
+
+**為什麼 Electron（對比舊方案）：**
+- 單視窗：Dashboard（React renderer）+ 內嵌 e 等公務園 `BrowserView` 上下分區
+- 少一個 Playwright Chromium：`BrowserView` 就是 Chromium，`webContents` 提供類 Playwright 功能（`executeJavaScript` 相當於 `page.evaluate`，`session.cookies` / `webRequest` 提供 cookie 與攔截）
+- 使用者認知降到最低：雙擊 `.exe` → 單一視窗 → 登入 → 跑
+- 打包成熟：`electron-builder` 一行命令產 `.exe` installer
 
 ## 4. Monorepo 目錄
 
 ```
 auto-elearn/
-├─ package.json                 # npm workspaces root
-├─ packages/
-│  ├─ server/
-│  │  ├─ src/
-│  │  │  ├─ main.ts              # Fastify entry
-│  │  │  ├─ config.ts            # 讀 config.yaml
-│  │  │  ├─ bus.ts               # EventEmitter → SSE bridge
-│  │  │  ├─ state.ts             # 全域執行狀態（機器可觀察）
-│  │  │  ├─ browser/
-│  │  │  │  ├─ session.ts        # Playwright 啟動 / 偵測登入
-│  │  │  │  └─ pause-gate.ts     # asyncio.Event 等價 (promise gate)
-│  │  │  ├─ course/
-│  │  │  │  ├─ discovery.ts      # 掃 learn_dashboard.php
-│  │  │  │  ├─ enrollment.ts     # POST /enploy/<id>
-│  │  │  │  └─ types.ts
-│  │  │  ├─ heartbeat/
-│  │  │  │  ├─ engine.ts         # p-limit(N) 並行控制
-│  │  │  │  └─ client.ts         # undici → setReading
-│  │  │  ├─ exam/
-│  │  │  │  ├─ solver.ts         # Playwright-driven
-│  │  │  │  ├─ matcher.ts        # DB → fuzzy → LLM
-│  │  │  │  └─ answer-store.ts   # read + write-back
-│  │  │  ├─ survey/
-│  │  │  │  └─ filler.ts         # 問卷 + 評價
-│  │  │  ├─ llm/
-│  │  │  │  └─ gemini.ts         # key-pool 相容介面
-│  │  │  └─ api/
-│  │  │     ├─ state-sse.ts      # GET /api/state (SSE)
-│  │  │     └─ actions.ts        # POST /api/action/{pause,resume,abort,focus}
-│  │  └─ tsconfig.json
-│  └─ client/
+├─ package.json                 # Electron app root (electron-vite + electron-builder)
+├─ electron.vite.config.ts
+├─ electron-builder.yml
+├─ src/
+│  ├─ main/                     # Electron main process (Node)
+│  │  ├─ index.ts               # app lifecycle, BrowserWindow + BrowserView
+│  │  ├─ ipc.ts                 # ipcMain handlers (actions / state push)
+│  │  ├─ state.ts               # 全域執行狀態 + EventEmitter
+│  │  ├─ config.ts              # 讀 ~/.auto-elearn/config.yaml
+│  │  ├─ bus.ts                 # log / state broadcast → renderer via IPC
+│  │  ├─ browser/
+│  │  │  ├─ view.ts             # BrowserView 建立 / 大小同步 / navigate
+│  │  │  ├─ login.ts            # 偵測「個人專區」觸發接手
+│  │  │  └─ pause-gate.ts       # Promise gate
+│  │  ├─ http/
+│  │  │  ├─ client.ts           # undici client，帶上 BrowserView session cookies
+│  │  │  └─ elearn.ts           # API 包裝：getSigningCourses/getSearchCourses/checkCoursePass/enroll/heartbeat
+│  │  ├─ course/
+│  │  │  ├─ discovery.ts        # 掃已報名 + 全站搜尋
+│  │  │  ├─ enrollment.ts       # GET /enploy/<id>
+│  │  │  ├─ auto-enroll.ts      # 年度時數不足自動補報策略
+│  │  │  └─ types.ts
+│  │  ├─ heartbeat/
+│  │  │  ├─ engine.ts           # p-limit(N) 並行
+│  │  │  └─ reader.ts           # BrowserView 進閱讀器抽 pTicket/cid，之後純 HTTP
+│  │  ├─ exam/
+│  │  │  ├─ solver.ts           # webContents.executeJavaScript 作答
+│  │  │  ├─ matcher.ts          # DB exact → fuzzy → LLM
+│  │  │  └─ answer-store.ts     # better-sqlite3 讀 + 寫回
+│  │  ├─ survey/
+│  │  │  └─ filler.ts           # 問卷 + 評價
+│  │  ├─ reflection/
+│  │  │  ├─ generator.ts        # LLM 心得產生 + fallback 模板
+│  │  │  └─ store.ts            # 心得 cache
+│  │  ├─ llm/
+│  │  │  └─ gemini.ts           # Gemini / key-pool
+│  │  └─ db.ts                  # better-sqlite3 setup + migrations
+│  ├─ preload/
+│  │  └─ index.ts               # contextBridge 暴露 api.invoke / api.on
+│  └─ renderer/                  # React (Vite)
+│     ├─ index.html
 │     ├─ src/
 │     │  ├─ main.tsx
-│     │  ├─ App.tsx              # 監視器主畫面
+│     │  ├─ App.tsx              # 等登入 / 監視器 切換
 │     │  ├─ components/
-│     │  │  ├─ NowPlaying.tsx    # 目前進行中卡片
-│     │  │  ├─ CourseList.tsx    # 所有課程列表
-│     │  │  ├─ LogPanel.tsx      # 最近 50 行日誌
-│     │  │  └─ ControlBar.tsx    # Pause/Resume/Focus/Abort
-│     │  └─ hooks/
-│     │     └─ useStateStream.ts # EventSource
-│     └─ vite.config.ts
-├─ data/
-│  └─ mixed.db                   # 搬自 E等閱讀家（98,569 題）
-├─ config.yaml                   # 使用者設定
+│     │  │  ├─ AwaitingLogin.tsx
+│     │  │  ├─ Monitor.tsx
+│     │  │  ├─ NowPlaying.tsx
+│     │  │  ├─ CourseList.tsx
+│     │  │  ├─ LogPanel.tsx
+│     │  │  └─ ControlBar.tsx
+│     │  ├─ hooks/
+│     │  │  └─ useAppState.ts    # useSyncExternalStore + IPC
+│     │  └─ index.css            # Tailwind
+├─ resources/
+│  └─ mixed.db                   # 搬自 E等閱讀家（98,569 題）→ electron-builder 會複製到 userData
+├─ buildResources/
+│  ├─ icon.ico
+│  └─ icon.png
 └─ docs/superpowers/specs/
    └─ 2026-04-23-auto-elearn-design.md
 ```
+
+**視窗佈局：**
+- 單一 `BrowserWindow` (1280×900, resizable)
+- `BrowserView` 固定掛在視窗下半（e 等公務園）
+- 上半是 React renderer（Dashboard）
+- `BrowserView` 的 `bounds` 會跟著 renderer 宣告的分隔線調整（IPC 通知）
 
 ## 5. 資料模型
 
