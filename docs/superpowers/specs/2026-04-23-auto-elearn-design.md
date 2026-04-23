@@ -428,19 +428,33 @@ Body (form-urlencoded):
 
 **智障決策樹（全自動）：**
 ```
-偵測已報名全部課程 (getSigningCourses)
+【Phase 0 - 啟動時補報】
+呼叫 getSigningCourses 拿已報名清單
     ↓
+計算「可完成總時數」= Σ certification_hours (for isClassing=true AND 未過期)
+    ↓
+if target.annual_hours > 可完成時數:
+    差額 = target - sum
+    for each categoryId in config.target.auto_enroll_categories (預設 [10040389]):
+        POST course_ajax.php {action: getSearchCourses, categoryId}
+          → 濾：studentTargetTypeCaption='任何人' AND isClassing=true AND 未報名
+          → sort by certification_hours asc (優先報短的)
+          → 依序 GET /enploy/<cid> 直到時數 ≥ 差額 或達 max_auto_enroll_per_run
+          → 每次間隔 1s
+    重新呼叫 getSigningCourses
+
+【Phase 1 - 主循環】
 for each 課程 (排序：剩餘時數短的先做，快速看到成就感):
-    phase < enrolled → 跳過（排到最後再看要不要補）
     phase == enrolled && !isReadDones → 加入心跳佇列（並行 8）
     isReadDones && !isExamDones && exam_exists → exam solver
     isExamDones && !isSurveyDones → survey filler（含 reflection）
     isSurveyDones && !ratingDone → rating filler
     全部 done → 下一門
 
-全部完成後：若年度時數不足（config.target_hours，預設 20）：
-    → 去「公務人員 10 小時課程專區」抓任意 isClassing=true 的未報名課程，自動補報
-    → 回到 for 迴圈
+【Phase 2 - 全部完成後再補一輪】
+若執行完所有課程後，仍不足 target.annual_hours:
+    重跑 Phase 0 補報 → 回到 Phase 1
+(避免無限迴圈：單次執行最多補報 max_auto_enroll_per_run × 3 輪)
 ```
 
 ## 7. 核心流程
@@ -540,8 +554,16 @@ reflection:
 
 target:
   annual_hours: 20         # 年度目標時數；不足時自動補報
-  auto_enroll_category: 10040389   # 公務人員 10 小時課程專區
-  max_auto_enroll_per_run: 5       # 單次自動補報上限
+  auto_enroll_categories:  # 自動補報挑課的分類（順序即優先序）
+    - 10040389             # 公務人員 10 小時課程專區（預設主力）
+    # - 10027390           # 資訊安全（如想特定議題可加）
+    # - 10027389           # 淨零永續
+  auto_enroll_filter:
+    student_target: "任何人"    # 優先挑不限身分的課
+    require_isClassing: true
+    sort_by: "certification_hours_asc"   # 短時數優先
+  max_auto_enroll_per_run: 10      # 單次執行最多自動補幾門
+  rounds: 3                        # Phase 2 補報迴圈最多 N 輪
 
 dashboard:
   port: 8787
