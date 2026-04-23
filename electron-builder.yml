@@ -1,0 +1,24 @@
+appId: tw.kevin.auto-elearn
+productName: auto-elearn
+directories:
+  output: release
+  buildResources: buildResources
+files:
+  - out/**/*
+  - resources/**/*
+  - package.json
+  - "!node_modules/**/*"
+asarUnpack:
+  - resources/**/*
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  artifactName: ${productName}-${version}-setup.${ext}
+  shortcutName: ${productName}

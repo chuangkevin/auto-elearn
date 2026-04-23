@@ -1,0 +1,22 @@
+node_modules/
+out/
+dist/
+release/
+.vite-cache/
+*.log
+.env
+.env.local
+.DS_Store
+Thumbs.db
+
+# Electron / build
+*.exe
+*.dmg
+*.deb
+*.AppImage
+**/*.tsbuildinfo
+
+# User data (runtime)
+user-data/
+data/*.db-wal
+data/*.db-shm
