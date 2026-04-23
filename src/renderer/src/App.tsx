@@ -14,7 +14,10 @@ declare global {
   }
 }
 
-const BOTTOM_RATIO = 0.55;
+const DEFAULT_BOTTOM_RATIO = 0.55;
+const MIN_BOTTOM = 0.2;
+const MAX_BOTTOM = 0.85;
+const DIVIDER_PX = 6;
 
 function useAppState(): AppState | null {
   const [s, setS] = useState<AppState | null>(null);
@@ -41,17 +44,43 @@ function pushBrowserViewBounds() {
 export default function App() {
   const state = useAppState();
   const topRef = useRef<HTMLDivElement>(null);
+  const [bottomRatio, setBottomRatio] = useState(DEFAULT_BOTTOM_RATIO);
+  const dragging = useRef(false);
 
-  // Sync BrowserView bounds with the browserview-mount div
+  // Sync BrowserView bounds whenever layout changes
   useEffect(() => {
     const ro = new ResizeObserver(() => pushBrowserViewBounds());
     if (topRef.current) ro.observe(topRef.current);
     window.addEventListener("resize", pushBrowserViewBounds);
-    // initial
     setTimeout(pushBrowserViewBounds, 50);
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", pushBrowserViewBounds);
+    };
+  }, []);
+
+  useEffect(() => {
+    // Re-push bounds after ratio change
+    pushBrowserViewBounds();
+  }, [bottomRatio]);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const h = window.innerHeight;
+      const r = (h - e.clientY) / h;
+      setBottomRatio(Math.min(MAX_BOTTOM, Math.max(MIN_BOTTOM, r)));
+    }
+    function onUp() {
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
     };
   }, []);
 
@@ -63,21 +92,32 @@ export default function App() {
     );
   }
 
-  const topHeight = `${(1 - BOTTOM_RATIO) * 100}%`;
-  const bottomHeight = `${BOTTOM_RATIO * 100}%`;
-
   return (
     <div className="h-screen flex flex-col">
       <div
         ref={topRef}
         className="overflow-auto px-6 py-4"
-        style={{ height: topHeight }}
+        style={{ flex: `1 1 ${(1 - bottomRatio) * 100}%`, minHeight: 0 }}
       >
         <TopPanel state={state} />
       </div>
       <div
+        onMouseDown={() => {
+          dragging.current = true;
+          document.body.style.cursor = "row-resize";
+          document.body.style.userSelect = "none";
+        }}
+        className="bg-slate-700 hover:bg-emerald-500 transition-colors"
+        style={{
+          height: DIVIDER_PX,
+          cursor: "row-resize",
+          flex: `0 0 ${DIVIDER_PX}px`,
+        }}
+        title="拖動調整上下分隔"
+      />
+      <div
         id="browserview-mount"
-        style={{ height: bottomHeight, background: "#000" }}
+        style={{ flex: `1 1 ${bottomRatio * 100}%`, background: "#000", minHeight: 0 }}
       />
     </div>
   );

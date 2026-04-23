@@ -2,9 +2,11 @@ import { app, BrowserWindow, BrowserView, ipcMain, shell } from "electron";
 import { join } from "node:path";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
-import { IPC, type AppState, type ViewBounds } from "../shared/ipc";
+import { IPC, type AppState, type ViewBounds, type CourseCard } from "../shared/ipc";
 import { createBus } from "./bus";
-import { attachElearnView, detectLogin } from "./browser/view";
+import { attachElearnView, detectLogin, dismissNuisancePopups } from "./browser/view";
+import { discover } from "./course/discovery";
+import type { Tracked } from "./course/types";
 
 const HOMEPAGE = "https://elearn.hrd.gov.tw/mooc/index.php";
 
@@ -79,15 +81,50 @@ function createWindow() {
   pushState();
 
   detectLogin(elearnView.webContents)
-    .then((user) => {
+    .then(async (user) => {
       state.status = "running";
       state.user = { name: user };
       log("info", `偵測到登入：${user}`);
       pushState();
+      // Dismiss the daily summary popup + any fancybox overlay
+      await dismissNuisancePopups(elearnView!.webContents);
+      // Populate course list
+      await refreshCourses();
     })
     .catch((err) => {
       log("error", `登入偵測失敗：${err}`);
     });
+}
+
+async function refreshCourses() {
+  if (!elearnView) return;
+  try {
+    const tracked = await discover(elearnView.webContents.session);
+    state.courses = tracked.map(trackedToCard);
+    state.stats.total = tracked.length;
+    state.stats.done = tracked.filter((t) => t.phase === "done").length;
+    state.stats.progressPct = tracked.length === 0 ? 0 :
+      Math.round((state.stats.done / tracked.length) * 100);
+    log("info", `掃描完成：共 ${tracked.length} 門已報名課程`);
+    pushState();
+  } catch (e) {
+    log("error", `掃描課程失敗：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function trackedToCard(t: Tracked): CourseCard {
+  return {
+    cid: t.course.cid,
+    name: t.course.caption,
+    phase: t.phase === "reading_done" ? "reading" : (t.phase as CourseCard["phase"]),
+    readSec: t.readSec,
+    requiredSec: t.requiredSec,
+    examDone: (t.course.isExamDones ?? 0) === 1,
+    surveyDone: (t.course.isSurveyDones ?? 0) === 1,
+    ratingDone: false,
+    reflectionDone: false,
+    lastPingAt: t.lastPingAt,
+  };
 }
 
 // ── IPC ────────────────────────────────────────────────────────
