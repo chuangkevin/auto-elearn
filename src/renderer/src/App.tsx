@@ -94,6 +94,28 @@ function useAppState(): AppState | null {
   return s;
 }
 
+/**
+ * Electron BrowserView paints ABOVE the renderer HTML, so any modal / overlay is
+ * occluded by it wherever the view sits. While a modal is open we collapse the
+ * view to 0x0 (invisible) and restore on unmount.
+ */
+function hideBrowserView() {
+  window.api.setViewBounds({ x: 0, y: 0, width: 0, height: 0 });
+}
+
+/** Hook: hide the BrowserView for the lifetime of this component. */
+function useHideBrowserViewWhileMounted() {
+  useEffect(() => {
+    hideBrowserView();
+    return () => {
+      // Two pushes — the first fires right away, the second after the modal's
+      // exit animation + any flex settlement.
+      setTimeout(pushBrowserViewBounds, 0);
+      setTimeout(pushBrowserViewBounds, 120);
+    };
+  }, []);
+}
+
 function pushBrowserViewBounds() {
   const viewport = document.getElementById("browserview-mount");
   if (!viewport) return;
@@ -144,6 +166,18 @@ function App() {
     window.api.answerResumePrompt(resume);
     setResumePrompt(null);
   }
+
+  // Any App-owned modal open → hide BrowserView so the modal isn't occluded.
+  useEffect(() => {
+    const anyModal = !!credsPrompt || !!resumePrompt;
+    if (anyModal) {
+      hideBrowserView();
+    } else {
+      // After close, wait a tick for layout to settle, then re-push.
+      setTimeout(pushBrowserViewBounds, 0);
+      setTimeout(pushBrowserViewBounds, 120);
+    }
+  }, [credsPrompt, resumePrompt]);
 
   function answerCredsPrompt(save: boolean) {
     window.api.answerCredsPrompt(save);
@@ -282,9 +316,14 @@ function App() {
           minWidth: 0,
         }}
       />
-      {/* Floating collapse toggle, bottom-right of the top panel area */}
+      {/* Collapse toggle — positioned inside the left dashboard column so the
+          BrowserView (which renders above renderer HTML) can't occlude it. */}
       <button
-        className="absolute right-4 top-3 z-50 px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur"
+        className="absolute top-3 z-50 px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur"
+        style={{
+          // Pin to the right edge of the dashboard column (= left edge of divider)
+          right: collapsed ? COLLAPSED_BROWSER_PX + 12 : `calc(${browserRatio * 100}% + 12px)`,
+        }}
         onClick={toggleCollapse}
         title={collapsed ? "重新展開 e 等公務園瀏覽器" : "收起 e 等公務園瀏覽器，Monitor 吃滿畫面"}
       >
@@ -412,6 +451,17 @@ export default function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [stealth]);
 
+  // BrowserView paints above the renderer; while we're showing Noteqad or the
+  // loading screen it must be 0x0 or it leaks the real elearn page on top of
+  // the fake Notepad.
+  useEffect(() => {
+    if (stealth === "locked" || stealth === "loading") {
+      hideBrowserView();
+    }
+    // When stealth flips to unlocked/no_secret, App (below) re-mounts and its
+    // own useEffect pushes the correct bounds.
+  }, [stealth]);
+
   if (stealth === "loading") {
     return (
       <div className="h-screen flex items-center justify-center text-slate-400 bg-slate-950">
@@ -444,9 +494,11 @@ export default function Shell() {
   return (
     <>
       <App />
+      {/* Stealth toggle lives in the bottom-LEFT corner (inside dashboard column);
+          fixed right/bottom would put it behind the BrowserView which paints on top. */}
       {stealth === "unlocked" && (
         <button
-          className="fixed right-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/80 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur"
+          className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur shadow-lg"
           title="鎖定回 Notepad（Ctrl+Alt+H）"
           onClick={() => {
             window.api.stealthLock();
@@ -458,7 +510,7 @@ export default function Shell() {
       )}
       {stealth === "no_secret" && (
         <button
-          className="fixed right-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/80 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur"
+          className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur shadow-lg"
           title="設定偽裝密碼。設定後，下次啟動會先顯示 Notepad，輸入密碼 + Enter 才會進入 app。"
           onClick={async () => {
             const pw = prompt("設定偽裝密碼（下次啟動時在 Notepad 打此密碼 + Enter 即可進入 app）");
@@ -518,6 +570,7 @@ function Selecting({ state }: { state: AppState }) {
   const [codes, setCodes] = useState("");
   const [results, setResults] = useState<CourseCandidate[]>([]);
   const [searching, setSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toUnenroll, setToUnenroll] = useState<Set<string>>(new Set());
   const [onlyAnyone, setOnlyAnyone] = useState(true);
@@ -592,6 +645,7 @@ function Selecting({ state }: { state: AppState }) {
 
   async function doSearch() {
     setSearching(true);
+    setHasSearched(true);
     try {
       if (mode === "codes") {
         const list = parseCodeList(codes);
@@ -766,7 +820,18 @@ function Selecting({ state }: { state: AppState }) {
               className="flex-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
               placeholder="輸入關鍵字（例：資安、AI、個資、性別、人權、環境、國防）"
               value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                // If the user types what looks like an agency code list, flip to
+                // codes mode and carry the value over — 540 / 522 / "540,541" etc.
+                // only match digits + separators, not free text.
+                if (v && /^[\d\s,，、\-–—~至;；]+$/.test(v)) {
+                  setMode("codes");
+                  setCodes(v);
+                  return;
+                }
+                setKeyword(v);
+              }}
               onKeyDown={(e) => e.key === "Enter" && doSearch()}
             />
           ) : (
@@ -817,9 +882,19 @@ function Selecting({ state }: { state: AppState }) {
             </button>
           )}
         </div>
-        {results.length === 0 && !searching && (
+        {results.length === 0 && !searching && !hasSearched && (
           <p className="text-slate-500 text-sm">
-            還沒搜尋；可直接按「搜尋」瀏覽所有課程，或輸入關鍵字縮小範圍
+            還沒搜尋；直接按「搜尋」即可瀏覽全部，或先輸入關鍵字 / 代碼縮小範圍。
+          </p>
+        )}
+        {results.length === 0 && !searching && hasSearched && (
+          <p className="text-amber-400 text-sm">
+            搜尋 0 筆。
+            {mode === "keyword" && /^\d+$/.test(keyword.trim())
+              ? " 看起來你打的是數字——試試切到右邊「類別代碼」模式？"
+              : mode === "codes"
+              ? " 代碼可能沒有對應到 elearn 分類；看 log 確認，或換用關鍵字。"
+              : " 換個關鍵字試試。"}
           </p>
         )}
         <div className="space-y-1 max-h-72 overflow-auto bg-slate-900/40 rounded p-2">
@@ -911,6 +986,7 @@ function ConfirmBatchModal({
   toEnroll: { cid: string; name: string; hours: number }[];
   toUnenroll: { cid: string; name: string }[];
 }) {
+  useHideBrowserViewWhileMounted();
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
       <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-xl w-[90vw] max-h-[80vh] overflow-auto p-6 shadow-2xl">
@@ -1037,10 +1113,13 @@ function CourseRow({
         <button
           className="text-xs text-slate-400 hover:text-emerald-400 px-1"
           onClick={(e) => {
+            // Stop propagation so the click doesn't bubble into the parent label
+            // and re-toggle the checkbox, undoing the user's actual action.
             e.preventDefault();
+            e.stopPropagation();
             onPreview();
           }}
-          title="在下方瀏覽器預覽"
+          title="在右邊瀏覽器預覽"
         >
           預覽
         </button>
@@ -1054,6 +1133,7 @@ function CourseRow({
           }`}
           onClick={(e) => {
             e.preventDefault();
+            e.stopPropagation();
             onToggleUnenroll();
           }}
           title={stagedForUnenroll ? "取消退選（保留）" : "標記為待退選（按確認才會真的退）"}
