@@ -788,7 +788,7 @@ function StealthSetupCard({
 
 function TopPanel({ state }: { state: AppState }) {
   if (state.status === "boot") return <Centered>啟動中...</Centered>;
-  if (state.status === "await_login") return <AwaitingLogin />;
+  if (state.status === "await_login") return <AwaitingLogin state={state} />;
   if (state.status === "selecting") return <Selecting state={state} />;
   return <Monitor state={state} />;
 }
@@ -801,17 +801,40 @@ function Centered({ children }: { children: React.ReactNode }) {
   );
 }
 
-function AwaitingLogin() {
+function AwaitingLogin({ state }: { state: AppState }) {
   return (
-    <div className="h-full flex flex-col items-center justify-center text-center space-y-4 px-6 py-8">
-      <h1 className="text-2xl font-bold">auto-elearn</h1>
-      <p className="text-slate-300 text-lg">
-        👉 請在下方瀏覽器登入 e 等公務園
-      </p>
-      <p className="text-slate-400 text-sm">
-        任何登入方式都支援：帳號密碼 / 自然人憑證 / MyData
-      </p>
-      <div className="w-4 h-4 rounded-full bg-amber-400 animate-pulse" />
+    <div className="h-full flex flex-col px-6 py-6 gap-4 overflow-hidden">
+      <div className="text-center space-y-2">
+        <h1 className="text-2xl font-bold">auto-elearn</h1>
+        <p className="text-slate-300">👉 請在右邊瀏覽器登入 e 等公務園</p>
+        <p className="text-slate-400 text-xs">
+          任何登入方式都支援：帳號密碼 / 自然人憑證 / MyData
+        </p>
+        <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse mx-auto" />
+      </div>
+
+      <div className="flex-1 flex flex-col min-h-0">
+        <h2 className="text-xs font-semibold text-slate-400 mb-1">📜 日誌（含自動登入進度）</h2>
+        <div className="flex-1 bg-black/30 rounded p-2 text-xs font-mono overflow-auto space-y-0.5 min-h-0 border border-slate-800">
+          {state.logs.slice(-100).map((l, i) => (
+            <div
+              key={i}
+              className={
+                l.level === "error"
+                  ? "text-red-400"
+                  : l.level === "warn"
+                  ? "text-amber-400"
+                  : "text-slate-300"
+              }
+            >
+              [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
+            </div>
+          ))}
+          {state.logs.length === 0 && (
+            <div className="text-slate-500">（尚無紀錄）</div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

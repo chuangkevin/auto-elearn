@@ -267,25 +267,93 @@ async function tryAutoLogin(): Promise<boolean> {
   emitAutoLogin({ stage: "start" });
   log("info", `偵測到已儲存帳密（${maskAccount(creds.account)}），背景自動登入中...`);
   try {
-    const res = await performAutoLogin(creds, elearnView.webContents.session, { timeoutMs: 60_000 });
+    const res = await performAutoLogin(creds, elearnView.webContents.session, { timeoutMs: 30_000 });
     if (res.ok) {
       emitAutoLogin({ stage: "success" });
       log("info", "自動登入成功");
       touchCredentials();
-      // Navigate the visible view to the homepage so the user sees the logged-in state.
       elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
       return true;
     }
-    emitAutoLogin({ stage: "failed", error: res.error });
-    log("warn", `自動登入失敗：${res.error ?? "unknown"}；請手動登入`);
+    // Silent path failed — fall through to visible pre-fill. Much more reliable:
+    // we navigate the MAIN BrowserView to the eCPA login page, pre-fill the 帳號
+    // 密碼 column, and let the user click 登入 with a real trusted mouse click.
+    log("warn", `自動登入（靜默）失敗：${res.error ?? "unknown"}；改跳到 eCPA 預填表單`);
+    await showPrefilledEcpaLogin(creds);
+    emitAutoLogin({ stage: "failed", error: "改用預填方式，請點橘色登入按鈕" });
     return false;
   } catch (e) {
-    emitAutoLogin({ stage: "failed", error: e instanceof Error ? e.message : String(e) });
-    log("warn", `自動登入發生例外：${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    emitAutoLogin({ stage: "failed", error: msg });
+    log("warn", `自動登入發生例外：${msg}`);
+    try {
+      await showPrefilledEcpaLogin(creds);
+    } catch {
+      /* nothing we can do */
+    }
     return false;
   } finally {
     autoLoginInFlight = false;
   }
+}
+
+/**
+ * Navigate the visible BrowserView to eCPA clogin and pre-fill the 帳號密碼登入
+ * column. User only has to click the orange 登入 button — a REAL mouse click,
+ * so aspnet's isTrusted-sensitive event handlers fire correctly. This is the
+ * fallback when silent auto-login's synthesized click doesn't trigger the
+ * login chain.
+ */
+async function showPrefilledEcpaLogin(creds: SavedCredentials): Promise<void> {
+  if (!elearnView) return;
+  const ECPA_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
+  const wc = elearnView.webContents;
+  const onLoad = () => {
+    const url = wc.getURL();
+    if (!url.includes("ecpa.dgpa.gov.tw")) return;
+    if (!url.toLowerCase().includes("clogin")) return;
+    wc
+      .executeJavaScript(
+        `(() => {
+          const visible = el => !!el && el.offsetParent !== null;
+          const passwords = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
+          for (const pw of passwords) {
+            const form = pw.form || pw.closest('form, div');
+            if (!form) continue;
+            const accounts = Array.from(form.querySelectorAll('input[type="text"], input[type="tel"], input:not([type])'))
+              .filter(visible)
+              .filter(el => !/pin/i.test((el.name||'') + ' ' + (el.id||'') + ' ' + (el.placeholder||'')));
+            if (!accounts.length) continue;
+            const acct = accounts.find(el => /ecpa|帳號/i.test(el.placeholder || el.name || '')) || accounts[0];
+            const setValue = (el, v) => {
+              const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+              if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            setValue(acct, ${JSON.stringify(creds.account)});
+            setValue(pw, ${JSON.stringify(creds.password)});
+            acct.dispatchEvent(new Event('blur', { bubbles: true }));
+            // Visual cue: briefly outline the 登入 button
+            const btn = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'))
+              .filter(visible)
+              .find(el => /登入/.test((el.textContent || el.value || '').trim()));
+            if (btn) {
+              btn.style.outline = '3px solid #f59e0b';
+              btn.style.boxShadow = '0 0 12px #f59e0b';
+            }
+            return true;
+          }
+          return false;
+        })()`,
+        true,
+      )
+      .catch(() => void 0);
+    wc.off("did-finish-load", onLoad);
+  };
+  wc.on("did-finish-load", onLoad);
+  wc.loadURL(ECPA_URL).catch(() => void 0);
+  log("info", "已將瀏覽器導到 eCPA 登入頁，帳密已幫你填好，點橘框的「登入」即可");
 }
 
 // ── Discovery helpers ─────────────────────────────────────────
