@@ -157,20 +157,29 @@ export async function loginViaEcpa(
       return { ok: false, stage: "sso_verify", error: `HTTP ${sso.status}` };
     }
 
-    // 7. Trust-but-verify: check that session now has the auth cookies set.
-    //    This beats pulling /mooc/index.php — that endpoint always returns
-    //    200 HTML regardless of auth (its content just differs) and the
-    //    rendered body doesn't always include our "個人專區" marker when
-    //    fetched server-side without full JS execution.
-    const cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
-    const cookieNames = new Set(cookies.map((c) => c.name));
-    const required = ["idx", "suc"];
-    const missing = required.filter((n) => !cookieNames.has(n));
-    if (missing.length) {
+    // 7. Ground-truth verify: hit /mooc/user/learn_dashboard.php?tab=1 —
+    //    that URL REQUIRES auth and returns the dashboard HTML only for a
+    //    valid session. Unauth'd requests get a redirect to the login page
+    //    (or the public homepage body with no 個人專區 marker).
+    //
+    //    Why this instead of just checking for `idx`+`suc` cookies in the
+    //    jar? Those cookies can persist from a previous session where they
+    //    got saved but the server-side session expired; mere presence of
+    //    the name doesn't prove our POST replay actually established a
+    //    fresh, accepted session. Only a real round-trip tells us that.
+    const verify = await req(
+      session,
+      "GET",
+      "https://elearn.hrd.gov.tw/mooc/user/learn_dashboard.php?tab=1",
+    );
+    if (verify.status >= 400) {
+      return { ok: false, stage: "verify", error: `dashboard GET returned ${verify.status}` };
+    }
+    if (!/個人專區|learn_dashboard\.php|登出/.test(verify.body)) {
       return {
         ok: false,
         stage: "verify",
-        error: `session missing cookies: ${missing.join(", ")} (have: ${Array.from(cookieNames).join(",")})`,
+        error: `dashboard body looks unauthenticated (status ${verify.status}, first 200 chars: ${verify.body.slice(0, 200)})`,
       };
     }
     return { ok: true };
