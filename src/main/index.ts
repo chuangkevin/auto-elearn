@@ -408,8 +408,24 @@ async function refreshCourses(): Promise<void> {
     state.courses = tracked.map(trackedToCard);
     updateStats();
     pushState();
-    const active = tracked.filter((t) => t.course.isClassing).length;
-    log("info", `掃描完成：已報名 ${tracked.length} 門（進行中 ${active}）`);
+    // Break down by phase — getSigningCourses returns both real enrolments
+    // AND agency-assigned phantom "未報名" rows, and a flat "100 門" count
+    // misleads. Show real vs phantom separately.
+    const phantom = tracked.filter(
+      (t) => t.course.isReadtimeValidCaption === "未報名",
+    ).length;
+    const real = tracked.length - phantom;
+    const inProgress = tracked.filter(
+      (t) =>
+        t.course.isReadtimeValidCaption !== "未報名" &&
+        t.course.isReadtimeValidCaption !== "已通過" &&
+        t.course.isClassing,
+    ).length;
+    log(
+      "info",
+      `掃描完成：你目前真正的課程 ${real} 門（進行中未完成 ${inProgress}）` +
+        `；機關推薦但你沒點過的 ${phantom} 門已略過`,
+    );
   } catch (e) {
     log("error", `掃描失敗：${e instanceof Error ? e.message : String(e)}`);
   }
