@@ -7,6 +7,7 @@ import {
   type CredsPromptPayload,
   type CredentialsStatus,
   type ResumePrompt,
+  type StealthState,
   type ViewBounds,
 } from "../shared/ipc";
 
@@ -50,6 +51,11 @@ const api = {
     return () => ipcRenderer.off(IPC.RESUME_PROMPT, listener);
   },
   answerResumePrompt: (resume: boolean) => ipcRenderer.send(IPC.RESUME_ANSWER, resume),
+  getStealthStatus: (): Promise<StealthState> => ipcRenderer.invoke(IPC.STEALTH_STATUS),
+  stealthUnlock: (secret: string): Promise<boolean> => ipcRenderer.invoke(IPC.STEALTH_UNLOCK, secret),
+  stealthSetSecret: (secret: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke(IPC.STEALTH_SET_SECRET, secret),
+  stealthLock: () => ipcRenderer.send(IPC.STEALTH_LOCK),
 };
 
 contextBridge.exposeInMainWorld("api", api);

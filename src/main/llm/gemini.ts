@@ -12,6 +12,8 @@ import path from "node:path";
 interface LocalConfig {
   geminiApiKey?: string;
   geminiModel?: string;
+  /** Plaintext secret for stealth Noteqad disguise (user's explicit choice, see memory) */
+  stealthSecret?: string;
 }
 
 function configPath(): string {

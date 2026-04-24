@@ -1,5 +1,7 @@
 appId: tw.kevin.auto-elearn
-productName: auto-elearn
+# Product name = output .exe / installer name. Using "Noteqad" matches the on-screen
+# Notepad disguise (stealth mode); the app still runs auto-elearn code underneath.
+productName: Noteqad
 directories:
   output: release
   buildResources: buildResources

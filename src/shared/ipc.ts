@@ -118,6 +118,14 @@ export const IPC = {
   RESUME_ANSWER: "resume:answer",
   /** main → renderer: pipeline was paused because session expired / offline */
   PIPELINE_PAUSED: "pipeline:paused",
+  /** renderer → main: get stealth lock state */
+  STEALTH_STATUS: "stealth:status",
+  /** renderer → main: try to unlock with secret; returns whether it matched */
+  STEALTH_UNLOCK: "stealth:unlock",
+  /** renderer → main: first-time set secret */
+  STEALTH_SET_SECRET: "stealth:set-secret",
+  /** renderer → main: re-lock the app (back to Noteqad) */
+  STEALTH_LOCK: "stealth:lock",
 } as const;
 
 export interface CredentialsStatus {
@@ -143,6 +151,15 @@ export interface ResumePrompt {
   startedAt: string;
   previousStatus: string;
 }
+
+/**
+ * Stealth mode — the Noteqad.exe disguise.
+ * - `no_secret`: first launch or user has wiped the secret; real UI renders directly
+ *   (user can set one later via the hidden gesture File>Exit × 5).
+ * - `locked`: app boots into fake Notepad; user must type secret + Enter to unlock.
+ * - `unlocked`: secret matched this session; real UI visible; can re-lock on demand.
+ */
+export type StealthState = "no_secret" | "locked" | "unlocked";
 
 export interface CourseCandidate {
   cid: string;

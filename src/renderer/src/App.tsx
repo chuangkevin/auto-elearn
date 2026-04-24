@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import Noteqad from "./Noteqad";
 import type {
   AppState,
   AutoLoginProgress,
@@ -6,6 +7,7 @@ import type {
   CredentialsStatus,
   CredsPromptPayload,
   ResumePrompt,
+  StealthState,
   ViewBounds,
 } from "@shared/ipc";
 
@@ -32,6 +34,10 @@ declare global {
       onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => () => void;
       onResumePrompt: (cb: (p: ResumePrompt) => void) => () => void;
       answerResumePrompt: (resume: boolean) => void;
+      getStealthStatus: () => Promise<StealthState>;
+      stealthUnlock: (secret: string) => Promise<boolean>;
+      stealthSetSecret: (secret: string) => Promise<{ ok: boolean; reason?: string }>;
+      stealthLock: () => void;
     };
   }
 }
@@ -100,7 +106,7 @@ function pushBrowserViewBounds() {
   });
 }
 
-export default function App() {
+function App() {
   const state = useAppState();
   const leftRef = useRef<HTMLDivElement>(null);
   const [browserRatio, setBrowserRatio] = useState(SELECTING_BROWSER_RATIO);
@@ -369,6 +375,100 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function Shell() {
+  const [stealth, setStealth] = useState<StealthState | "loading">("loading");
+
+  useEffect(() => {
+    window.api
+      .getStealthStatus()
+      .then((s) => setStealth(s))
+      .catch(() => setStealth("no_secret"));
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (
+        e.ctrlKey &&
+        e.altKey &&
+        (e.key === "h" || e.key === "H") &&
+        stealth === "unlocked"
+      ) {
+        e.preventDefault();
+        window.api.stealthLock();
+        setStealth("locked");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [stealth]);
+
+  if (stealth === "loading") {
+    return (
+      <div className="h-screen flex items-center justify-center text-slate-400 bg-slate-950">
+        載入中...
+      </div>
+    );
+  }
+
+  if (stealth === "locked") {
+    return (
+      <Noteqad
+        hasSecret={true}
+        onUnlockAttempt={async (s) => {
+          const ok = await window.api.stealthUnlock(s);
+          if (ok) setStealth("unlocked");
+          return ok;
+        }}
+        onSetSecret={async () => ({ ok: false, reason: "already configured" })}
+        onExit={() => {
+          // Pretend to close Notepad — actually just blank the textarea; the bot
+          // keeps running in the background. User can call the app back via its
+          // taskbar icon at any time.
+        }}
+      />
+    );
+  }
+
+  // `no_secret` or `unlocked` → real app renders underneath; overlay a small
+  // bottom-right control to lock / enable stealth.
+  return (
+    <>
+      <App />
+      {stealth === "unlocked" && (
+        <button
+          className="fixed right-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/80 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur"
+          title="鎖定回 Notepad（Ctrl+Alt+H）"
+          onClick={() => {
+            window.api.stealthLock();
+            setStealth("locked");
+          }}
+        >
+          🫥 隱藏
+        </button>
+      )}
+      {stealth === "no_secret" && (
+        <button
+          className="fixed right-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/80 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur"
+          title="設定偽裝密碼。設定後，下次啟動會先顯示 Notepad，輸入密碼 + Enter 才會進入 app。"
+          onClick={async () => {
+            const pw = prompt("設定偽裝密碼（下次啟動時在 Notepad 打此密碼 + Enter 即可進入 app）");
+            if (!pw) return;
+            const res = await window.api.stealthSetSecret(pw);
+            if (res.ok) {
+              alert("已設定偽裝模式。下次啟動 app 時會先顯示 Notepad。\n密碼以明碼存在 userData/config.json。");
+              setStealth("unlocked");
+            } else {
+              alert("設定失敗：" + (res.reason ?? "unknown"));
+            }
+          }}
+        >
+          🫥 啟用偽裝
+        </button>
+      )}
+    </>
   );
 }
 

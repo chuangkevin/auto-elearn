@@ -42,6 +42,12 @@ import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-sta
 import { solveExam } from "./exam/solver";
 import { fillSurvey } from "./survey/filler";
 import { writeReflection } from "./reflection/writer";
+import {
+  currentState as stealthCurrentState,
+  lock as stealthLock,
+  setSecret as stealthSetSecret,
+  tryUnlock as stealthTryUnlock,
+} from "./stealth/stealth";
 
 function maskAccount(acc: string): string {
   if (!acc) return "";
@@ -154,7 +160,9 @@ function createWindow() {
     minHeight: 720,
     show: false,
     autoHideMenuBar: true,
-    title: "auto-elearn",
+    // Disguise: OS title bar always shows the Notepad title, regardless of whether
+    // the app is locked or unlocked. Matches the stealth-mode intent.
+    title: "未命名 - 記事本",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
@@ -162,6 +170,8 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  // Electron keeps refreshing title from the rendered document; lock it down.
+  mainWindow.on("page-title-updated", (e) => e.preventDefault());
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -673,6 +683,11 @@ ipcMain.on(IPC.ACTION_ABORT, () => {
   pushState();
   setTimeout(() => app.quit(), 300);
 });
+
+ipcMain.handle(IPC.STEALTH_STATUS, () => stealthCurrentState());
+ipcMain.handle(IPC.STEALTH_UNLOCK, (_evt, secret: string) => stealthTryUnlock(secret));
+ipcMain.handle(IPC.STEALTH_SET_SECRET, (_evt, secret: string) => stealthSetSecret(secret));
+ipcMain.on(IPC.STEALTH_LOCK, () => stealthLock());
 
 ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
   const prev = loadRun();
