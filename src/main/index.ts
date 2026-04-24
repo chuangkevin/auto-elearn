@@ -202,15 +202,15 @@ function createWindow() {
     log("info", "已偵測到 eCPA 登入表單，待登入成功後會詢問是否儲存帳密");
   });
 
-  state.status = "await_login";
-  log("info", "等待使用者登入 e 等公務園");
-  pushState();
-
-  // If creds are already saved, try silent auto-login first. User can still log in
-  // manually if this fails (we just do nothing and wait for detectLogin).
   if (hasSavedCredentials()) {
+    state.status = "await_login";
+    log("info", "偵測到已儲存帳密，背景自動登入中...");
     void tryAutoLogin().catch(() => void 0);
+  } else {
+    state.status = "setup";
+    log("info", "首次啟動：請設定 eCPA 帳號密碼");
   }
+  pushState();
 
   detectLogin(elearnView.webContents)
     .then(async (user) => {
@@ -1024,6 +1024,12 @@ ipcMain.handle(
     const res = saveCredentials(toSave);
     if (res.ok) {
       log("info", `已手動儲存帳密（${maskAccount(account)}）`);
+      // First-run setup: transition to await_login and kick off auto-login
+      if (state.status === "setup") {
+        state.status = "await_login";
+        pushState();
+        void tryAutoLogin().catch(() => void 0);
+      }
     }
     return res;
   },

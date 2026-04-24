@@ -5,6 +5,7 @@
 
 export type AppStatus =
   | "boot"
+  | "setup"         // first run: no credentials saved; show onboarding form
   | "await_login"
   | "selecting"     // user browsing + ticking courses, before enrollment
   | "enrolling"    // POSTing /enploy/<cid> for each selected course

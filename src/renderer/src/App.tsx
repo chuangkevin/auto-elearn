@@ -788,6 +788,7 @@ function StealthSetupCard({
 
 function TopPanel({ state }: { state: AppState }) {
   if (state.status === "boot") return <Centered>啟動中...</Centered>;
+  if (state.status === "setup") return <CredentialsSetup />;
   if (state.status === "await_login") return <AwaitingLogin state={state} />;
   if (state.status === "selecting") return <Selecting state={state} />;
   return <Monitor state={state} />;
@@ -797,6 +798,81 @@ function Centered({ children }: { children: React.ReactNode }) {
   return (
     <div className="h-full w-full flex items-center justify-center text-slate-300 px-6">
       {children}
+    </div>
+  );
+}
+
+// ── First-run setup screen ────────────────────────────────────
+function CredentialsSetup() {
+  const [account, setAccount] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  async function submit() {
+    setErr(null);
+    if (!account.trim() || !password) { setErr("帳號和密碼都要填"); return; }
+    setBusy(true);
+    try {
+      const res = await window.api.saveCredentialsManual({ account: account.trim(), password });
+      if (!res.ok) { setErr(res.reason ?? "儲存失敗"); return; }
+      setSaved(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (saved) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-4 px-8">
+        <div className="text-5xl">✅</div>
+        <p className="text-slate-200 text-lg font-semibold">帳密已儲存，自動登入中...</p>
+        <div className="w-4 h-4 rounded-full bg-emerald-400 animate-pulse" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col items-center justify-center gap-6 px-8 py-10">
+      <div className="text-center">
+        <h1 className="text-2xl font-bold mb-2">auto-elearn 初始設定</h1>
+        <p className="text-slate-400 text-sm leading-relaxed max-w-sm">
+          輸入人事服務網 eCPA 帳號密碼，儲存後自動登入。<br />
+          帳密以 Windows DPAPI 加密存在本機，不上傳任何伺服器。
+        </p>
+      </div>
+
+      <div className="w-full max-w-sm space-y-3">
+        <input
+          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
+          placeholder="eCPA 帳號（身分證字號或短碼）"
+          value={account}
+          onChange={(e) => setAccount(e.target.value)}
+          disabled={busy}
+          autoFocus
+        />
+        <input
+          type="password"
+          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
+          placeholder="eCPA 密碼"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          disabled={busy}
+        />
+        {err && <p className="text-red-400 text-sm">{err}</p>}
+        <button
+          className="w-full py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 font-semibold"
+          disabled={busy}
+          onClick={submit}
+        >
+          {busy ? "儲存中..." : "儲存並自動登入"}
+        </button>
+        <p className="text-slate-500 text-xs text-center">
+          或直接在右邊瀏覽器手動登入，也可跳過此步驟
+        </p>
+      </div>
     </div>
   );
 }
