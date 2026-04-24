@@ -152,7 +152,8 @@ Verify by presence of `idx` + `suc` cookies on elearn.hrd.gov.tw after the chain
 
 ## 5. Known quirks
 
-1. **SPOC subdomains.** The iframe that hosts the reader can live on `mohw.elearn.hrd.gov.tw`, `*.elearn.hrd.gov.tw`, etc. Heartbeats MUST target the iframe's own origin; we capture it in `TicketInfo.origin` via the reader's hidden window. Until 2026-04-24 we hardcoded `elearn.hrd.gov.tw` and wondered why 閱讀時數 refused to move.
+1. **SPOC subdomains.** The iframe that hosts the reader can live on `mohw.elearn.hrd.gov.tw`, `center.elearn.hrd.gov.tw`, `kcg.elearn.hrd.gov.tw`, etc. Heartbeats MUST target the iframe's own origin; we capture it in `TicketInfo.origin` via the reader's hidden window. Until 2026-04-24 we hardcoded `elearn.hrd.gov.tw` and wondered why 閱讀時數 refused to move.
+1a. **Reader window needs 20s dwell before destroy.** Video-based SPOC courses (AI Academy, 微學習 類) credit zero time if we extract the ticket and `win.destroy()` immediately — the in-page tracker hasn't had time to register "active reading" on the server. `extractTicket()` sleeps 20s after finding pTicket/cid, ALSO calls `video.play()` on every `<video>` in the page + same-origin subframes and fires focus/scroll events. Ticket extraction now takes ~25s instead of ~2s, worth it.
 2. **`userData` path**: `app.getPath('userData')` uses package.json `name` (`auto-elearn`), NOT the electron-builder `productName` (`Noteqad`). Files live at `%APPDATA%/auto-elearn/`, not `%APPDATA%/Noteqad/`.
 3. **JSON-escaped Unicode responses.** `course_ajax.php` responds `"\\u7121\\u6b64\\u52d5\\u4f5c"` literally for invalid actions; JSON-parse before comparing — `body.includes("無此動作")` always returns false on the raw bytes.
 4. **`getSearchCourses` needs prime.** POST `/mooc/explorer.php` first or the next call returns `"無此動作"`.
