@@ -33,6 +33,7 @@ import {
   touchCredentials,
   type SavedCredentials,
 } from "./auth/credentials";
+import { groupByCategory, resolveAgencyCodes } from "./course/agency-code-map";
 import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
 import { performAutoLogin } from "./auth/auto-login";
 import { isSessionAlive } from "./auth/session-watchdog";
@@ -479,21 +480,67 @@ ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
   const session = elearnView.webContents.session;
   const clean = Array.from(new Set((codes || []).map((c) => String(c).trim()).filter(Boolean)));
   if (clean.length === 0) return [] as CourseCandidate[];
-  log("info", `用代碼搜尋：${clean.join(", ")}`);
+
+  const resolved = resolveAgencyCodes(clean);
+  const known = resolved.filter((r) => r.resolution);
+  const unknown = resolved.filter((r) => !r.resolution).map((r) => r.input);
+  if (unknown.length) {
+    log("warn", `代碼 ${unknown.join(", ")} 沒有對應分類，已略過（如需支援請更新 agency-code-map）`);
+  }
+  if (known.length === 0) return [] as CourseCandidate[];
+
+  const groups = groupByCategory(known);
+  log(
+    "info",
+    `用代碼搜尋：${clean.join(", ")} → ${groups
+      .map((g) => `${g.labels.join("/")} (cat=${g.categoryId})`)
+      .join("; ")}`,
+  );
+
   const byCid = new Map<string, Course>();
   const mineCids = new Set(state.courses.map((c) => c.cid));
-  for (const code of clean) {
+
+  for (const g of groups) {
     if (abortSignal.aborted) break;
     try {
-      await primeExplorer(session, code);
-      const results = await searchCourses(session, code, "", 50);
-      for (const r of results) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
+      await primeExplorer(session, g.categoryId);
+      // Broad sweep first (empty keyword returns whole category).
+      const broad = await searchCourses(session, g.categoryId, "", 50);
+      for (const r of broad) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
+      // If the group narrows by specific keywords, also run those to pick up sub-topics
+      // the broad sweep may have truncated at 50.
+      for (const kw of g.keywords) {
+        if (abortSignal.aborted) break;
+        const results = await searchCourses(session, g.categoryId, kw, 50);
+        for (const r of results) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
+      }
     } catch (e) {
-      log("warn", `代碼 ${code} 查詢失敗：${e instanceof Error ? e.message : String(e)}`);
+      log(
+        "warn",
+        `${g.labels.join("/")} (cat=${g.categoryId}) 查詢失敗：${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
+
+  // Post-filter: a 專區 categoryId like AI_ZONE (540-546) spans multiple sub-topics
+  // (基礎認知 / 生成式 / 公務應用 / 導入 / 產業應用). When the user passed specific
+  // sub-codes, we only want courses in those sub-topics. Strategy: if ANY group in
+  // this search narrowed by keywords, a result must match at least one keyword from
+  // the groups that share its categoryId. Groups with no keywords impose no filter.
+  const allKeywords = groups.flatMap((g) => g.keywords);
+  const anyKeywordRequested = allKeywords.length > 0;
+  const allLabels = groups.flatMap((g) => g.labels);
+  const anyGroupWantsEverything = groups.some((g) => g.keywords.length === 0);
+
   const out: CourseCandidate[] = Array.from(byCid.values())
     .filter((c) => c.isClassing)
+    .filter((c) => {
+      if (!anyKeywordRequested) return true; // all groups are broad — keep everything
+      if (anyGroupWantsEverything) return true; // mixed: at least one group has no kw, so keep all
+      const haystack = `${c.caption} ${c.category_full_path ?? ""} ${c.content ?? ""}`;
+      // Match by keyword first, then by label (label lets the user say "all 環境教育" with no filter)
+      return allKeywords.some((k) => haystack.includes(k)) || allLabels.some((l) => haystack.includes(l));
+    })
     .map((c) => ({
       cid: c.cid,
       caption: c.caption,
