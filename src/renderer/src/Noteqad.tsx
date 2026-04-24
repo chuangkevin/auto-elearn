@@ -34,20 +34,34 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
   const [setupConfirm, setSetupConfirm] = useState("");
   const [setupErr, setSetupErr] = useState<string | null>(null);
   const [wrongFlash, setWrongFlash] = useState(false);
+  const [wrongCount, setWrongCount] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Unlock = last line + Enter equals secret. We check on keydown rather than
   // polling, so the comparison happens at the moment the user presses Enter.
   async function onTextareaKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key !== "Enter") return;
-    const lines = text.split(/\r?\n/);
+    // IME: some input methods use Enter to confirm a composition. Skip those
+    // — otherwise Chinese-typing users never unlock because their Enter was
+    // "confirm composition" not "submit".
+    const ne = e.nativeEvent as KeyboardEvent & { isComposing?: boolean };
+    if (ne.isComposing || (e as unknown as { keyCode?: number }).keyCode === 229) {
+      return;
+    }
+    if (!hasSecret) return;
+    // Read from the DOM node instead of React state — in case the `text`
+    // closure is stale (e.g. user typed fast and the re-render hasn't landed),
+    // the textarea's .value is always the authoritative source.
+    const raw = textareaRef.current?.value ?? text;
+    const lines = raw.split(/\r?\n/);
     const last = (lines[lines.length - 1] ?? "").trim();
-    if (!last || !hasSecret) return;
+    if (!last) return;
     e.preventDefault();
     const ok = await onUnlockAttempt(last);
     if (!ok) {
       setWrongFlash(true);
-      setTimeout(() => setWrongFlash(false), 400);
+      setWrongCount((n) => n + 1);
+      setTimeout(() => setWrongFlash(false), 900);
       return;
     }
     // parent will re-render us away once unlocked
@@ -175,8 +189,8 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
       {/* Textarea */}
       <textarea
         ref={textareaRef}
-        className={`flex-1 w-full p-2 font-mono text-[13px] leading-tight bg-white outline-none resize-none ${
-          wrongFlash ? "bg-rose-50" : ""
+        className={`flex-1 w-full p-2 font-mono text-[13px] leading-tight outline-none resize-none transition-colors ${
+          wrongFlash ? "bg-rose-100 border-2 border-rose-400" : "bg-white"
         }`}
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -185,10 +199,16 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
         style={{ whiteSpace: "pre-wrap" }}
       />
 
-      {/* Status bar (absent in the classic Notepad unless Show Status Bar is toggled) */}
-      <div className="h-5 bg-[#f5f5f5] border-t border-[#e5e5e5] text-[11px] px-2 flex items-center justify-end text-[#666]">
-        第 {text.split("\n").length} 行，第 {text.split("\n").slice(-1)[0].length + 1} 欄
-        <span className="ml-4">100%</span>
+      {/* Status bar — doubles as subtle feedback for wrong password. The status
+          bar is where Notepad shows row/col so putting a hint here stays in
+          character without drawing attention of passers-by. */}
+      <div className="h-5 bg-[#f5f5f5] border-t border-[#e5e5e5] text-[11px] px-2 flex items-center text-[#666]">
+        <span className={wrongFlash ? "text-rose-600 font-semibold" : ""}>
+          {wrongFlash
+            ? `密碼錯誤${wrongCount >= 3 ? "（忘了？檔案 > 結束 連點 5 次可重設）" : ""}`
+            : `第 ${text.split("\n").length} 行，第 ${text.split("\n").slice(-1)[0].length + 1} 欄`}
+        </span>
+        <span className="ml-auto">100%</span>
         <span className="ml-4">Windows (CRLF)</span>
         <span className="ml-4">UTF-8</span>
       </div>
