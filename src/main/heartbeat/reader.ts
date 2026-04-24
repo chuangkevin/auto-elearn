@@ -129,6 +129,13 @@ export async function extractTicket(
         } catch {
           /* fall through to default */
         }
+        // Leave the reader page open for ~8 seconds AFTER finding the ticket
+        // so the SPOC's own JS finishes initialising the reading session on
+        // the server. For some content providers (全民AI通識課 / 好好用 AI /
+        // 微學習 類) just extracting the ticket and closing immediately
+        // leaves the session "half-created" — heartbeats succeed but time
+        // doesn't accrue. Letting the page breathe fixes that.
+        await sleep(8000);
         return { pTicket: data.pTicket, encCid: data.cid, origin };
       }
       await sleep(500);
