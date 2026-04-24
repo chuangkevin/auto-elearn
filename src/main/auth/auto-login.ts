@@ -78,6 +78,69 @@ export async function performAutoLogin(
 
       // Give the aspnet page ~700ms so its own JS wires up event listeners before we fill.
       await new Promise((r) => setTimeout(r, 700));
+
+      // First: try the E等閱讀家 strategy — exact IDs `aliasid` / `pas` and the
+      // `button.btn.btn-peel.w-100` CSS class (decompiled from the original
+      // tool, which is known to work). Sub-agency clogin pages may differ, so
+      // fall through to the heuristic path if the IDs aren't present.
+      try {
+        const exact: {
+          ok: boolean;
+          filled?: boolean;
+          btnRect?: { x: number; y: number; width: number; height: number };
+        } = await win.webContents.executeJavaScript(
+          `(() => {
+            const acct = document.getElementById('aliasid');
+            const pw = document.getElementById('pas');
+            const btn = document.querySelector('button.btn.btn-peel.w-100');
+            if (!acct || !pw || !btn) return { ok: false };
+            const setValue = (el, v) => {
+              const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+              if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            setValue(acct, ${JSON.stringify(creds.account)});
+            setValue(pw, ${JSON.stringify(creds.password)});
+            acct.dispatchEvent(new Event('blur', { bubbles: true }));
+            pw.dispatchEvent(new Event('blur', { bubbles: true }));
+            const r = btn.getBoundingClientRect();
+            return { ok: true, filled: true, btnRect: { x: r.x, y: r.y, width: r.width, height: r.height } };
+          })()`,
+          true,
+        );
+
+        if (exact?.ok && exact.btnRect) {
+          // Send a REAL synthetic mouse click via Electron's sendInputEvent —
+          // this is trusted (isTrusted=true) in the renderer context, which
+          // aspnet's jQuery handlers require to fire GetApTicketV2 + chain.
+          // element.click() via executeJavaScript is NOT trusted and gets
+          // silently dropped.
+          const cx = Math.round(exact.btnRect.x + exact.btnRect.width / 2);
+          const cy = Math.round(exact.btnRect.y + exact.btnRect.height / 2);
+          // Wait 250ms for the blur-triggered GetUID XHR to land before clicking.
+          await new Promise((r) => setTimeout(r, 300));
+          win.webContents.sendInputEvent({
+            type: "mouseDown",
+            x: cx,
+            y: cy,
+            button: "left",
+            clickCount: 1,
+          });
+          win.webContents.sendInputEvent({
+            type: "mouseUp",
+            x: cx,
+            y: cy,
+            button: "left",
+            clickCount: 1,
+          });
+          // Navigation will fire did-navigate; checkUrl resolves when we land on elearn.
+          return;
+        }
+      } catch {
+        /* fall through to heuristic */
+      }
+
       try {
         const result: { ok: boolean; reason?: string; foundSelectors?: Record<string, boolean> } =
           await win.webContents.executeJavaScript(
