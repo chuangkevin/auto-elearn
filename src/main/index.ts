@@ -544,11 +544,13 @@ async function runPipelineFor(cids: string[]): Promise<void> {
             navigateViewToCourse(cid);
           }
         } else if (stage === "tick") {
-          // One-shot dump of server's first response body so we can debug when
-          // heartbeats return 200 but 閱讀時數 refuses to move.
           const first = (extra as { firstResponse?: string })?.firstResponse;
           if (first !== undefined) {
             log("info", `[${card.name}] 心跳 server 回應: ${JSON.stringify(first)}`);
+          }
+          const enter = (extra as { enterSession?: { status: number; ok: boolean } })?.enterSession;
+          if (enter) {
+            log("info", `[${card.name}] enterReadingSession → ${enter.ok ? "OK" : "FAIL"} (status ${enter.status})`);
           }
         } else if (stage === "done") {
           const pings = (extra as { pings?: number })?.pings ?? 0;
@@ -573,7 +575,12 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         state.now.action = "heartbeat";
         state.now.detail = `${formatHms(card.readSec)} / ${formatHms(card.requiredSec)} (${pings} pings)`;
         pushState();
-        if (pings === 1 || pings % 30 === 0) {
+        // Log every 6 pings (~30s) for a while, then taper to every 30 pings
+        // once the course is clearly progressing. Gives the user feedback
+        // during the critical first 2–3 minutes where server decides whether
+        // to credit.
+        const interval = pings < 30 ? 6 : 30;
+        if (pings === 1 || pings % interval === 0) {
           log("info", `${card.name}: ${pings} ping, 累積 ${formatHms(elapsedSec)}`);
         }
       },
