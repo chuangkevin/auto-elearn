@@ -1424,6 +1424,16 @@ function CourseRow({
   );
 }
 
+function formatHms(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return "00:00:00";
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(h)}:${pad(m)}:${pad(r)}`;
+}
+
 function phaseLabel(p: string): string {
   switch (p) {
     case "pending":
@@ -1536,17 +1546,34 @@ function Monitor({ state }: { state: AppState }) {
           📋 執行中課程 ({running.length} / {scope.length} 本次)
         </h2>
         <div className="space-y-1 max-h-48 overflow-auto bg-slate-900/40 rounded p-2">
-          {running.map((c) => (
-            <div
-              key={c.cid}
-              className="flex justify-between items-center text-sm px-2 py-1 rounded bg-slate-800/30"
-            >
-              <span className="truncate">{c.name}</span>
-              <span className="text-slate-400 whitespace-nowrap ml-2">
-                {phaseLabel(c.phase)}
-              </span>
-            </div>
-          ))}
+          {running.map((c) => {
+            const pct = c.requiredSec > 0 ? Math.min(100, Math.round((c.readSec / c.requiredSec) * 100)) : 0;
+            return (
+              <div
+                key={c.cid}
+                className="text-sm px-2 py-1.5 rounded bg-slate-800/30"
+              >
+                <div className="flex justify-between items-baseline gap-2">
+                  <span className="truncate flex-1">{c.name}</span>
+                  <span className="text-[10px] text-slate-500 whitespace-nowrap">#{c.cid}</span>
+                </div>
+                <div className="flex justify-between items-center gap-2 mt-0.5">
+                  <div className="flex-1 h-1 bg-slate-900/60 rounded overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500 transition-all"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
+                    {formatHms(c.readSec)} / {formatHms(c.requiredSec)}
+                  </span>
+                  <span className="text-[10px] text-slate-400 whitespace-nowrap min-w-[3rem] text-right">
+                    {phaseLabel(c.phase)}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
           {running.length === 0 && (
             <div className="text-slate-500 text-sm">（沒有進行中項目）</div>
           )}

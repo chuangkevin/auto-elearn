@@ -57,11 +57,9 @@ export async function loginViaEcpa(
       return { ok: false, stage: "clogin", error: `HTTP ${clogin.status}` };
     }
 
-    // 2.5 If `account` looks like a SHORT ALIAS (anything other than one-letter
-    //     + 9-digits 身分證字號 format), call Home/GetUID to resolve it to the
-    //     full ID. eCPA's GetApTicketV2 only accepts the full ID; sending a
-    //     short alias returns a silent failure and EnterApplicationTwoWay
-    //     later returns just "0".
+    // 2.5 If `account` doesn't look like a full 身分證字號 (one letter + 9 digits),
+    //     call Home/GetUID to resolve the short alias. The response is PLAIN
+    //     TEXT — just the full ID, e.g. body = "F130918271" (no JSON wrapping).
     let fullAccount = account.trim();
     if (!/^[A-Za-z]\d{9}$/.test(fullAccount)) {
       const uid = await req(
@@ -75,23 +73,26 @@ export async function loginViaEcpa(
       if (uid.status >= 400) {
         return { ok: false, stage: "GetUID", error: `HTTP ${uid.status}` };
       }
-      // Response format observed: JSON-ish {"returnCode":"0","uid":"F130918271",...}
-      // or plain string with the full ID embedded.
-      const resolved =
-        uid.body.match(/["'](?:UID|uid)["']\s*:\s*["']([A-Za-z]\d{9})["']/)?.[1] ||
-        uid.body.match(/\b([A-Z]\d{9})\b/)?.[1];
-      if (resolved) {
-        fullAccount = resolved;
+      const trimmed = uid.body.trim();
+      if (/^[A-Za-z]\d{9}$/.test(trimmed)) {
+        fullAccount = trimmed;
       } else {
-        return {
-          ok: false,
-          stage: "GetUID",
-          error: `alias not resolvable (body: ${uid.body.slice(0, 200)})`,
-        };
+        // Fallback: letter+9digits anywhere in body
+        const m = uid.body.match(/\b([A-Za-z]\d{9})\b/);
+        if (m) fullAccount = m[1];
+        else {
+          return {
+            ok: false,
+            stage: "GetUID",
+            error: `alias not resolvable (body: "${uid.body.slice(0, 120)}")`,
+          };
+        }
       }
     }
 
-    // 3. GetApTicketV2 — the actual credential check.
+    // 3. GetApTicketV2 — credential check; RESPONSE BODY IS THE APReqEncodedData
+    //    hex string directly (no JSON envelope). Empty / non-hex body = wrong
+    //    password.
     const ticket = await req(
       session,
       "POST",
@@ -103,18 +104,18 @@ export async function loginViaEcpa(
     if (ticket.status >= 400) {
       return { ok: false, stage: "GetApTicketV2", error: `HTTP ${ticket.status}` };
     }
-    // Response body is usually a small JSON like {"returnCode":"0","returnDesc":"OK"}.
-    // Anything with returnCode != "0" means wrong account/password.
-    const rc = ticket.body.match(/"returnCode"\s*:\s*"?([^",}]+)/)?.[1]?.trim();
-    if (rc && rc !== "0" && rc !== "00" && rc !== "OK") {
+    const hex = ticket.body.trim();
+    if (!/^[0-9A-Fa-f]{100,}$/.test(hex)) {
+      // Short / empty / "0" body = credential mismatch (or eCPA lockout).
       return {
         ok: false,
         stage: "GetApTicketV2",
-        error: `returnCode=${rc} (${ticket.body.slice(0, 200)})`,
+        error: `帳號或密碼錯誤 (body: "${hex.slice(0, 120)}")`,
       };
     }
+    const encoded = hex;
 
-    // 4. EnterTwoWayLog — records the login event. Fire-and-forget.
+    // 4. EnterTwoWayLog — records the login event. Body responds "0" on success.
     await req(
       session,
       "POST",
@@ -130,9 +131,8 @@ export async function loginViaEcpa(
       "https://ecpa.dgpa.gov.tw",
     );
 
-    // 5. EnterApplicationTwoWay — this returns an HTML form with a hidden
-    //    APReqEncodedData input that the real page auto-submits to sso_verify.
-    const ap2 = await req(
+    // 5. EnterApplicationTwoWay — signals "I'm about to jump to the app". Body "0".
+    await req(
       session,
       "POST",
       "https://ecpa.dgpa.gov.tw/Home/EnterApplicationTwoWay",
@@ -140,24 +140,6 @@ export async function loginViaEcpa(
       CLOGIN_ASPX_URL,
       "https://ecpa.dgpa.gov.tw",
     );
-    if (ap2.status >= 400) {
-      return { ok: false, stage: "EnterApplicationTwoWay", error: `HTTP ${ap2.status}` };
-    }
-
-    // Extract APReqEncodedData. Try several formats: HTML input, JSON, or raw body.
-    const encoded =
-      ap2.body.match(
-        /name\s*=\s*["']APReqEncodedData["']\s+value\s*=\s*["']([0-9A-Fa-f]+)["']/,
-      )?.[1] ||
-      ap2.body.match(/["']APReqEncodedData["']\s*:\s*["']([0-9A-Fa-f]+)["']/)?.[1] ||
-      ap2.body.match(/APReqEncodedData=([0-9A-Fa-f]+)/)?.[1];
-    if (!encoded) {
-      return {
-        ok: false,
-        stage: "EnterApplicationTwoWay",
-        error: `no APReqEncodedData in response (${ap2.body.slice(0, 200)})`,
-      };
-    }
 
     // 6. POST sso_verify.php with the encoded ticket. 302 to sso_home;
     //    net.request auto-follows into the final /mooc/index.php load,
