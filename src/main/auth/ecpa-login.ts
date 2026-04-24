@@ -141,9 +141,10 @@ export async function loginViaEcpa(
       "https://ecpa.dgpa.gov.tw",
     );
 
-    // 6. POST sso_verify.php with the encoded ticket. 302 to sso_home;
-    //    net.request auto-follows into the final /mooc/index.php load,
-    //    picking up idx/suc/PHPSESSID cookies on the way.
+    // 6. POST sso_verify.php with the encoded ticket. 302 → sso_home → 302
+    //    /mooc/index.php; net.request auto-follows with useSessionCookies so
+    //    the idx / suc / PHPSESSID cookies from the redirects land in our
+    //    shared session jar.
     const sso = await req(
       session,
       "POST",
@@ -156,14 +157,21 @@ export async function loginViaEcpa(
       return { ok: false, stage: "sso_verify", error: `HTTP ${sso.status}` };
     }
 
-    // 7. Confirm logged in.
-    const home = await req(
-      session,
-      "GET",
-      "https://elearn.hrd.gov.tw/mooc/index.php",
-    );
-    if (!/個人專區|learn_dashboard/.test(home.body)) {
-      return { ok: false, stage: "verify", error: "dashboard marker not in body" };
+    // 7. Trust-but-verify: check that session now has the auth cookies set.
+    //    This beats pulling /mooc/index.php — that endpoint always returns
+    //    200 HTML regardless of auth (its content just differs) and the
+    //    rendered body doesn't always include our "個人專區" marker when
+    //    fetched server-side without full JS execution.
+    const cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
+    const cookieNames = new Set(cookies.map((c) => c.name));
+    const required = ["idx", "suc"];
+    const missing = required.filter((n) => !cookieNames.has(n));
+    if (missing.length) {
+      return {
+        ok: false,
+        stage: "verify",
+        error: `session missing cookies: ${missing.join(", ")} (have: ${Array.from(cookieNames).join(",")})`,
+      };
     }
     return { ok: true };
   } catch (e) {
