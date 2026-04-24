@@ -40,6 +40,8 @@ import { performAutoLogin } from "./auth/auto-login";
 import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
+import { fillSurvey } from "./survey/filler";
+import { writeReflection } from "./reflection/writer";
 
 function maskAccount(acc: string): string {
   if (!acc) return "";
@@ -516,8 +518,68 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     log("info", "沒有需要測驗的課程");
   }
 
-  // TODO: survey / rating / reflection phases
-  log("info", "TODO: 問卷 / 評價 / 心得 — 尚未實作");
+  // 4. Survey / rating phase.
+  const afterExamTracked = await discover(session);
+  const needSurvey = afterExamTracked.filter(
+    (t) =>
+      selected.has(t.course.cid) &&
+      t.course.isClassing &&
+      (t.course.isSurveyDones ?? 0) === 0,
+  );
+  if (needSurvey.length > 0) {
+    log("info", `${needSurvey.length} 門課進入問卷 / 評價階段`);
+    state.now.action = "survey";
+    pushState();
+    for (const t of needSurvey) {
+      if (abortSignal.aborted) break;
+      const card = state.courses.find((c) => c.cid === t.course.cid);
+      const name = card?.name ?? t.course.cid;
+      state.now.courseId = t.course.cid;
+      state.now.courseName = name;
+      state.now.detail = "填問卷...";
+      pushState();
+      log("info", `問卷：${name}`);
+      const sr = await fillSurvey(t.course.cid, session, {
+        onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+      });
+      if (sr.ok) {
+        log("info", `問卷完成 ${name}：勾選 ${sr.filled} 題 + 繳交`);
+        if (card) card.surveyDone = true;
+      } else {
+        log("warn", `問卷失敗 ${name}：${sr.error ?? "unknown"}`);
+      }
+    }
+  } else {
+    log("info", "沒有需要填寫的問卷");
+  }
+
+  // 5. Reflection / 學習心得 — best effort.
+  const needReflection = afterExamTracked.filter(
+    (t) => selected.has(t.course.cid) && t.course.isClassing,
+  );
+  if (needReflection.length > 0) {
+    state.now.action = "reflection";
+    pushState();
+    for (const t of needReflection) {
+      if (abortSignal.aborted) break;
+      const card = state.courses.find((c) => c.cid === t.course.cid);
+      const name = card?.name ?? t.course.cid;
+      state.now.courseId = t.course.cid;
+      state.now.courseName = name;
+      state.now.detail = "寫心得...";
+      pushState();
+      const rr = await writeReflection(t.course.cid, name, session, {
+        onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+      });
+      if (rr.ok) {
+        log("info", `心得完成 ${name}（${rr.source}）`);
+        if (card) card.reflectionDone = true;
+      } else if (rr.error && !rr.error.includes("略過")) {
+        log("warn", `心得失敗 ${name}：${rr.error}`);
+      }
+    }
+  }
+
   stopSessionWatchdog();
   state.status = "done";
   state.now.action = "idle";
