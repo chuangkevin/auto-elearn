@@ -326,6 +326,32 @@ async function showPrefilledEcpaLogin(creds: SavedCredentials): Promise<void> {
   if (!elearnView) return;
   const ECPA_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
   const wc = elearnView.webContents;
+
+  // Reconcile the renderer state before we navigate away from wherever the
+  // BrowserView currently is: we KNOW the user isn't logged in server-side
+  // (that's why we're falling through to prefill), so the left panel must
+  // show await_login, not a stale selecting screen. Restart detectLogin so
+  // as soon as the user clicks 登入 and lands back on elearn we flip state.
+  state.status = "await_login";
+  state.user = undefined;
+  state.pipelineCids = undefined;
+  state.courses = [];
+  state.now = { action: "idle" };
+  pushState();
+  log("info", "等候登入中（自動登入失敗，請點橘框登入）");
+  // Fire-and-forget: this runs in parallel with the navigate below.
+  detectLogin(wc)
+    .then(async (user) => {
+      state.user = { name: user };
+      log("info", `偵測到登入：${user}`);
+      await dismissNuisancePopups(wc);
+      await refreshCourses();
+      state.status = "selecting";
+      log("info", "請在上方搜尋 / 勾選要刷的課程，按「確認操作」即可");
+      pushState();
+    })
+    .catch((err) => log("error", `登入偵測失敗：${err}`));
+
   const onLoad = () => {
     const url = wc.getURL();
     if (!url.includes("ecpa.dgpa.gov.tw")) return;
