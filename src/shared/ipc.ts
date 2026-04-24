@@ -102,7 +102,35 @@ export const IPC = {
   REFRESH_COURSES: "courses:refresh",
   /** renderer → main: navigate the embedded BrowserView */
   NAVIGATE_VIEW: "view:navigate",
+  /** main → renderer: prompt the user to save freshly-sniffed credentials */
+  CREDS_PROMPT_SAVE: "creds:prompt-save",
+  /** renderer → main: user accepted / declined the save-creds prompt */
+  CREDS_SAVE_ANSWER: "creds:save-answer",
+  /** renderer → main: forget the stored credentials */
+  CREDS_FORGET: "creds:forget",
+  /** renderer → main: query current saved-credentials state */
+  CREDS_STATUS: "creds:status",
+  /** main → renderer: auto-login in progress / result */
+  AUTOLOGIN_PROGRESS: "autologin:progress",
 } as const;
+
+export interface CredentialsStatus {
+  saved: boolean;
+  /** Masked account the user can see ("F*****8271") without exposing the full ID */
+  maskedAccount?: string;
+  savedAt?: string;
+  lastUsedAt?: string;
+}
+
+export interface CredsPromptPayload {
+  /** Masked account for the UI. Server never receives the plain value back. */
+  maskedAccount: string;
+}
+
+export interface AutoLoginProgress {
+  stage: "start" | "filling" | "submitted" | "success" | "failed";
+  error?: string;
+}
 
 export interface CourseCandidate {
   cid: string;

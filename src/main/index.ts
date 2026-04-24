@@ -5,8 +5,11 @@ import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 import {
   IPC,
   type AppState,
+  type AutoLoginProgress,
   type CourseCandidate,
   type CourseCard,
+  type CredentialsStatus,
+  type CredsPromptPayload,
   type ViewBounds,
 } from "../shared/ipc";
 import { createBus } from "./bus";
@@ -22,6 +25,23 @@ import {
   type Course,
 } from "./http/elearn";
 import { runHeartbeatBatch } from "./heartbeat/engine";
+import {
+  clearCredentials,
+  hasSavedCredentials,
+  loadCredentials,
+  saveCredentials,
+  touchCredentials,
+  type SavedCredentials,
+} from "./auth/credentials";
+import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
+import { performAutoLogin } from "./auth/auto-login";
+import { isSessionAlive } from "./auth/session-watchdog";
+
+function maskAccount(acc: string): string {
+  if (!acc) return "";
+  if (acc.length <= 4) return acc;
+  return `${acc.slice(0, 1)}${"*".repeat(acc.length - 5)}${acc.slice(-4)}`;
+}
 
 const HEARTBEAT_PARALLEL = 8;
 const HEARTBEAT_INTERVAL_MS = 5000;
@@ -49,6 +69,15 @@ const HOMEPAGE = "https://elearn.hrd.gov.tw/mooc/index.php";
 let mainWindow: BrowserWindow | null = null;
 let elearnView: BrowserView | null = null;
 const bus = createBus();
+
+// Credentials sniffed during the current login; held in-memory until the user answers
+// the "save?" prompt so we never touch disk without consent.
+let pendingSniffed: SniffedCredentials | null = null;
+let autoLoginInFlight = false;
+
+function emitAutoLogin(progress: AutoLoginProgress) {
+  mainWindow?.webContents.send(IPC.AUTOLOGIN_PROGRESS, progress);
+}
 
 // ── Central state ──────────────────────────────────────────────
 const state: AppState = {
@@ -111,9 +140,21 @@ function createWindow() {
   });
   elearnView.setAutoResize({ width: true, height: false });
 
+  // Sniff login POST so we can offer "remember me" after manual login succeeds.
+  attachLoginSniffer(elearnView.webContents.session, (creds) => {
+    pendingSniffed = creds;
+    log("info", "已偵測到 eCPA 登入表單，待登入成功後會詢問是否儲存帳密");
+  });
+
   state.status = "await_login";
   log("info", "等待使用者登入 e 等公務園");
   pushState();
+
+  // If creds are already saved, try silent auto-login first. User can still log in
+  // manually if this fails (we just do nothing and wait for detectLogin).
+  if (hasSavedCredentials()) {
+    void tryAutoLogin().catch(() => void 0);
+  }
 
   detectLogin(elearnView.webContents)
     .then(async (user) => {
@@ -121,11 +162,64 @@ function createWindow() {
       log("info", `偵測到登入：${user}`);
       await dismissNuisancePopups(elearnView!.webContents);
       await refreshCourses();
+
+      // If we sniffed creds during this login session AND they aren't yet saved,
+      // ask the user whether to remember them.
+      if (pendingSniffed && !hasSavedCredentials()) {
+        const payload: CredsPromptPayload = { maskedAccount: maskAccount(pendingSniffed.account) };
+        mainWindow?.webContents.send(IPC.CREDS_PROMPT_SAVE, payload);
+      } else if (pendingSniffed && hasSavedCredentials()) {
+        // Creds already saved; transparently refresh password in case user changed it.
+        const existing = loadCredentials();
+        if (existing && existing.password !== pendingSniffed.password) {
+          saveCredentials({
+            account: pendingSniffed.account,
+            password: pendingSniffed.password,
+            alias: existing.alias,
+            savedAt: existing.savedAt,
+            lastUsedAt: new Date().toISOString(),
+          });
+          log("info", "偵測到密碼已變更，已更新儲存");
+        } else {
+          touchCredentials();
+        }
+      }
+
       state.status = "selecting";
       log("info", "請在上方搜尋 / 勾選要刷的課程，按「開始」即可");
       pushState();
     })
     .catch((err) => log("error", `登入偵測失敗：${err}`));
+}
+
+async function tryAutoLogin(): Promise<boolean> {
+  if (autoLoginInFlight) return false;
+  if (!elearnView) return false;
+  const creds = loadCredentials();
+  if (!creds) return false;
+  autoLoginInFlight = true;
+  emitAutoLogin({ stage: "start" });
+  log("info", `偵測到已儲存帳密（${maskAccount(creds.account)}），背景自動登入中...`);
+  try {
+    const res = await performAutoLogin(creds, elearnView.webContents.session, { timeoutMs: 60_000 });
+    if (res.ok) {
+      emitAutoLogin({ stage: "success" });
+      log("info", "自動登入成功");
+      touchCredentials();
+      // Navigate the visible view to the homepage so the user sees the logged-in state.
+      elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
+      return true;
+    }
+    emitAutoLogin({ stage: "failed", error: res.error });
+    log("warn", `自動登入失敗：${res.error ?? "unknown"}；請手動登入`);
+    return false;
+  } catch (e) {
+    emitAutoLogin({ stage: "failed", error: e instanceof Error ? e.message : String(e) });
+    log("warn", `自動登入發生例外：${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  } finally {
+    autoLoginInFlight = false;
+  }
 }
 
 // ── Discovery helpers ─────────────────────────────────────────
@@ -428,6 +522,43 @@ ipcMain.handle(IPC.UNENROLL_COURSE, async (_evt, cid: string) => {
     log("warn", `退選失敗 ${name}：${res.error ?? "unknown"}`);
   }
   return res;
+});
+
+ipcMain.handle(IPC.CREDS_STATUS, (): CredentialsStatus => {
+  const c = loadCredentials();
+  if (!c) return { saved: false };
+  return {
+    saved: true,
+    maskedAccount: maskAccount(c.account),
+    savedAt: c.savedAt,
+    lastUsedAt: c.lastUsedAt,
+  };
+});
+
+ipcMain.on(IPC.CREDS_SAVE_ANSWER, (_evt, save: boolean) => {
+  if (!pendingSniffed) return;
+  if (!save) {
+    log("info", "使用者選擇不儲存帳密");
+    pendingSniffed = null;
+    return;
+  }
+  const toSave: SavedCredentials = {
+    account: pendingSniffed.account,
+    password: pendingSniffed.password,
+    savedAt: new Date().toISOString(),
+  };
+  const res = saveCredentials(toSave);
+  if (res.ok) {
+    log("info", `已儲存帳密（${maskAccount(toSave.account)}），下次 session 過期可自動重登`);
+  } else {
+    log("warn", `儲存帳密失敗：${res.reason ?? "unknown"}`);
+  }
+  pendingSniffed = null;
+});
+
+ipcMain.on(IPC.CREDS_FORGET, () => {
+  clearCredentials();
+  log("info", "已清除儲存的帳密");
 });
 
 ipcMain.on(IPC.PIPELINE_START, (_evt, cids: string[]) => {

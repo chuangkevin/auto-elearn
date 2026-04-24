@@ -2,7 +2,10 @@ import { contextBridge, ipcRenderer } from "electron";
 import {
   IPC,
   type AppState,
+  type AutoLoginProgress,
   type CourseCandidate,
+  type CredsPromptPayload,
+  type CredentialsStatus,
   type ViewBounds,
 } from "../shared/ipc";
 
@@ -27,6 +30,19 @@ const api = {
   startPipeline: (cids: string[]) => ipcRenderer.send(IPC.PIPELINE_START, cids),
   unenrollCourse: (cid: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke(IPC.UNENROLL_COURSE, cid),
+  getCredsStatus: (): Promise<CredentialsStatus> => ipcRenderer.invoke(IPC.CREDS_STATUS),
+  forgetCredentials: () => ipcRenderer.send(IPC.CREDS_FORGET),
+  answerCredsPrompt: (save: boolean) => ipcRenderer.send(IPC.CREDS_SAVE_ANSWER, save),
+  onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => {
+    const listener = (_evt: Electron.IpcRendererEvent, p: CredsPromptPayload) => cb(p);
+    ipcRenderer.on(IPC.CREDS_PROMPT_SAVE, listener);
+    return () => ipcRenderer.off(IPC.CREDS_PROMPT_SAVE, listener);
+  },
+  onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => {
+    const listener = (_evt: Electron.IpcRendererEvent, p: AutoLoginProgress) => cb(p);
+    ipcRenderer.on(IPC.AUTOLOGIN_PROGRESS, listener);
+    return () => ipcRenderer.off(IPC.AUTOLOGIN_PROGRESS, listener);
+  },
 };
 
 contextBridge.exposeInMainWorld("api", api);

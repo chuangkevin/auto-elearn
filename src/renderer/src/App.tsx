@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, CourseCandidate, ViewBounds } from "@shared/ipc";
+import type {
+  AppState,
+  AutoLoginProgress,
+  CourseCandidate,
+  CredentialsStatus,
+  CredsPromptPayload,
+  ViewBounds,
+} from "@shared/ipc";
 
 declare global {
   interface Window {
@@ -17,6 +24,11 @@ declare global {
       searchByCodes: (codes: string[]) => Promise<CourseCandidate[]>;
       startPipeline: (cids: string[]) => void;
       unenrollCourse: (cid: string) => Promise<{ ok: boolean; error?: string }>;
+      getCredsStatus: () => Promise<CredentialsStatus>;
+      forgetCredentials: () => void;
+      answerCredsPrompt: (save: boolean) => void;
+      onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => () => void;
+      onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => () => void;
     };
   }
 }
@@ -91,6 +103,42 @@ export default function App() {
   const userAdjustedRatio = useRef(false);
   const prevStatus = useRef<string | null>(null);
   const dragging = useRef(false);
+
+  // Credentials + auto-login UI state
+  const [credsPrompt, setCredsPrompt] = useState<CredsPromptPayload | null>(null);
+  const [credsStatus, setCredsStatus] = useState<CredentialsStatus | null>(null);
+  const [autoLogin, setAutoLogin] = useState<AutoLoginProgress | null>(null);
+
+  useEffect(() => {
+    window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
+    const offPrompt = window.api.onCredsPrompt((p) => setCredsPrompt(p));
+    const offAuto = window.api.onAutoLoginProgress((p) => {
+      setAutoLogin(p);
+      if (p.stage === "success" || p.stage === "failed") {
+        // Refresh status; dismiss banner after a short delay
+        window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
+        setTimeout(() => setAutoLogin((prev) => (prev?.stage === p.stage ? null : prev)), 3500);
+      }
+    });
+    return () => {
+      offPrompt();
+      offAuto();
+    };
+  }, []);
+
+  function answerCredsPrompt(save: boolean) {
+    window.api.answerCredsPrompt(save);
+    setCredsPrompt(null);
+    if (save) {
+      setTimeout(() => window.api.getCredsStatus().then(setCredsStatus), 250);
+    }
+  }
+
+  function forgetCreds() {
+    if (!confirm("確定要清除已儲存的帳密嗎？之後 session 過期就需要手動登入。")) return;
+    window.api.forgetCredentials();
+    setCredsStatus({ saved: false });
+  }
 
   // State-aware default: shrink the BrowserView during Monitor, unless the
   // user has explicitly resized the divider this session.
@@ -214,6 +262,66 @@ export default function App() {
       >
         {collapsed ? "🖥 展開瀏覽器" : "📴 收起瀏覽器"}
       </button>
+
+      {/* Auto-login status toast */}
+      {autoLogin && (
+        <div
+          className={`absolute left-1/2 -translate-x-1/2 top-3 z-50 px-4 py-2 rounded text-sm shadow-lg border backdrop-blur ${
+            autoLogin.stage === "success"
+              ? "bg-emerald-600/90 border-emerald-400 text-white"
+              : autoLogin.stage === "failed"
+              ? "bg-rose-600/90 border-rose-400 text-white"
+              : "bg-slate-800/90 border-slate-600 text-slate-100"
+          }`}
+        >
+          {autoLogin.stage === "start" && "🔐 背景自動登入中..."}
+          {autoLogin.stage === "filling" && "🔐 填寫登入表單..."}
+          {autoLogin.stage === "submitted" && "🔐 等待驗證..."}
+          {autoLogin.stage === "success" && "✅ 自動登入成功"}
+          {autoLogin.stage === "failed" && `❌ 自動登入失敗：${autoLogin.error ?? "請手動登入"}`}
+        </div>
+      )}
+
+      {/* Saved-credentials status chip (bottom-left of top panel) */}
+      {credsStatus?.saved && (
+        <button
+          className="absolute left-3 top-3 z-40 px-2 py-1 rounded bg-slate-800/70 hover:bg-slate-700 text-xs text-emerald-300 border border-slate-600 backdrop-blur"
+          onClick={forgetCreds}
+          title="點擊清除儲存的帳密"
+        >
+          🔑 已記憶 {credsStatus.maskedAccount ?? ""}
+        </button>
+      )}
+
+      {/* Save-creds prompt modal */}
+      {credsPrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
+          <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl">
+            <h2 className="text-lg font-semibold text-slate-100 mb-2">儲存帳密以便自動重登？</h2>
+            <p className="text-sm text-slate-300 mb-1">
+              偵測到 eCPA 登入成功（帳號 <span className="text-emerald-300">{credsPrompt.maskedAccount}</span>）。
+            </p>
+            <p className="text-sm text-slate-400 mb-4 leading-relaxed">
+              儲存後，session 過期時系統會用此帳密在背景重新登入，不打斷你刷課。
+              帳密經 Windows DPAPI 加密後存在 <code>userData</code>，只有你這台電腦的你可以解開。
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                onClick={() => answerCredsPrompt(false)}
+              >
+                不要，這次就好
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm"
+                onClick={() => answerCredsPrompt(true)}
+              >
+                儲存並啟用自動重登
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

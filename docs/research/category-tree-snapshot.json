@@ -1,0 +1,947 @@
+[
+  {
+    "rowN": 1,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10000014",
+    "name": "公務人員10小時課程專區",
+    "parentCategoryId": null,
+    "path": "公務人員10小時課程專區"
+  },
+  {
+    "rowN": 2,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10040389",
+    "name": "人工智慧專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 人工智慧專區"
+  },
+  {
+    "rowN": 3,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040390",
+    "name": "人工智慧基礎認知",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 人工智慧基礎認知"
+  },
+  {
+    "rowN": 4,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040391",
+    "name": "法制倫理規範",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 法制倫理規範"
+  },
+  {
+    "rowN": 5,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040392",
+    "name": "生成式人工智慧",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 生成式人工智慧"
+  },
+  {
+    "rowN": 6,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040393",
+    "name": "內容生成及數據分析",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 內容生成及數據分析"
+  },
+  {
+    "rowN": 7,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040394",
+    "name": "人工智慧公務應用案例",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 人工智慧公務應用案例"
+  },
+  {
+    "rowN": 8,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040395",
+    "name": "人工智慧導入與技術",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 人工智慧導入與技術"
+  },
+  {
+    "rowN": 9,
+    "parentN": 2,
+    "depth": 2,
+    "categoryId": "10040396",
+    "name": "人工智慧產業應用案例",
+    "parentCategoryId": "10040389",
+    "path": "公務人員10小時課程專區 > 人工智慧專區 > 人工智慧產業應用案例"
+  },
+  {
+    "rowN": 10,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000015",
+    "name": "重大政策相關議題",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 重大政策相關議題"
+  },
+  {
+    "rowN": 11,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000016",
+    "name": "環境教育專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 環境教育專區"
+  },
+  {
+    "rowN": 12,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000594",
+    "name": "性別平等專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 性別平等專區"
+  },
+  {
+    "rowN": 13,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000017",
+    "name": "廉政與服務倫理專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 廉政與服務倫理專區"
+  },
+  {
+    "rowN": 14,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000535",
+    "name": "人權教育專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 人權教育專區"
+  },
+  {
+    "rowN": 15,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000683",
+    "name": "行政中立專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 行政中立專區"
+  },
+  {
+    "rowN": 16,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10000684",
+    "name": "多元族群文化專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 多元族群文化專區"
+  },
+  {
+    "rowN": 17,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10002819",
+    "name": "公民參與專區",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 公民參與專區"
+  },
+  {
+    "rowN": 18,
+    "parentN": 1,
+    "depth": 1,
+    "categoryId": "10027647",
+    "name": "轉型正義",
+    "parentCategoryId": "10000014",
+    "path": "公務人員10小時課程專區 > 轉型正義"
+  },
+  {
+    "rowN": 20,
+    "parentN": 19,
+    "depth": 1,
+    "categoryId": "10036546",
+    "name": "人工智慧基礎認知",
+    "parentCategoryId": null,
+    "path": "人工智慧基礎認知"
+  },
+  {
+    "rowN": 21,
+    "parentN": 19,
+    "depth": 1,
+    "categoryId": "10036336",
+    "name": "生成式人工智慧",
+    "parentCategoryId": null,
+    "path": "生成式人工智慧"
+  },
+  {
+    "rowN": 22,
+    "parentN": 19,
+    "depth": 1,
+    "categoryId": "10036337",
+    "name": "內容生成及數據分析",
+    "parentCategoryId": null,
+    "path": "內容生成及數據分析"
+  },
+  {
+    "rowN": 23,
+    "parentN": 19,
+    "depth": 1,
+    "categoryId": "10036338",
+    "name": "人工智慧公務應用案例",
+    "parentCategoryId": null,
+    "path": "人工智慧公務應用案例"
+  },
+  {
+    "rowN": 24,
+    "parentN": 19,
+    "depth": 1,
+    "categoryId": "10036339",
+    "name": "人工智慧導入與技術",
+    "parentCategoryId": null,
+    "path": "人工智慧導入與技術"
+  },
+  {
+    "rowN": 25,
+    "parentN": 19,
+    "depth": 1,
+    "categoryId": "10036340",
+    "name": "人工智慧產業應用案例",
+    "parentCategoryId": null,
+    "path": "人工智慧產業應用案例"
+  },
+  {
+    "rowN": 26,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10027913",
+    "name": "外購課程專區",
+    "parentCategoryId": null,
+    "path": "外購課程專區"
+  },
+  {
+    "rowN": 27,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10027914",
+    "name": "商用外語",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 商用外語"
+  },
+  {
+    "rowN": 28,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10027916",
+    "name": "職場技能",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 職場技能"
+  },
+  {
+    "rowN": 29,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10027915",
+    "name": "經營管理",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 經營管理"
+  },
+  {
+    "rowN": 30,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10027917",
+    "name": "數位行銷",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 數位行銷"
+  },
+  {
+    "rowN": 31,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10027919",
+    "name": "程式語言",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 程式語言"
+  },
+  {
+    "rowN": 32,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10035262",
+    "name": "視覺設計",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 視覺設計"
+  },
+  {
+    "rowN": 33,
+    "parentN": 26,
+    "depth": 1,
+    "categoryId": "10042194",
+    "name": "多元生活",
+    "parentCategoryId": "10027913",
+    "path": "外購課程專區 > 多元生活"
+  },
+  {
+    "rowN": 34,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10007170",
+    "name": "科技素養MRT",
+    "parentCategoryId": null,
+    "path": "科技素養MRT"
+  },
+  {
+    "rowN": 35,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10010426",
+    "name": "英語力-up學習專區",
+    "parentCategoryId": null,
+    "path": "英語力-up學習專區"
+  },
+  {
+    "rowN": 36,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10031743",
+    "name": "FUNDAY",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > FUNDAY"
+  },
+  {
+    "rowN": 37,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10023073",
+    "name": "空中美語",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 空中美語"
+  },
+  {
+    "rowN": 38,
+    "parentN": 37,
+    "depth": 2,
+    "categoryId": "10023075",
+    "name": "初級",
+    "parentCategoryId": "10023073",
+    "path": "英語力-up學習專區 > 空中美語 > 初級"
+  },
+  {
+    "rowN": 39,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023079",
+    "name": "Knowledge",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > Knowledge"
+  },
+  {
+    "rowN": 40,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023080",
+    "name": "Life",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > Life"
+  },
+  {
+    "rowN": 41,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023081",
+    "name": "Literature",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > Literature"
+  },
+  {
+    "rowN": 42,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023082",
+    "name": "Office",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > Office"
+  },
+  {
+    "rowN": 43,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023083",
+    "name": "Taiwan",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > Taiwan"
+  },
+  {
+    "rowN": 44,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023084",
+    "name": "Travel",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > Travel"
+  },
+  {
+    "rowN": 45,
+    "parentN": 38,
+    "depth": 3,
+    "categoryId": "10023085",
+    "name": "World culture",
+    "parentCategoryId": "10023075",
+    "path": "英語力-up學習專區 > 空中美語 > 初級 > World culture"
+  },
+  {
+    "rowN": 46,
+    "parentN": 37,
+    "depth": 2,
+    "categoryId": "10023076",
+    "name": "中級以上",
+    "parentCategoryId": "10023073",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上"
+  },
+  {
+    "rowN": 47,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023086",
+    "name": "Knowledge",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > Knowledge"
+  },
+  {
+    "rowN": 48,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023087",
+    "name": "Life",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > Life"
+  },
+  {
+    "rowN": 49,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023088",
+    "name": "Literature",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > Literature"
+  },
+  {
+    "rowN": 50,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023089",
+    "name": "Office",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > Office"
+  },
+  {
+    "rowN": 51,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023090",
+    "name": "Taiwan",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > Taiwan"
+  },
+  {
+    "rowN": 52,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023091",
+    "name": "Travel",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > Travel"
+  },
+  {
+    "rowN": 53,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023092",
+    "name": "World culture",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > World culture"
+  },
+  {
+    "rowN": 54,
+    "parentN": 46,
+    "depth": 3,
+    "categoryId": "10023093",
+    "name": "TOEIC",
+    "parentCategoryId": "10023076",
+    "path": "英語力-up學習專區 > 空中美語 > 中級以上 > TOEIC"
+  },
+  {
+    "rowN": 55,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10023355",
+    "name": "空中英語",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 空中英語"
+  },
+  {
+    "rowN": 56,
+    "parentN": 55,
+    "depth": 2,
+    "categoryId": "10023356",
+    "name": "初級",
+    "parentCategoryId": "10023355",
+    "path": "英語力-up學習專區 > 空中英語 > 初級"
+  },
+  {
+    "rowN": 57,
+    "parentN": 56,
+    "depth": 3,
+    "categoryId": "10023359",
+    "name": "Life",
+    "parentCategoryId": "10023356",
+    "path": "英語力-up學習專區 > 空中英語 > 初級 > Life"
+  },
+  {
+    "rowN": 58,
+    "parentN": 55,
+    "depth": 2,
+    "categoryId": "10023358",
+    "name": "中級以上",
+    "parentCategoryId": "10023355",
+    "path": "英語力-up學習專區 > 空中英語 > 中級以上"
+  },
+  {
+    "rowN": 59,
+    "parentN": 58,
+    "depth": 3,
+    "categoryId": "10023360",
+    "name": "Life",
+    "parentCategoryId": "10023358",
+    "path": "英語力-up學習專區 > 空中英語 > 中級以上 > Life"
+  },
+  {
+    "rowN": 60,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10031311",
+    "name": "看Discovery學英語",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 看Discovery學英語"
+  },
+  {
+    "rowN": 61,
+    "parentN": 60,
+    "depth": 2,
+    "categoryId": "10031313",
+    "name": "中級以上",
+    "parentCategoryId": "10031311",
+    "path": "英語力-up學習專區 > 看Discovery學英語 > 中級以上"
+  },
+  {
+    "rowN": 62,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10031312",
+    "name": "看TaiwanPlus學英語",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 看TaiwanPlus學英語"
+  },
+  {
+    "rowN": 63,
+    "parentN": 62,
+    "depth": 2,
+    "categoryId": "10031314",
+    "name": "中級以上",
+    "parentCategoryId": "10031312",
+    "path": "英語力-up學習專區 > 看TaiwanPlus學英語 > 中級以上"
+  },
+  {
+    "rowN": 64,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10023074",
+    "name": "加盟機關",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 加盟機關"
+  },
+  {
+    "rowN": 65,
+    "parentN": 64,
+    "depth": 2,
+    "categoryId": "10023077",
+    "name": "初級",
+    "parentCategoryId": "10023074",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級"
+  },
+  {
+    "rowN": 66,
+    "parentN": 65,
+    "depth": 3,
+    "categoryId": "10023096",
+    "name": "城市行銷",
+    "parentCategoryId": "10023077",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級 > 城市行銷"
+  },
+  {
+    "rowN": 67,
+    "parentN": 65,
+    "depth": 3,
+    "categoryId": "10023097",
+    "name": "表達技巧",
+    "parentCategoryId": "10023077",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級 > 表達技巧"
+  },
+  {
+    "rowN": 68,
+    "parentN": 65,
+    "depth": 3,
+    "categoryId": "10023098",
+    "name": "外賓接待",
+    "parentCategoryId": "10023077",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級 > 外賓接待"
+  },
+  {
+    "rowN": 69,
+    "parentN": 65,
+    "depth": 3,
+    "categoryId": "10023099",
+    "name": "公務英語",
+    "parentCategoryId": "10023077",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級 > 公務英語"
+  },
+  {
+    "rowN": 70,
+    "parentN": 65,
+    "depth": 3,
+    "categoryId": "10023100",
+    "name": "悅讀英文",
+    "parentCategoryId": "10023077",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級 > 悅讀英文"
+  },
+  {
+    "rowN": 71,
+    "parentN": 65,
+    "depth": 3,
+    "categoryId": "10023101",
+    "name": "其他",
+    "parentCategoryId": "10023077",
+    "path": "英語力-up學習專區 > 加盟機關 > 初級 > 其他"
+  },
+  {
+    "rowN": 72,
+    "parentN": 64,
+    "depth": 2,
+    "categoryId": "10023078",
+    "name": "中級以上",
+    "parentCategoryId": "10023074",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上"
+  },
+  {
+    "rowN": 73,
+    "parentN": 72,
+    "depth": 3,
+    "categoryId": "10023102",
+    "name": "城市行銷",
+    "parentCategoryId": "10023078",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上 > 城市行銷"
+  },
+  {
+    "rowN": 74,
+    "parentN": 72,
+    "depth": 3,
+    "categoryId": "10023103",
+    "name": "表達技巧",
+    "parentCategoryId": "10023078",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上 > 表達技巧"
+  },
+  {
+    "rowN": 75,
+    "parentN": 72,
+    "depth": 3,
+    "categoryId": "10023104",
+    "name": "外賓接待",
+    "parentCategoryId": "10023078",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上 > 外賓接待"
+  },
+  {
+    "rowN": 76,
+    "parentN": 72,
+    "depth": 3,
+    "categoryId": "10023105",
+    "name": "公務英語",
+    "parentCategoryId": "10023078",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上 > 公務英語"
+  },
+  {
+    "rowN": 77,
+    "parentN": 72,
+    "depth": 3,
+    "categoryId": "10023106",
+    "name": "悅讀英文",
+    "parentCategoryId": "10023078",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上 > 悅讀英文"
+  },
+  {
+    "rowN": 78,
+    "parentN": 72,
+    "depth": 3,
+    "categoryId": "10023107",
+    "name": "其他",
+    "parentCategoryId": "10023078",
+    "path": "英語力-up學習專區 > 加盟機關 > 中級以上 > 其他"
+  },
+  {
+    "rowN": 79,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10027799",
+    "name": "跟著海外學生一起環遊世界學英語",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 跟著海外學生一起環遊世界學英語"
+  },
+  {
+    "rowN": 80,
+    "parentN": 79,
+    "depth": 2,
+    "categoryId": "10031192",
+    "name": "中級以上",
+    "parentCategoryId": "10027799",
+    "path": "英語力-up學習專區 > 跟著海外學生一起環遊世界學英語 > 中級以上"
+  },
+  {
+    "rowN": 81,
+    "parentN": 35,
+    "depth": 1,
+    "categoryId": "10036952",
+    "name": "看Voice of America學英語",
+    "parentCategoryId": "10010426",
+    "path": "英語力-up學習專區 > 看Voice of America學英語"
+  },
+  {
+    "rowN": 82,
+    "parentN": 81,
+    "depth": 2,
+    "categoryId": "10036953",
+    "name": "中級以上",
+    "parentCategoryId": "10036952",
+    "path": "英語力-up學習專區 > 看Voice of America學英語 > 中級以上"
+  },
+  {
+    "rowN": 83,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10027389",
+    "name": "淨零永續課程專區",
+    "parentCategoryId": null,
+    "path": "淨零永續課程專區"
+  },
+  {
+    "rowN": 84,
+    "parentN": 83,
+    "depth": 1,
+    "categoryId": "10027392",
+    "name": "淨零減碳",
+    "parentCategoryId": "10027389",
+    "path": "淨零永續課程專區 > 淨零減碳"
+  },
+  {
+    "rowN": 85,
+    "parentN": 83,
+    "depth": 1,
+    "categoryId": "10027393",
+    "name": "氣候變遷",
+    "parentCategoryId": "10027389",
+    "path": "淨零永續課程專區 > 氣候變遷"
+  },
+  {
+    "rowN": 86,
+    "parentN": 83,
+    "depth": 1,
+    "categoryId": "10027394",
+    "name": "永續發展",
+    "parentCategoryId": "10027389",
+    "path": "淨零永續課程專區 > 永續發展"
+  },
+  {
+    "rowN": 87,
+    "parentN": 83,
+    "depth": 1,
+    "categoryId": "10027395",
+    "name": "循環經濟",
+    "parentCategoryId": "10027389",
+    "path": "淨零永續課程專區 > 循環經濟"
+  },
+  {
+    "rowN": 88,
+    "parentN": 83,
+    "depth": 1,
+    "categoryId": "10027396",
+    "name": "綠能科技",
+    "parentCategoryId": "10027389",
+    "path": "淨零永續課程專區 > 綠能科技"
+  },
+  {
+    "rowN": 90,
+    "parentN": 89,
+    "depth": 1,
+    "categoryId": "10027397",
+    "name": "資安通識",
+    "parentCategoryId": null,
+    "path": "資安通識"
+  },
+  {
+    "rowN": 91,
+    "parentN": 90,
+    "depth": 2,
+    "categoryId": "10027399",
+    "name": "資安政策法規",
+    "parentCategoryId": "10027397",
+    "path": "資安通識 > 資安政策法規"
+  },
+  {
+    "rowN": 92,
+    "parentN": 90,
+    "depth": 2,
+    "categoryId": "10027400",
+    "name": "資訊安全管理",
+    "parentCategoryId": "10027397",
+    "path": "資安通識 > 資訊安全管理"
+  },
+  {
+    "rowN": 93,
+    "parentN": 90,
+    "depth": 2,
+    "categoryId": "10027401",
+    "name": "資安防護技術",
+    "parentCategoryId": "10027397",
+    "path": "資安通識 > 資安防護技術"
+  },
+  {
+    "rowN": 94,
+    "parentN": 90,
+    "depth": 2,
+    "categoryId": "10027402",
+    "name": "社交工程防護",
+    "parentCategoryId": "10027397",
+    "path": "資安通識 > 社交工程防護"
+  },
+  {
+    "rowN": 95,
+    "parentN": 89,
+    "depth": 1,
+    "categoryId": "10027398",
+    "name": "資安專業",
+    "parentCategoryId": null,
+    "path": "資安專業"
+  },
+  {
+    "rowN": 96,
+    "parentN": 95,
+    "depth": 2,
+    "categoryId": "10027403",
+    "name": "資訊安全管理",
+    "parentCategoryId": "10027398",
+    "path": "資安專業 > 資訊安全管理"
+  },
+  {
+    "rowN": 97,
+    "parentN": 95,
+    "depth": 2,
+    "categoryId": "10027404",
+    "name": "資安防護技術",
+    "parentCategoryId": "10027398",
+    "path": "資安專業 > 資安防護技術"
+  },
+  {
+    "rowN": 98,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10014384",
+    "name": "新冠肺炎課程專區",
+    "parentCategoryId": null,
+    "path": "新冠肺炎課程專區"
+  },
+  {
+    "rowN": 99,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10011548",
+    "name": "媒體識讀課程專區",
+    "parentCategoryId": null,
+    "path": "媒體識讀課程專區"
+  },
+  {
+    "rowN": 100,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10007169",
+    "name": "家庭教育",
+    "parentCategoryId": null,
+    "path": "家庭教育"
+  },
+  {
+    "rowN": 101,
+    "parentN": null,
+    "depth": 0,
+    "categoryId": "10023342",
+    "name": "全齡樂學課程專區",
+    "parentCategoryId": null,
+    "path": "全齡樂學課程專區"
+  },
+  {
+    "rowN": 102,
+    "parentN": 101,
+    "depth": 1,
+    "categoryId": "10023351",
+    "name": "健康管理",
+    "parentCategoryId": "10023342",
+    "path": "全齡樂學課程專區 > 健康管理"
+  },
+  {
+    "rowN": 103,
+    "parentN": 101,
+    "depth": 1,
+    "categoryId": "10040388",
+    "name": "人際溝通",
+    "parentCategoryId": "10023342",
+    "path": "全齡樂學課程專區 > 人際溝通"
+  },
+  {
+    "rowN": 104,
+    "parentN": 101,
+    "depth": 1,
+    "categoryId": "10023352",
+    "name": "社會參與",
+    "parentCategoryId": "10023342",
+    "path": "全齡樂學課程專區 > 社會參與"
+  },
+  {
+    "rowN": 105,
+    "parentN": 101,
+    "depth": 1,
+    "categoryId": "10023353",
+    "name": "投資理財",
+    "parentCategoryId": "10023342",
+    "path": "全齡樂學課程專區 > 投資理財"
+  },
+  {
+    "rowN": 106,
+    "parentN": 101,
+    "depth": 1,
+    "categoryId": "10023350",
+    "name": "退休撫卹",
+    "parentCategoryId": "10023342",
+    "path": "全齡樂學課程專區 > 退休撫卹"
+  },
+  {
+    "rowN": 107,
+    "parentN": 101,
+    "depth": 1,
+    "categoryId": "10023354",
+    "name": "長照",
+    "parentCategoryId": "10023342",
+    "path": "全齡樂學課程專區 > 長照"
+  }
+]
