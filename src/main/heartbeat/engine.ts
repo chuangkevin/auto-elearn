@@ -62,8 +62,12 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   // Critical: announce the reading session to the server. Without this GET the
   // heartbeat POSTs return 200 but aren't credited as study time (閱讀時數 stays
   // at 0). Matches what the original ecpa.js does before its setInterval loop.
+  //
+  // The reading iframe may live on a different subdomain (e.g.
+  // mohw.elearn.hrd.gov.tw for 衛福部 SPOC) — pass along ticket.origin so the
+  // GET + subsequent heartbeats go to the right host.
   try {
-    await enterReadingSession(session, ticket.pTicket, ticket.encCid);
+    await enterReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
   } catch (e) {
     opts.onProgress?.(cid, "error", {
       reason: "enter_reading_failed",
@@ -82,7 +86,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     if (elapsedSec >= maxSec) break;
 
     try {
-      const { ok, status, body } = await sendHeartbeat(session, ticket.pTicket, ticket.encCid);
+      const { ok, status, body } = await sendHeartbeat(session, ticket.pTicket, ticket.encCid, ticket.origin);
       if (ok) {
         pings++;
         failures = 0;

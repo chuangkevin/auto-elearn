@@ -3,6 +3,18 @@ import { BrowserWindow } from "electron";
 export interface TicketInfo {
   pTicket: string;
   encCid: string;
+  /**
+   * Origin of the iframe the ticket was scraped from, e.g.
+   * "https://mohw.elearn.hrd.gov.tw" for 衛福部 SPOC, plain
+   * "https://elearn.hrd.gov.tw" for main-portal courses.
+   *
+   * CRITICAL: heartbeats must go to THIS origin, not always to the main
+   * elearn.hrd.gov.tw — the reading session lives on whichever subdomain
+   * hosts the SPOC. The original ecpa.js got away with a relative fetch
+   * because it ran inside the iframe; undici from the main process needs
+   * an absolute URL.
+   */
+  origin: string;
 }
 
 /**
@@ -90,7 +102,13 @@ export async function extractTicket(
           `(() => {
             function scan(frame) {
               try {
-                if (frame.pTicket && frame.cid) return { pTicket: String(frame.pTicket), cid: String(frame.cid) };
+                if (frame.pTicket && frame.cid) {
+                  return {
+                    pTicket: String(frame.pTicket),
+                    cid: String(frame.cid),
+                    href: String(frame.location.href),
+                  };
+                }
               } catch {}
               try {
                 for (let i = 0; i < frame.frames.length; i++) {
@@ -104,8 +122,14 @@ export async function extractTicket(
           true,
         )
         .catch(() => null);
-      if (data && data.pTicket && data.cid) {
-        return { pTicket: data.pTicket, encCid: data.cid };
+      if (data && data.pTicket && data.cid && data.href) {
+        let origin = "https://elearn.hrd.gov.tw";
+        try {
+          origin = new URL(data.href).origin;
+        } catch {
+          /* fall through to default */
+        }
+        return { pTicket: data.pTicket, encCid: data.cid, origin };
       }
       await sleep(500);
     }

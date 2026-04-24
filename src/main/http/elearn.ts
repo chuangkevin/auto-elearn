@@ -181,24 +181,34 @@ export async function enterReadingSession(
   session: Session,
   pTicket: string,
   encCid: string,
+  origin: string = BASE,
 ): Promise<{ ok: boolean; status: number }> {
-  const url = `${BASE}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
+  const url = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
   const { status } = await elearnRequest(session, url, {
     method: "GET",
-    referer: `${BASE}/mooc/index.php`,
+    referer: `${origin}/mooc/index.php`,
   });
   return { ok: status >= 200 && status < 400, status };
 }
 
-/** Single heartbeat (setReading/end). */
+/**
+ * Single heartbeat (setReading/end).
+ *
+ * CRITICAL: `origin` must be the origin of the reading iframe (e.g.
+ * https://mohw.elearn.hrd.gov.tw for 衛福部 SPOC). The original ecpa.js got
+ * away with a relative URL because it ran inside the iframe; sending to the
+ * main portal `elearn.hrd.gov.tw` when the course is on a sub-domain returns
+ * 200 but credits zero time.
+ */
 export async function heartbeat(
   session: Session,
   pTicket: string,
   encCid: string,
+  origin: string = BASE,
 ): Promise<{ ok: boolean; status: number; body: string }> {
   const { status, text } = await elearnRequest(
     session,
-    `${BASE}/mooc/controllers/course_record.php?actype=end`,
+    `${origin}/mooc/controllers/course_record.php?actype=end`,
     {
       method: "POST",
       body: {
@@ -209,7 +219,7 @@ export async function heartbeat(
       },
       // Referer must look like the in-iframe reading page, otherwise the server
       // discards the tick silently (HTTP 200 but no time credited).
-      referer: `${BASE}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`,
+      referer: `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`,
     },
   );
   return { ok: status >= 200 && status < 400, status, body: text };
