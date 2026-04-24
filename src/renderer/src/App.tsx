@@ -58,11 +58,13 @@ function parseCodeList(raw: string): string[] {
   return Array.from(new Set(out));
 }
 
-const SELECTING_BOTTOM_RATIO = 0.42;  // split when the user is browsing / picking
-const RUNNING_BOTTOM_RATIO = 0.15;    // minimal while the bot is ticking
-const COLLAPSED_BOTTOM_PX = 28;       // collapsed "peek" height
-const MIN_BOTTOM = 0.10;
-const MAX_BOTTOM = 0.90;
+// Browser view lives on the RIGHT; dashboard/controls on the LEFT.
+// Ratio = fraction of width the browser takes.
+const SELECTING_BROWSER_RATIO = 0.42; // split when the user is browsing / picking
+const RUNNING_BROWSER_RATIO = 0.15;   // minimal while the bot is ticking
+const COLLAPSED_BROWSER_PX = 28;      // collapsed "peek" width
+const MIN_BROWSER = 0.1;
+const MAX_BROWSER = 0.9;
 const DIVIDER_PX = 6;
 
 const STATES_THAT_DONT_NEED_BROWSER: Array<string> = [
@@ -97,8 +99,8 @@ function pushBrowserViewBounds() {
 
 export default function App() {
   const state = useAppState();
-  const topRef = useRef<HTMLDivElement>(null);
-  const [bottomRatio, setBottomRatio] = useState(SELECTING_BOTTOM_RATIO);
+  const leftRef = useRef<HTMLDivElement>(null);
+  const [browserRatio, setBrowserRatio] = useState(SELECTING_BROWSER_RATIO);
   const [collapsed, setCollapsed] = useState(false);
   const userAdjustedRatio = useRef(false);
   const prevStatus = useRef<string | null>(null);
@@ -149,9 +151,9 @@ export default function App() {
       prevStatus.current = s;
       if (!userAdjustedRatio.current) {
         if (STATES_THAT_DONT_NEED_BROWSER.includes(s)) {
-          setBottomRatio(RUNNING_BOTTOM_RATIO);
+          setBrowserRatio(RUNNING_BROWSER_RATIO);
         } else {
-          setBottomRatio(SELECTING_BOTTOM_RATIO);
+          setBrowserRatio(SELECTING_BROWSER_RATIO);
         }
       }
     }
@@ -159,7 +161,7 @@ export default function App() {
 
   useEffect(() => {
     const ro = new ResizeObserver(() => pushBrowserViewBounds());
-    if (topRef.current) ro.observe(topRef.current);
+    if (leftRef.current) ro.observe(leftRef.current);
     window.addEventListener("resize", pushBrowserViewBounds);
     setTimeout(pushBrowserViewBounds, 50);
     return () => {
@@ -170,14 +172,15 @@ export default function App() {
 
   useEffect(() => {
     pushBrowserViewBounds();
-  }, [bottomRatio, collapsed]);
+  }, [browserRatio, collapsed]);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
       if (!dragging.current) return;
-      const h = window.innerHeight;
-      const r = (h - e.clientY) / h;
-      setBottomRatio(Math.min(MAX_BOTTOM, Math.max(MIN_BOTTOM, r)));
+      const w = window.innerWidth;
+      // Browser sits on the right; its width = w - clientX
+      const r = (w - e.clientX) / w;
+      setBrowserRatio(Math.min(MAX_BROWSER, Math.max(MIN_BROWSER, r)));
       userAdjustedRatio.current = true;
       if (collapsed) setCollapsed(false);
     }
@@ -212,17 +215,17 @@ export default function App() {
     );
   }
 
-  const topFlex = collapsed ? `1 1 auto` : `1 1 ${(1 - bottomRatio) * 100}%`;
-  const bottomFlex = collapsed
-    ? `0 0 ${COLLAPSED_BOTTOM_PX}px`
-    : `1 1 ${bottomRatio * 100}%`;
+  const leftFlex = collapsed ? `1 1 auto` : `1 1 ${(1 - browserRatio) * 100}%`;
+  const rightFlex = collapsed
+    ? `0 0 ${COLLAPSED_BROWSER_PX}px`
+    : `1 1 ${browserRatio * 100}%`;
 
   return (
-    <div className="h-screen flex flex-col relative">
+    <div className="h-screen flex flex-row relative">
       <div
-        ref={topRef}
+        ref={leftRef}
         className="overflow-auto"
-        style={{ flex: topFlex, minHeight: 0 }}
+        style={{ flex: leftFlex, minWidth: 0 }}
       >
         <TopPanel state={state} />
       </div>
@@ -231,27 +234,28 @@ export default function App() {
           if (collapsed) return;
           e.preventDefault();
           dragging.current = true;
-          document.body.style.cursor = "row-resize";
+          document.body.style.cursor = "col-resize";
           document.body.style.userSelect = "none";
         }}
         className={`${
           collapsed ? "bg-slate-800" : "bg-slate-700 hover:bg-emerald-500"
         } transition-colors flex items-center justify-center text-xs text-slate-400 select-none`}
         style={{
-          height: collapsed ? 24 : DIVIDER_PX,
-          cursor: collapsed ? "default" : "row-resize",
+          width: collapsed ? 24 : DIVIDER_PX,
+          cursor: collapsed ? "default" : "col-resize",
           flex: `0 0 ${collapsed ? 24 : DIVIDER_PX}px`,
+          writingMode: collapsed ? "vertical-rl" : "horizontal-tb",
         }}
-        title={collapsed ? "瀏覽器已收起" : "拖曳調整上下分隔"}
+        title={collapsed ? "瀏覽器已收起" : "拖曳調整左右分隔"}
       >
-        {collapsed && <span>━━ 瀏覽器已收起 ━━</span>}
+        {collapsed && <span>瀏覽器已收起</span>}
       </div>
       <div
         id="browserview-mount"
         style={{
-          flex: bottomFlex,
+          flex: rightFlex,
           background: "#000",
-          minHeight: 0,
+          minWidth: 0,
         }}
       />
       {/* Floating collapse toggle, bottom-right of the top panel area */}

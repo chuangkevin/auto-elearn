@@ -133,13 +133,16 @@ function createWindow() {
 
   elearnView = attachElearnView(mainWindow, HOMEPAGE);
   const [winW, winH] = mainWindow.getContentSize();
+  // Initial bounds: BrowserView on the right ~42% of width. Renderer will push exact
+  // bounds after mount; this is just to avoid a blank flash at startup.
+  const initialBrowserWidth = Math.ceil(winW * 0.42);
   elearnView.setBounds({
-    x: 0,
-    y: Math.floor(winH * 0.45),
-    width: winW,
-    height: Math.ceil(winH * 0.55),
+    x: winW - initialBrowserWidth,
+    y: 0,
+    width: initialBrowserWidth,
+    height: winH,
   });
-  elearnView.setAutoResize({ width: true, height: false });
+  elearnView.setAutoResize({ width: true, height: true });
 
   // Sniff login POST so we can offer "remember me" after manual login succeeds.
   attachLoginSniffer(elearnView.webContents.session, (creds) => {
