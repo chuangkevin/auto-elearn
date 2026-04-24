@@ -370,9 +370,15 @@ function Selecting({ state }: { state: AppState }) {
   const [results, setResults] = useState<CourseCandidate[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [toUnenroll, setToUnenroll] = useState<Set<string>>(new Set());
   const [onlyAnyone, setOnlyAnyone] = useState(true);
   const [hideEnrolled, setHideEnrolled] = useState(true);
-  const [unenrolBusy, setUnenrolBusy] = useState<Set<string>>(new Set());
+  // Batch-apply progress UI
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyProgress, setApplyProgress] = useState<{ done: number; total: number; msg: string } | null>(
+    null,
+  );
 
   // "繼續上次進度" = courses the user is actively processing; exclude both
   // 'done' and 'pending'. The latter are ghost records returned by
@@ -455,21 +461,21 @@ function Selecting({ state }: { state: AppState }) {
     }
   }
 
-  async function unenrol(cid: string) {
-    if (unenrolBusy.has(cid)) return;
-    setUnenrolBusy((prev) => new Set(prev).add(cid));
-    try {
-      const res = await window.api.unenrollCourse(cid);
-      if (!res.ok) {
-        alert(`退選失敗：${res.error ?? "未知原因"}`);
-      }
-    } finally {
-      setUnenrolBusy((prev) => {
-        const next = new Set(prev);
-        next.delete(cid);
-        return next;
-      });
-    }
+  function toggleUnenroll(cid: string) {
+    setToUnenroll((prev) => {
+      const next = new Set(prev);
+      if (next.has(cid)) next.delete(cid);
+      else next.add(cid);
+      return next;
+    });
+    // Unenroll and "keep + process" are mutually exclusive; if staging to drop,
+    // remove from the process list too.
+    setSelected((prev) => {
+      if (!prev.has(cid)) return prev;
+      const next = new Set(prev);
+      next.delete(cid);
+      return next;
+    });
   }
 
   function toggle(cid: string) {
@@ -477,6 +483,13 @@ function Selecting({ state }: { state: AppState }) {
       const next = new Set(prev);
       if (next.has(cid)) next.delete(cid);
       else next.add(cid);
+      return next;
+    });
+    // If the user re-ticks a row staged for unenroll, undo the unenroll stage.
+    setToUnenroll((prev) => {
+      if (!prev.has(cid)) return prev;
+      const next = new Set(prev);
+      next.delete(cid);
       return next;
     });
   }
@@ -492,10 +505,36 @@ function Selecting({ state }: { state: AppState }) {
     });
   }
 
-  function start() {
-    const cids = Array.from(selected);
-    if (cids.length === 0) return;
-    window.api.startPipeline(cids);
+  function openConfirm() {
+    if (selected.size === 0 && toUnenroll.size === 0) return;
+    setConfirmOpen(true);
+  }
+
+  async function applyBatch() {
+    setConfirmOpen(false);
+    setApplying(true);
+    try {
+      const unenrollList = Array.from(toUnenroll);
+      const total = unenrollList.length;
+      for (let i = 0; i < unenrollList.length; i++) {
+        const cid = unenrollList[i];
+        const name = pending.find((p) => p.cid === cid)?.name ?? cid;
+        setApplyProgress({ done: i, total, msg: `退選 ${name}` });
+        const res = await window.api.unenrollCourse(cid);
+        if (!res.ok) {
+          alert(`退選失敗：${name}（${res.error ?? "未知原因"}）；已略過，繼續下一門`);
+        }
+      }
+      setApplyProgress(null);
+      setToUnenroll(new Set());
+      // Pipeline kicks in only if the user also asked to process something
+      const cids = Array.from(selected);
+      if (cids.length > 0) {
+        window.api.startPipeline(cids);
+      }
+    } finally {
+      setApplying(false);
+    }
   }
 
   return (
@@ -543,10 +582,8 @@ function Selecting({ state }: { state: AppState }) {
                 checked={selected.has(c.cid)}
                 onToggle={() => toggle(c.cid)}
                 badge="已報名"
-                onUnenroll={() => {
-                  if (confirm(`確定要退選：${c.name}?`)) unenrol(c.cid);
-                }}
-                unenrollBusy={unenrolBusy.has(c.cid)}
+                stagedForUnenroll={toUnenroll.has(c.cid)}
+                onToggleUnenroll={() => toggleUnenroll(c.cid)}
               />
             ))}
           </div>
@@ -661,24 +698,130 @@ function Selecting({ state }: { state: AppState }) {
         </div>
       </section>
 
-      {/* Footer bar: summary + start */}
-      <footer className="sticky bottom-0 bg-slate-950/90 backdrop-blur-sm py-3 -mx-6 px-6 border-t border-slate-800 flex items-center justify-between">
-        <div className="text-sm">
-          已選 <span className="font-bold text-emerald-400">{selected.size}</span> 門 ·
-          總計{" "}
-          <span className="font-bold text-emerald-400">
-            {selectedTotalHours.toFixed(1)}
-          </span>{" "}
-          小時
+      {/* Footer bar: summary + confirm */}
+      <footer className="sticky bottom-0 bg-slate-950/90 backdrop-blur-sm py-3 -mx-6 px-6 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm flex items-center gap-4 flex-wrap">
+          <span>
+            加選 / 處理 <span className="font-bold text-emerald-400">{selected.size}</span> 門
+            {" "}· 共{" "}
+            <span className="font-bold text-emerald-400">{selectedTotalHours.toFixed(1)}</span>{" "}
+            小時
+          </span>
+          {toUnenroll.size > 0 && (
+            <span className="text-rose-400">
+              退選 <span className="font-bold">{toUnenroll.size}</span> 門
+            </span>
+          )}
+          {applyProgress && (
+            <span className="text-amber-300">
+              執行中 {applyProgress.done}/{applyProgress.total}：{applyProgress.msg}
+            </span>
+          )}
         </div>
         <button
           className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold"
-          disabled={selected.size === 0}
-          onClick={start}
+          disabled={(selected.size === 0 && toUnenroll.size === 0) || applying}
+          onClick={openConfirm}
         >
-          🚀 開始報名並自動刷課 →
+          {applying ? "執行中..." : "✅ 確認操作 →"}
         </button>
       </footer>
+
+      {confirmOpen && (
+        <ConfirmBatchModal
+          onClose={() => setConfirmOpen(false)}
+          onConfirm={applyBatch}
+          toEnroll={Array.from(selected).map((cid) => {
+            const p = pending.find((c) => c.cid === cid);
+            if (p) return { cid, name: p.name, hours: p.requiredSec / 3600 };
+            const r = results.find((x) => x.cid === cid);
+            return {
+              cid,
+              name: r?.caption ?? cid,
+              hours: r?.certification_hours ?? 0,
+            };
+          })}
+          toUnenroll={Array.from(toUnenroll).map((cid) => {
+            const p = pending.find((c) => c.cid === cid);
+            return { cid, name: p?.name ?? cid };
+          })}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmBatchModal({
+  onClose,
+  onConfirm,
+  toEnroll,
+  toUnenroll,
+}: {
+  onClose: () => void;
+  onConfirm: () => void;
+  toEnroll: { cid: string; name: string; hours: number }[];
+  toUnenroll: { cid: string; name: string }[];
+}) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
+      <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-xl w-[90vw] max-h-[80vh] overflow-auto p-6 shadow-2xl">
+        <h2 className="text-lg font-semibold text-slate-100 mb-4">確認批次操作</h2>
+
+        {toUnenroll.length > 0 && (
+          <section className="mb-4">
+            <h3 className="text-sm font-semibold text-rose-400 mb-2">
+              ❌ 將退選 {toUnenroll.length} 門
+            </h3>
+            <ul className="text-sm text-slate-300 space-y-1 ml-3">
+              {toUnenroll.map((c) => (
+                <li key={c.cid} className="truncate">
+                  <span className="text-slate-500 mr-1">•</span>
+                  {c.name}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {toEnroll.length > 0 && (
+          <section className="mb-4">
+            <h3 className="text-sm font-semibold text-emerald-400 mb-2">
+              ✅ 將加選 / 處理 {toEnroll.length} 門（共{" "}
+              {toEnroll.reduce((a, c) => a + c.hours, 0).toFixed(1)} 小時）
+            </h3>
+            <ul className="text-sm text-slate-300 space-y-1 ml-3">
+              {toEnroll.map((c) => (
+                <li key={c.cid} className="flex justify-between gap-2">
+                  <span className="truncate">
+                    <span className="text-slate-500 mr-1">•</span>
+                    {c.name}
+                  </span>
+                  <span className="text-amber-300 shrink-0">{c.hours} hr</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <div className="text-xs text-slate-400 mb-4 border-t border-slate-800 pt-3">
+          執行順序：先退選 → 再加選（若有新課）→ 再自動刷課。退選會呼叫站方 UI 點擊流程，每門約需 1-3 秒。
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <button
+            className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+            onClick={onConfirm}
+          >
+            執行
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -692,8 +835,8 @@ function CourseRow({
   onToggle,
   badge,
   onPreview,
-  onUnenroll,
-  unenrollBusy,
+  stagedForUnenroll,
+  onToggleUnenroll,
 }: {
   cid: string;
   caption: string;
@@ -703,27 +846,38 @@ function CourseRow({
   onToggle: () => void;
   badge?: string;
   onPreview?: () => void;
-  onUnenroll?: () => void;
-  unenrollBusy?: boolean;
+  stagedForUnenroll?: boolean;
+  onToggleUnenroll?: () => void;
 }) {
+  const rowBg = stagedForUnenroll
+    ? "bg-rose-900/30 border border-rose-700/60"
+    : checked
+    ? "bg-emerald-900/30"
+    : "hover:bg-slate-800/60";
   return (
     <label
-      className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer ${
-        checked ? "bg-emerald-900/30" : "hover:bg-slate-800/60"
-      }`}
+      className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer ${rowBg}`}
     >
       <input
         type="checkbox"
         checked={checked}
         onChange={onToggle}
         className="shrink-0"
+        disabled={stagedForUnenroll}
       />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="truncate">{caption}</span>
+          <span className={`truncate ${stagedForUnenroll ? "line-through text-slate-400" : ""}`}>
+            {caption}
+          </span>
           {badge && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-200">
               {badge}
+            </span>
+          )}
+          {stagedForUnenroll && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-700 text-white">
+              待退選
             </span>
           )}
         </div>
@@ -742,17 +896,20 @@ function CourseRow({
           預覽
         </button>
       )}
-      {onUnenroll && (
+      {onToggleUnenroll && (
         <button
-          className="text-xs text-slate-400 hover:text-red-400 px-1 disabled:opacity-40"
+          className={`text-xs px-1.5 py-0.5 rounded ${
+            stagedForUnenroll
+              ? "bg-rose-700 text-white hover:bg-rose-600"
+              : "text-slate-400 hover:text-rose-400 hover:bg-slate-700/40"
+          }`}
           onClick={(e) => {
             e.preventDefault();
-            onUnenroll();
+            onToggleUnenroll();
           }}
-          disabled={unenrollBusy}
-          title="退選這門課"
+          title={stagedForUnenroll ? "取消退選（保留）" : "標記為待退選（按確認才會真的退）"}
         >
-          {unenrollBusy ? "退選中..." : "退選"}
+          {stagedForUnenroll ? "↩ 復原" : "🗑 退選"}
         </button>
       )}
       <span className="text-[10px] text-slate-600 ml-1">#{cid}</span>
