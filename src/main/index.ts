@@ -39,6 +39,7 @@ import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffe
 import { performAutoLogin } from "./auth/auto-login";
 import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-state";
+import { solveExam } from "./exam/solver";
 
 function maskAccount(acc: string): string {
   if (!acc) return "";
@@ -476,8 +477,47 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     });
   }
 
-  // TODO: exam / survey / rating / reflection phases
-  log("info", "TODO: 測驗 / 問卷 / 評價 / 心得 — 尚未實作");
+  // 3. Exam phase — for every selected course with exam not yet done, try to solve.
+  const afterReadingTracked = await discover(session);
+  const needExam = afterReadingTracked.filter(
+    (t) =>
+      selected.has(t.course.cid) &&
+      t.course.isClassing &&
+      (t.course.exam_exists === "1" || t.course.exam_exists === 1 as unknown as string) &&
+      (t.course.isExamDones ?? 0) === 0,
+  );
+  if (needExam.length > 0) {
+    log("info", `${needExam.length} 門課進入測驗階段`);
+    state.now.action = "exam";
+    pushState();
+    for (const t of needExam) {
+      if (abortSignal.aborted) break;
+      const card = state.courses.find((c) => c.cid === t.course.cid);
+      const name = card?.name ?? t.course.cid;
+      state.now.courseId = t.course.cid;
+      state.now.courseName = name;
+      state.now.detail = "解題中...";
+      pushState();
+      log("info", `開始測驗：${name}`);
+      const res = await solveExam(t.course.cid, session, {
+        onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+      });
+      if (res.ok) {
+        log(
+          "info",
+          `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
+        );
+        if (card && res.passed) card.examDone = true;
+      } else {
+        log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
+      }
+    }
+  } else {
+    log("info", "沒有需要測驗的課程");
+  }
+
+  // TODO: survey / rating / reflection phases
+  log("info", "TODO: 問卷 / 評價 / 心得 — 尚未實作");
   stopSessionWatchdog();
   state.status = "done";
   state.now.action = "idle";
