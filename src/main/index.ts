@@ -881,15 +881,30 @@ ipcMain.on(IPC.PIPELINE_START, (_evt, cids: string[]) => {
 export { bus, state, log, pushState };
 
 // ── App lifecycle ─────────────────────────────────────────────
-app.whenReady().then(() => {
-  electronApp.setAppUserModelId("tw.kevin.auto-elearn");
-  app.on("browser-window-created", (_, w) => optimizer.watchWindowShortcuts(w));
-  createWindow();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Single-instance lock: launching Noteqad.exe while it's already running should
+// just focus the existing window, not spawn a second process. Before we had
+// this, 10+ zombie processes piled up during testing — each with its own
+// BrowserWindow overlapping the others, which looked like "double title bars".
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
   });
-});
+
+  app.whenReady().then(() => {
+    electronApp.setAppUserModelId("tw.kevin.auto-elearn");
+    app.on("browser-window-created", (_, w) => optimizer.watchWindowShortcuts(w));
+    createWindow();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
