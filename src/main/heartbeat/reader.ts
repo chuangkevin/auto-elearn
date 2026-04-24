@@ -129,13 +129,39 @@ export async function extractTicket(
         } catch {
           /* fall through to default */
         }
-        // Leave the reader page open for ~8 seconds AFTER finding the ticket
+        // Leave the reader page open for ~20 seconds AFTER finding the ticket
         // so the SPOC's own JS finishes initialising the reading session on
-        // the server. For some content providers (全民AI通識課 / 好好用 AI /
-        // 微學習 類) just extracting the ticket and closing immediately
-        // leaves the session "half-created" — heartbeats succeed but time
-        // doesn't accrue. Letting the page breathe fixes that.
-        await sleep(8000);
+        // the server. Video-based courses (好好用 AI 的 AI Academy / Meta,
+        // etc.) need extra time for the player to load + autoplay + send
+        // their initial progress pings. 全民 AI 通識課 worked at 8s dwell;
+        // 好好用 AI didn't — bumping to 20s to cover slower players.
+        //
+        // Also proactively try to start video playback and fire any
+        // viewport/intersection handlers the tracker might listen for.
+        try {
+          await win.webContents.executeJavaScript(
+            `(() => {
+              try {
+                const walk = (doc) => {
+                  doc.querySelectorAll('video').forEach(v => {
+                    try { v.muted = true; v.play && v.play().catch(() => {}); } catch {}
+                  });
+                  for (let i = 0; i < (doc.defaultView?.frames?.length || 0); i++) {
+                    try { walk(doc.defaultView.frames[i].document); } catch {}
+                  }
+                };
+                walk(document);
+                // Simulate a scroll + focus so intersection/visibility observers fire.
+                window.dispatchEvent(new Event('focus'));
+                window.dispatchEvent(new Event('scroll'));
+              } catch (e) {}
+            })()`,
+            true,
+          );
+        } catch {
+          /* non-fatal — ticket already captured */
+        }
+        await sleep(20000);
         return { pTicket: data.pTicket, encCid: data.cid, origin };
       }
       await sleep(500);
