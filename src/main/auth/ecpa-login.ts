@@ -57,12 +57,46 @@ export async function loginViaEcpa(
       return { ok: false, stage: "clogin", error: `HTTP ${clogin.status}` };
     }
 
+    // 2.5 If `account` looks like a SHORT ALIAS (anything other than one-letter
+    //     + 9-digits 身分證字號 format), call Home/GetUID to resolve it to the
+    //     full ID. eCPA's GetApTicketV2 only accepts the full ID; sending a
+    //     short alias returns a silent failure and EnterApplicationTwoWay
+    //     later returns just "0".
+    let fullAccount = account.trim();
+    if (!/^[A-Za-z]\d{9}$/.test(fullAccount)) {
+      const uid = await req(
+        session,
+        "POST",
+        "https://ecpa.dgpa.gov.tw/Home/GetUID",
+        { account: fullAccount },
+        CLOGIN_ASPX_URL,
+        "https://ecpa.dgpa.gov.tw",
+      );
+      if (uid.status >= 400) {
+        return { ok: false, stage: "GetUID", error: `HTTP ${uid.status}` };
+      }
+      // Response format observed: JSON-ish {"returnCode":"0","uid":"F130918271",...}
+      // or plain string with the full ID embedded.
+      const resolved =
+        uid.body.match(/["'](?:UID|uid)["']\s*:\s*["']([A-Za-z]\d{9})["']/)?.[1] ||
+        uid.body.match(/\b([A-Z]\d{9})\b/)?.[1];
+      if (resolved) {
+        fullAccount = resolved;
+      } else {
+        return {
+          ok: false,
+          stage: "GetUID",
+          error: `alias not resolvable (body: ${uid.body.slice(0, 200)})`,
+        };
+      }
+    }
+
     // 3. GetApTicketV2 — the actual credential check.
     const ticket = await req(
       session,
       "POST",
       "https://ecpa.dgpa.gov.tw/Home/GetApTicketV2",
-      { account, password, ApID: "CrossHRD" },
+      { account: fullAccount, password, ApID: "CrossHRD" },
       CLOGIN_ASPX_URL,
       "https://ecpa.dgpa.gov.tw",
     );
@@ -86,7 +120,7 @@ export async function loginViaEcpa(
       "POST",
       "https://ecpa.dgpa.gov.tw/Home/EnterTwoWayLog",
       {
-        account,
+        account: fullAccount,
         loginType: "0",
         sn: "",
         ticket: "",
