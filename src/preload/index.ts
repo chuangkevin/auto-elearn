@@ -6,6 +6,7 @@ import {
   type CourseCandidate,
   type CredsPromptPayload,
   type CredentialsStatus,
+  type ResumePrompt,
   type ViewBounds,
 } from "../shared/ipc";
 
@@ -43,6 +44,12 @@ const api = {
     ipcRenderer.on(IPC.AUTOLOGIN_PROGRESS, listener);
     return () => ipcRenderer.off(IPC.AUTOLOGIN_PROGRESS, listener);
   },
+  onResumePrompt: (cb: (p: ResumePrompt) => void) => {
+    const listener = (_evt: Electron.IpcRendererEvent, p: ResumePrompt) => cb(p);
+    ipcRenderer.on(IPC.RESUME_PROMPT, listener);
+    return () => ipcRenderer.off(IPC.RESUME_PROMPT, listener);
+  },
+  answerResumePrompt: (resume: boolean) => ipcRenderer.send(IPC.RESUME_ANSWER, resume),
 };
 
 contextBridge.exposeInMainWorld("api", api);

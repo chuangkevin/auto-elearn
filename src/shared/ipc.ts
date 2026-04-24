@@ -112,6 +112,12 @@ export const IPC = {
   CREDS_STATUS: "creds:status",
   /** main → renderer: auto-login in progress / result */
   AUTOLOGIN_PROGRESS: "autologin:progress",
+  /** main → renderer: previous run exists, offer to resume */
+  RESUME_PROMPT: "resume:prompt",
+  /** renderer → main: user answered the resume prompt */
+  RESUME_ANSWER: "resume:answer",
+  /** main → renderer: pipeline was paused because session expired / offline */
+  PIPELINE_PAUSED: "pipeline:paused",
 } as const;
 
 export interface CredentialsStatus {
@@ -130,6 +136,12 @@ export interface CredsPromptPayload {
 export interface AutoLoginProgress {
   stage: "start" | "filling" | "submitted" | "success" | "failed";
   error?: string;
+}
+
+export interface ResumePrompt {
+  pipelineCids: string[];
+  startedAt: string;
+  previousStatus: string;
 }
 
 export interface CourseCandidate {

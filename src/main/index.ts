@@ -10,6 +10,7 @@ import {
   type CourseCard,
   type CredentialsStatus,
   type CredsPromptPayload,
+  type ResumePrompt,
   type ViewBounds,
 } from "../shared/ipc";
 import { createBus } from "./bus";
@@ -37,6 +38,7 @@ import { groupByCategory, resolveAgencyCodes } from "./course/agency-code-map";
 import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
 import { performAutoLogin } from "./auth/auto-login";
 import { isSessionAlive } from "./auth/session-watchdog";
+import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-state";
 
 function maskAccount(acc: string): string {
   if (!acc) return "";
@@ -82,6 +84,22 @@ let autoLoginInFlight = false;
 // replacement when `focusedCid` finishes.
 let focusedCid: string | null = null;
 const runningCids = new Set<string>();
+
+// Session-expiry watchdog (E.a) — non-null only while a pipeline is running.
+let watchdogTimer: NodeJS.Timeout | null = null;
+/** Count of consecutive failed reachability checks so we can also flag offline (E.c). */
+let consecutiveDeadChecks = 0;
+
+function persistRun(status: PersistedRun["status"]) {
+  if (!state.pipelineCids || state.pipelineCids.length === 0) return;
+  const existing = loadRun();
+  saveRun({
+    pipelineCids: state.pipelineCids,
+    startedAt: existing?.startedAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status,
+  });
+}
 
 function navigateViewToCourse(cid: string) {
   if (!elearnView) return;
@@ -215,6 +233,17 @@ function createWindow() {
       state.status = "selecting";
       log("info", "請在上方搜尋 / 勾選要刷的課程，按「開始」即可");
       pushState();
+
+      // E.d: if a previous run was interrupted, offer to resume.
+      const prev = loadRun();
+      if (prev && prev.status !== "done" && prev.status !== "aborted" && prev.pipelineCids.length) {
+        const payload: ResumePrompt = {
+          pipelineCids: prev.pipelineCids,
+          startedAt: prev.startedAt,
+          previousStatus: prev.status,
+        };
+        mainWindow?.webContents.send(IPC.RESUME_PROMPT, payload);
+      }
     })
     .catch((err) => log("error", `登入偵測失敗：${err}`));
 }
@@ -299,6 +328,57 @@ function formatHms(sec: number): string {
 }
 
 // ── Pipeline ──────────────────────────────────────────────────
+function startSessionWatchdog(session: Electron.Session) {
+  stopSessionWatchdog();
+  watchdogTimer = setInterval(async () => {
+    if (state.status !== "running") return;
+    const alive = await isSessionAlive(session);
+    if (alive) {
+      consecutiveDeadChecks = 0;
+      return;
+    }
+    consecutiveDeadChecks++;
+    log("warn", `偵測到 session 無回應（第 ${consecutiveDeadChecks} 次）`);
+    if (consecutiveDeadChecks < 2) return; // one blip may just be a transient slow response
+
+    state.status = "paused";
+    state.pauseReason = "session_expired";
+    persistRun("paused");
+    mainWindow?.webContents.send(IPC.PIPELINE_PAUSED, "session_expired");
+    pushState();
+
+    if (hasSavedCredentials()) {
+      const ok = await tryAutoLogin();
+      if (ok) {
+        // Re-verify session landed correctly before un-pausing.
+        const nowAlive = await isSessionAlive(session);
+        if (nowAlive) {
+          state.status = "running";
+          state.pauseReason = undefined;
+          consecutiveDeadChecks = 0;
+          persistRun("running");
+          log("info", "Session 已恢復，繼續刷課");
+          pushState();
+        } else {
+          log("error", "自動重登報告成功但 session 仍異常；請檢查網路");
+        }
+      } else {
+        log("error", "自動重登失敗；等待網路 / 手動登入");
+      }
+    } else {
+      log("warn", "沒有儲存帳密；請手動在下方瀏覽器重新登入，之後按恢復");
+    }
+  }, 90_000);
+}
+
+function stopSessionWatchdog() {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+  consecutiveDeadChecks = 0;
+}
+
 async function runPipelineFor(cids: string[]): Promise<void> {
   if (!elearnView) return;
   const session = elearnView.webContents.session;
@@ -307,6 +387,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   // Scope the dashboard + stats to what the user actually asked for
   state.pipelineCids = [...cids];
   updateStats();
+  persistRun("running");
   pushState();
 
   // 1. Enrol any not-yet-enrolled cids
@@ -347,6 +428,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     );
     state.now.action = "heartbeat";
     pushState();
+    startSessionWatchdog(session);
 
     await runHeartbeatBatch(session, needReading, {
       parallel: HEARTBEAT_PARALLEL,
@@ -396,6 +478,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
 
   // TODO: exam / survey / rating / reflection phases
   log("info", "TODO: 測驗 / 問卷 / 評價 / 心得 — 尚未實作");
+  stopSessionWatchdog();
   state.status = "done";
   state.now.action = "idle";
   state.now.courseId = undefined;
@@ -403,6 +486,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   state.now.detail = undefined;
   runningCids.clear();
   focusedCid = null;
+  clearRun();
   await refreshCourses();
   updateStats();
   pushState();
@@ -480,20 +564,38 @@ ipcMain.on(IPC.ACTION_RESUME, () => {
 
 ipcMain.on(IPC.ACTION_ABORT, () => {
   abortSignal.aborted = true;
+  stopSessionWatchdog();
   state.status = "aborted";
+  persistRun("aborted");
   log("info", "使用者中止");
   pushState();
   setTimeout(() => app.quit(), 300);
 });
 
+ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
+  const prev = loadRun();
+  if (!prev || !prev.pipelineCids.length) return;
+  if (!resume) {
+    clearRun();
+    log("info", "使用者選擇不恢復上次進度");
+    return;
+  }
+  log("info", `恢復上次中斷的進度（${prev.pipelineCids.length} 門）`);
+  runPipelineFor(prev.pipelineCids).catch((e) =>
+    log("error", `恢復 pipeline 失敗：${e instanceof Error ? e.message : String(e)}`),
+  );
+});
+
 ipcMain.on(IPC.ACTION_BACK, async () => {
   abortSignal.aborted = true;
+  stopSessionWatchdog();
   state.status = "selecting";
   state.pauseReason = undefined;
   state.now = { action: "idle" };
   state.pipelineCids = undefined;
   runningCids.clear();
   focusedCid = null;
+  clearRun();
   log("info", "返回選課畫面");
   if (elearnView) elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
   await refreshCourses();

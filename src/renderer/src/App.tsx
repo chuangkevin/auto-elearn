@@ -5,6 +5,7 @@ import type {
   CourseCandidate,
   CredentialsStatus,
   CredsPromptPayload,
+  ResumePrompt,
   ViewBounds,
 } from "@shared/ipc";
 
@@ -29,6 +30,8 @@ declare global {
       answerCredsPrompt: (save: boolean) => void;
       onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => () => void;
       onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => () => void;
+      onResumePrompt: (cb: (p: ResumePrompt) => void) => () => void;
+      answerResumePrompt: (resume: boolean) => void;
     };
   }
 }
@@ -110,6 +113,7 @@ export default function App() {
   const [credsPrompt, setCredsPrompt] = useState<CredsPromptPayload | null>(null);
   const [credsStatus, setCredsStatus] = useState<CredentialsStatus | null>(null);
   const [autoLogin, setAutoLogin] = useState<AutoLoginProgress | null>(null);
+  const [resumePrompt, setResumePrompt] = useState<ResumePrompt | null>(null);
 
   useEffect(() => {
     window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
@@ -122,11 +126,18 @@ export default function App() {
         setTimeout(() => setAutoLogin((prev) => (prev?.stage === p.stage ? null : prev)), 3500);
       }
     });
+    const offResume = window.api.onResumePrompt((p) => setResumePrompt(p));
     return () => {
       offPrompt();
       offAuto();
+      offResume();
     };
   }, []);
+
+  function answerResume(resume: boolean) {
+    window.api.answerResumePrompt(resume);
+    setResumePrompt(null);
+  }
 
   function answerCredsPrompt(save: boolean) {
     window.api.answerCredsPrompt(save);
@@ -295,6 +306,37 @@ export default function App() {
         >
           🔑 已記憶 {credsStatus.maskedAccount ?? ""}
         </button>
+      )}
+
+      {/* Resume-previous-run prompt modal */}
+      {resumePrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
+          <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl">
+            <h2 className="text-lg font-semibold text-slate-100 mb-2">偵測到上次未完成的進度</h2>
+            <p className="text-sm text-slate-300 mb-1">
+              上次中斷時間：
+              <span className="text-slate-400"> {new Date(resumePrompt.startedAt).toLocaleString()}</span>
+            </p>
+            <p className="text-sm text-slate-300 mb-4">
+              還有 <span className="font-bold text-emerald-300">{resumePrompt.pipelineCids.length}</span>{" "}
+              門課在進行中，要繼續嗎？
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                onClick={() => answerResume(false)}
+              >
+                丟棄
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+                onClick={() => answerResume(true)}
+              >
+                繼續上次進度
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Save-creds prompt modal */}
