@@ -76,6 +76,29 @@ const bus = createBus();
 let pendingSniffed: SniffedCredentials | null = null;
 let autoLoginInFlight = false;
 
+// Visual cue: during heartbeat we navigate the BrowserView to one of the in-flight
+// courses so the user sees something changing. `focusedCid` is the course the view is
+// currently showing; `runningCids` tracks every still-ticking course so we can pick a
+// replacement when `focusedCid` finishes.
+let focusedCid: string | null = null;
+const runningCids = new Set<string>();
+
+function navigateViewToCourse(cid: string) {
+  if (!elearnView) return;
+  const url = `https://elearn.hrd.gov.tw/info/${cid}`;
+  elearnView.webContents.loadURL(url).catch(() => void 0);
+}
+
+function focusNextCourse() {
+  const next = runningCids.values().next().value;
+  if (next) {
+    focusedCid = next;
+    navigateViewToCourse(next);
+  } else {
+    focusedCid = null;
+  }
+}
+
 function emitAutoLogin(progress: AutoLoginProgress) {
   mainWindow?.webContents.send(IPC.AUTOLOGIN_PROGRESS, progress);
 }
@@ -336,12 +359,21 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         if (!card) return;
         if (stage === "open") {
           log("info", `開始閱讀：${card.name}`);
+          runningCids.add(cid);
+          if (!focusedCid) {
+            focusedCid = cid;
+            navigateViewToCourse(cid);
+          }
         } else if (stage === "done") {
           const pings = (extra as { pings?: number })?.pings ?? 0;
           log("info", `閱讀結束：${card.name} (${pings} pings)`);
           card.phase = "exam";
+          runningCids.delete(cid);
+          if (focusedCid === cid) focusNextCourse();
         } else if (stage === "error") {
           log("warn", `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`);
+          runningCids.delete(cid);
+          if (focusedCid === cid) focusNextCourse();
         }
         pushState();
       },
@@ -369,6 +401,8 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   state.now.courseId = undefined;
   state.now.courseName = undefined;
   state.now.detail = undefined;
+  runningCids.clear();
+  focusedCid = null;
   await refreshCourses();
   updateStats();
   pushState();
@@ -458,7 +492,10 @@ ipcMain.on(IPC.ACTION_BACK, async () => {
   state.pauseReason = undefined;
   state.now = { action: "idle" };
   state.pipelineCids = undefined;
+  runningCids.clear();
+  focusedCid = null;
   log("info", "返回選課畫面");
+  if (elearnView) elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
   await refreshCourses();
   pushState();
 });
