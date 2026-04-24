@@ -179,8 +179,15 @@ function App() {
   useEffect(() => {
     const ro = new ResizeObserver(() => pushBrowserViewBounds());
     if (leftRef.current) ro.observe(leftRef.current);
+    const mount = document.getElementById("browserview-mount");
+    if (mount) ro.observe(mount);
     window.addEventListener("resize", pushBrowserViewBounds);
-    setTimeout(pushBrowserViewBounds, 50);
+    // Push bounds aggressively right after mount — the built renderer's flex
+    // layout settles a few frames later than dev-server HMR does, and if the
+    // BrowserView stays at its stale initial bounds it eats clicks on the left.
+    [0, 50, 150, 400, 900, 1800].forEach((ms) =>
+      setTimeout(pushBrowserViewBounds, ms),
+    );
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", pushBrowserViewBounds);

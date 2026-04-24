@@ -186,17 +186,14 @@ function createWindow() {
   }
 
   elearnView = attachElearnView(mainWindow, HOMEPAGE);
-  const [winW, winH] = mainWindow.getContentSize();
-  // Initial bounds: BrowserView on the right ~42% of width. Renderer will push exact
-  // bounds after mount; this is just to avoid a blank flash at startup.
-  const initialBrowserWidth = Math.ceil(winW * 0.42);
-  elearnView.setBounds({
-    x: winW - initialBrowserWidth,
-    y: 0,
-    width: initialBrowserWidth,
-    height: winH,
-  });
-  elearnView.setAutoResize({ width: true, height: true });
+  // Initial bounds = 0x0. The renderer owns layout; it pushes real bounds from the
+  // `#browserview-mount` div as soon as it mounts. If renderer ever fails to push,
+  // we stay at 0x0 which means all clicks fall through to the dashboard — much
+  // better than a full-window invisible BrowserView eating left-panel clicks.
+  elearnView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  // Do NOT autoResize — we'd rather hand authoritative bounds from the renderer
+  // on every window resize event than have Electron grow the view out of sync.
+  elearnView.setAutoResize({ width: false, height: false });
 
   // Sniff login POST so we can offer "remember me" after manual login succeeds.
   attachLoginSniffer(elearnView.webContents.session, (creds) => {
