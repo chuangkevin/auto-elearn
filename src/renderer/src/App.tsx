@@ -69,9 +69,11 @@ function parseCodeList(raw: string): string[] {
 
 // Browser view lives on the RIGHT; dashboard/controls on the LEFT.
 // Ratio = fraction of width the browser takes.
-const SELECTING_BROWSER_RATIO = 0.42; // split when the user is browsing / picking
-const RUNNING_BROWSER_RATIO = 0.15;   // minimal while the bot is ticking
-const COLLAPSED_BROWSER_PX = 28;      // collapsed "peek" width
+// Dashboard is column-ish (course list + log), doesn't need to be fat; the live
+// elearn page on the right is what the user actually reads.
+const SELECTING_BROWSER_RATIO = 0.6; // 40% dashboard / 60% browser while browsing
+const RUNNING_BROWSER_RATIO = 0.6;   // keep same — user explicitly liked narrow
+const COLLAPSED_BROWSER_PX = 28;     // collapsed "peek" width
 const MIN_BROWSER = 0.1;
 const MAX_BROWSER = 0.9;
 const DIVIDER_PX = 6;
@@ -316,12 +318,12 @@ function App() {
           minWidth: 0,
         }}
       />
-      {/* Collapse toggle — positioned inside the left dashboard column so the
-          BrowserView (which renders above renderer HTML) can't occlude it. */}
+      {/* Collapse toggle — bottom-right of the dashboard column so it never
+          overlaps Monitor's 暫停/回選課/中止 buttons at the top, and so the
+          BrowserView can't render over it. */}
       <button
-        className="absolute top-3 z-50 px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur"
+        className="absolute bottom-3 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
         style={{
-          // Pin to the right edge of the dashboard column (= left edge of divider)
           right: collapsed ? COLLAPSED_BROWSER_PX + 12 : `calc(${browserRatio * 100}% + 12px)`,
         }}
         onClick={toggleCollapse}
@@ -426,6 +428,12 @@ function App() {
 
 export default function Shell() {
   const [stealth, setStealth] = useState<StealthState | "loading">("loading");
+  // React-managed setup dialog (Electron renderers return null from window.prompt,
+  // so the one-liner prompt() approach silently does nothing).
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupValue, setSetupValue] = useState("");
+  const [setupConfirm, setSetupConfirm] = useState("");
+  const [setupErr, setSetupErr] = useState<string | null>(null);
 
   useEffect(() => {
     window.api
@@ -512,22 +520,111 @@ export default function Shell() {
         <button
           className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur shadow-lg"
           title="設定偽裝密碼。設定後，下次啟動會先顯示 Notepad，輸入密碼 + Enter 才會進入 app。"
-          onClick={async () => {
-            const pw = prompt("設定偽裝密碼（下次啟動時在 Notepad 打此密碼 + Enter 即可進入 app）");
-            if (!pw) return;
-            const res = await window.api.stealthSetSecret(pw);
-            if (res.ok) {
-              alert("已設定偽裝模式。下次啟動 app 時會先顯示 Notepad。\n密碼以明碼存在 userData/config.json。");
-              setStealth("unlocked");
-            } else {
-              alert("設定失敗：" + (res.reason ?? "unknown"));
-            }
+          onClick={() => {
+            setSetupValue("");
+            setSetupConfirm("");
+            setSetupErr(null);
+            setSetupOpen(true);
           }}
         >
           🫥 啟用偽裝
         </button>
       )}
+
+      {setupOpen && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60"
+          // Mount effect inside a tiny child so we can use our hook
+        >
+          <StealthSetupCard
+            value={setupValue}
+            confirmValue={setupConfirm}
+            err={setupErr}
+            onChangeValue={setSetupValue}
+            onChangeConfirm={setSetupConfirm}
+            onCancel={() => setSetupOpen(false)}
+            onSubmit={async () => {
+              if (!setupValue || setupValue.length < 2) {
+                setSetupErr("密碼至少 2 個字元");
+                return;
+              }
+              if (setupValue !== setupConfirm) {
+                setSetupErr("兩次輸入不一致");
+                return;
+              }
+              const res = await window.api.stealthSetSecret(setupValue);
+              if (!res.ok) {
+                setSetupErr(res.reason ?? "儲存失敗");
+                return;
+              }
+              setSetupOpen(false);
+              setStealth("unlocked");
+            }}
+          />
+        </div>
+      )}
     </>
+  );
+}
+
+function StealthSetupCard({
+  value,
+  confirmValue,
+  err,
+  onChangeValue,
+  onChangeConfirm,
+  onCancel,
+  onSubmit,
+}: {
+  value: string;
+  confirmValue: string;
+  err: string | null;
+  onChangeValue: (v: string) => void;
+  onChangeConfirm: (v: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  useHideBrowserViewWhileMounted();
+  return (
+    <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
+      <h2 className="text-lg font-semibold mb-2">🫥 啟用偽裝（Notepad 模式）</h2>
+      <p className="text-sm text-slate-400 mb-4 leading-relaxed">
+        設定密碼後，下次啟動 app 會先顯示一個 Notepad 畫面。在 textarea 打此密碼 + Enter
+        才會進入真正的 app。使用中可按 <code>Ctrl+Alt+H</code> 或 🫥 按鈕隨時再鎖回 Notepad。
+        密碼以明碼存在 <code>userData/config.json</code>（你的明確選擇）。
+      </p>
+      <input
+        className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm mb-2 focus:outline-none focus:border-emerald-500"
+        placeholder="輸入密碼"
+        type="password"
+        value={value}
+        onChange={(e) => onChangeValue(e.target.value)}
+        autoFocus
+      />
+      <input
+        className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm mb-2 focus:outline-none focus:border-emerald-500"
+        placeholder="再輸入一次"
+        type="password"
+        value={confirmValue}
+        onChange={(e) => onChangeConfirm(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+      />
+      {err && <div className="text-xs text-rose-400 mb-2">{err}</div>}
+      <div className="flex justify-end gap-2">
+        <button
+          className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+          onClick={onCancel}
+        >
+          取消
+        </button>
+        <button
+          className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+          onClick={onSubmit}
+        >
+          啟用偽裝
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1180,7 +1277,7 @@ function Monitor({ state }: { state: AppState }) {
     : state.courses;
   const running = scope.filter((c) => c.phase !== "done");
   return (
-    <div className="p-6 space-y-4 text-slate-100">
+    <div className="p-6 pb-14 space-y-4 text-slate-100 h-full flex flex-col">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-bold">
           {statusLabel(state.status)} · {state.user?.name ?? ""}
@@ -1275,10 +1372,10 @@ function Monitor({ state }: { state: AppState }) {
         </div>
       </section>
 
-      <section>
+      <section className="flex-1 flex flex-col min-h-0">
         <h2 className="text-sm font-semibold mb-2 text-slate-300">📜 日誌</h2>
-        <div className="bg-black/30 rounded p-2 text-xs font-mono max-h-40 overflow-auto space-y-0.5">
-          {state.logs.slice(-30).map((l, i) => (
+        <div className="flex-1 bg-black/30 rounded p-2 text-xs font-mono overflow-auto space-y-0.5 min-h-0">
+          {state.logs.slice(-200).map((l, i) => (
             <div
               key={i}
               className={
