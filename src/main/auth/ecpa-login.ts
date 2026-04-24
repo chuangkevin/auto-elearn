@@ -157,16 +157,15 @@ export async function loginViaEcpa(
       return { ok: false, stage: "sso_verify", error: `HTTP ${sso.status}` };
     }
 
-    // 7. Ground-truth verify: hit /mooc/user/learn_dashboard.php?tab=1 —
-    //    that URL REQUIRES auth and returns the dashboard HTML only for a
-    //    valid session. Unauth'd requests get a redirect to the login page
-    //    (or the public homepage body with no 個人專區 marker).
-    //
-    //    Why this instead of just checking for `idx`+`suc` cookies in the
-    //    jar? Those cookies can persist from a previous session where they
-    //    got saved but the server-side session expired; mere presence of
-    //    the name doesn't prove our POST replay actually established a
-    //    fresh, accepted session. Only a real round-trip tells us that.
+    // 7. Small delay so the session cookie jar commits the Set-Cookie headers
+    //    written by net.request during the sso redirect chain. Without this
+    //    gap I've seen verify race ahead of the commit and misread "no
+    //    cookies" on an otherwise-good session.
+    await new Promise((r) => setTimeout(r, 400));
+
+    // 8. Ground-truth verify: hit /mooc/user/learn_dashboard.php?tab=1 —
+    //    that URL requires auth. Unauth'd responses look like the public
+    //    homepage template (no 個人專區 / 登出 markers).
     const verify = await req(
       session,
       "GET",
@@ -176,16 +175,27 @@ export async function loginViaEcpa(
       return { ok: false, stage: "verify", error: `dashboard GET returned ${verify.status}` };
     }
     if (!/個人專區|learn_dashboard\.php|登出/.test(verify.body)) {
+      // Diagnostic: also show which elearn cookies we actually hold so we can
+      // tell "server rejected the session" from "cookies never arrived".
+      const cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
+      const cookieSummary = cookies.map((c) => c.name).join(",");
       return {
         ok: false,
         stage: "verify",
-        error: `dashboard body looks unauthenticated (status ${verify.status}, first 200 chars: ${verify.body.slice(0, 200)})`,
+        error: `dashboard body unauthenticated; cookies on elearn: [${cookieSummary}]; sso status was ${sso.status}`,
       };
     }
     return { ok: true };
   } catch (e) {
     return { ok: false, stage: "exception", error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+interface ReqOpts {
+  /** true = send X-Requested-With: XMLHttpRequest. Match the real browser's
+   *  behaviour: eCPA `/Home/*` endpoints DO get this header; the auto-submitted
+   *  `sso_verify.php` form doesn't. Defaults to true for /Home/*, false otherwise. */
+  xhr?: boolean;
 }
 
 function req(
@@ -195,6 +205,7 @@ function req(
   body?: Record<string, string>,
   referer?: string,
   origin?: string,
+  opts: ReqOpts = {},
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const r = net.request({
@@ -207,12 +218,16 @@ function req(
     r.setHeader("User-Agent", UA);
     r.setHeader("Accept", "application/json, text/html, */*");
     r.setHeader("Accept-Language", "zh-TW,zh;q=0.9");
-    r.setHeader("X-Requested-With", "XMLHttpRequest");
+    const wantXhr = opts.xhr ?? /ecpa\.dgpa\.gov\.tw\/Home\//.test(url);
+    if (wantXhr) r.setHeader("X-Requested-With", "XMLHttpRequest");
     if (referer) r.setHeader("Referer", referer);
     if (origin) r.setHeader("Origin", origin);
     let payload = "";
     if (body) {
-      r.setHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+      // No charset param — the browser's captured POSTs are just
+      // `application/x-www-form-urlencoded`; tacking `; charset=UTF-8` on
+      // made our requests distinguishable from the real form submit.
+      r.setHeader("Content-Type", "application/x-www-form-urlencoded");
       payload = Object.entries(body)
         .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v ?? "")}`)
         .join("&");

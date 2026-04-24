@@ -52,12 +52,15 @@ export async function runHeartbeatBatch(
 
 async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions): Promise<void> {
   const { cid } = t.course;
-  opts.onProgress?.(cid, "open");
   const ticket = await extractTicket(cid);
   if (!ticket) {
     opts.onProgress?.(cid, "error", { reason: "no_ticket" });
     return;
   }
+  // Fire "open" AFTER we have the ticket so the log can name the host we're
+  // about to hit. Cross-course comparison of hosts is how we tell which
+  // SPOC providers silently drop our heartbeats.
+  opts.onProgress?.(cid, "open", { origin: ticket.origin });
 
   // Critical: announce the reading session to the server. Without this GET the
   // heartbeat POSTs return 200 but aren't credited as study time (閱讀時數 stays
