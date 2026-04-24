@@ -9,9 +9,15 @@ files:
   - out/**/*
   - resources/**/*
   - package.json
-  - "!node_modules/**/*"
+  # NOTE: do NOT blanket-exclude node_modules — electron-builder needs production
+  # dependencies (undici, better-sqlite3, @electron-toolkit/utils, etc.) bundled.
+  # electron-builder's default rules already exclude dev-only junk.
 asarUnpack:
+  # Native .node bindings must live on disk, not inside app.asar, so they can be dlopen'd.
   - resources/**/*
+  - "node_modules/better-sqlite3/**/*"
+  - "node_modules/bindings/**/*"
+  - "node_modules/file-uri-to-path/**/*"
 win:
   target:
     - target: nsis
