@@ -37,6 +37,7 @@ import {
 import { groupByCategory, resolveAgencyCodes } from "./course/agency-code-map";
 import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
 import { performAutoLogin } from "./auth/auto-login";
+import { loginViaEcpa } from "./auth/ecpa-login";
 import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
@@ -267,20 +268,37 @@ async function tryAutoLogin(): Promise<boolean> {
   emitAutoLogin({ stage: "start" });
   log("info", `偵測到已儲存帳密（${maskAccount(creds.account)}），背景自動登入中...`);
   try {
-    const res = await performAutoLogin(creds, elearnView.webContents.session, { timeoutMs: 30_000 });
-    if (res.ok) {
+    // Path 1 — raw POST replay via Electron `net.request`. No browser, no aspnet
+    // isTrusted headaches. Usually finishes in <3 seconds.
+    const session = elearnView.webContents.session;
+    const replay = await loginViaEcpa(session, creds.account, creds.password);
+    if (replay.ok) {
       emitAutoLogin({ stage: "success" });
-      log("info", "自動登入成功");
+      log("info", "自動登入成功（POST replay）");
       touchCredentials();
       elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
       return true;
     }
-    // Silent path failed — fall through to visible pre-fill. Much more reliable:
-    // we navigate the MAIN BrowserView to the eCPA login page, pre-fill the 帳號
-    // 密碼 column, and let the user click 登入 with a real trusted mouse click.
-    log("warn", `自動登入（靜默）失敗：${res.error ?? "unknown"}；改跳到 eCPA 預填表單`);
+    log("warn", `POST replay 登入失敗（${replay.stage}）：${replay.error ?? "unknown"}；改試隱藏瀏覽器`);
+
+    // Path 2 — fall back to hidden-window form drive (worked in some edge
+    // cases the POST replay didn't). 20s budget.
+    const hidden = await performAutoLogin(creds, session, { timeoutMs: 20_000 });
+    if (hidden.ok) {
+      emitAutoLogin({ stage: "success" });
+      log("info", "自動登入成功（hidden window）");
+      touchCredentials();
+      elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
+      return true;
+    }
+    log("warn", `隱藏瀏覽器登入失敗：${hidden.error ?? "unknown"}；改跳預填表單`);
+
+    // Path 3 — visible pre-fill, user clicks 登入 once.
     await showPrefilledEcpaLogin(creds);
-    emitAutoLogin({ stage: "failed", error: "改用預填方式，請點橘色登入按鈕" });
+    emitAutoLogin({
+      stage: "failed",
+      error: "兩種靜默方式都失敗；瀏覽器已導到 eCPA、帳密已預填，點橘框登入即可",
+    });
     return false;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
