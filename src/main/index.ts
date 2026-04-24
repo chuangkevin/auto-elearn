@@ -456,6 +456,13 @@ async function runPipelineFor(cids: string[]): Promise<void> {
             focusedCid = cid;
             navigateViewToCourse(cid);
           }
+        } else if (stage === "tick") {
+          // One-shot dump of server's first response body so we can debug when
+          // heartbeats return 200 but 閱讀時數 refuses to move.
+          const first = (extra as { firstResponse?: string })?.firstResponse;
+          if (first !== undefined) {
+            log("info", `[${card.name}] 心跳 server 回應: ${JSON.stringify(first)}`);
+          }
         } else if (stage === "done") {
           const pings = (extra as { pings?: number })?.pings ?? 0;
           log("info", `閱讀結束：${card.name} (${pings} pings)`);

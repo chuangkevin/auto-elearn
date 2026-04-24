@@ -82,14 +82,23 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     if (elapsedSec >= maxSec) break;
 
     try {
-      const { ok, status } = await sendHeartbeat(session, ticket.pTicket, ticket.encCid);
+      const { ok, status, body } = await sendHeartbeat(session, ticket.pTicket, ticket.encCid);
       if (ok) {
         pings++;
         failures = 0;
         opts.onTick?.(cid, pings, elapsedSec);
+        // One-shot surface the FIRST response body so we can see what the
+        // server actually says — "OK" / empty / an error JSON. Without this we
+        // have no way to tell why 閱讀時數 stays 0 despite 200 OKs.
+        if (pings === 1) {
+          opts.onProgress?.(cid, "tick", {
+            firstResponse: body.slice(0, 300),
+            status,
+          });
+        }
       } else {
         failures++;
-        opts.onProgress?.(cid, "error", { status, failures });
+        opts.onProgress?.(cid, "error", { status, failures, body: body.slice(0, 300) });
         if (failures >= 5) break;
         await sleep(3000);
       }

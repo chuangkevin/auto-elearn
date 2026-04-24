@@ -195,8 +195,8 @@ export async function heartbeat(
   session: Session,
   pTicket: string,
   encCid: string,
-): Promise<{ ok: boolean; status: number }> {
-  const { status } = await elearnRequest(
+): Promise<{ ok: boolean; status: number; body: string }> {
+  const { status, text } = await elearnRequest(
     session,
     `${BASE}/mooc/controllers/course_record.php?actype=end`,
     {
@@ -207,8 +207,10 @@ export async function heartbeat(
         ticket: pTicket,
         enCid: encCid,
       },
-      referer: BASE,
+      // Referer must look like the in-iframe reading page, otherwise the server
+      // discards the tick silently (HTTP 200 but no time credited).
+      referer: `${BASE}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`,
     },
   );
-  return { ok: status >= 200 && status < 400, status };
+  return { ok: status >= 200 && status < 400, status, body: text };
 }
