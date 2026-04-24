@@ -56,6 +56,7 @@ const api = {
   stealthSetSecret: (secret: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke(IPC.STEALTH_SET_SECRET, secret),
   stealthLock: () => ipcRenderer.send(IPC.STEALTH_LOCK),
+  stealthConfigPath: (): Promise<string> => ipcRenderer.invoke(IPC.STEALTH_CONFIG_PATH),
 };
 
 contextBridge.exposeInMainWorld("api", api);

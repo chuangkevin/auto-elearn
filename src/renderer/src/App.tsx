@@ -38,6 +38,7 @@ declare global {
       stealthUnlock: (secret: string) => Promise<boolean>;
       stealthSetSecret: (secret: string) => Promise<{ ok: boolean; reason?: string }>;
       stealthLock: () => void;
+      stealthConfigPath: () => Promise<string>;
     };
   }
 }
@@ -487,11 +488,14 @@ export default function Shell() {
           if (ok) setStealth("unlocked");
           return ok;
         }}
-        onSetSecret={async () => ({ ok: false, reason: "already configured" })}
-        onExit={() => {
-          // Pretend to close Notepad — actually just blank the textarea; the bot
-          // keeps running in the background. User can call the app back via its
-          // taskbar icon at any time.
+        // Hidden gesture (File>Exit ×5) is the recovery path when the user forgot
+        // their password. Overwriting is fine here — the threat model is "someone
+        // behind me looks at my screen", not "someone with filesystem access";
+        // the config is plaintext either way.
+        onSetSecret={async (s) => {
+          const res = await window.api.stealthSetSecret(s);
+          if (res.ok) setStealth("unlocked");
+          return res;
         }}
       />
     );
@@ -585,14 +589,21 @@ function StealthSetupCard({
   onSubmit: () => void;
 }) {
   useHideBrowserViewWhileMounted();
+  const [configPath, setConfigPath] = useState<string>("");
+  useEffect(() => {
+    window.api.stealthConfigPath().then(setConfigPath).catch(() => void 0);
+  }, []);
   return (
     <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
       <h2 className="text-lg font-semibold mb-2">🫥 啟用偽裝（Notepad 模式）</h2>
-      <p className="text-sm text-slate-400 mb-4 leading-relaxed">
+      <p className="text-sm text-slate-400 mb-2 leading-relaxed">
         設定密碼後，下次啟動 app 會先顯示一個 Notepad 畫面。在 textarea 打此密碼 + Enter
         才會進入真正的 app。使用中可按 <code>Ctrl+Alt+H</code> 或 🫥 按鈕隨時再鎖回 Notepad。
-        密碼以明碼存在 <code>userData/config.json</code>（你的明確選擇）。
       </p>
+      <p className="text-sm text-slate-400 mb-2">密碼以明碼存放於：</p>
+      <div className="mb-4 font-mono text-[11px] text-slate-200 bg-slate-950 border border-slate-700 rounded px-2 py-1 break-all select-all">
+        {configPath || "(路徑載入中…)"}
+      </div>
       <input
         className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm mb-2 focus:outline-none focus:border-emerald-500"
         placeholder="輸入密碼"

@@ -14,7 +14,6 @@ interface Props {
   hasSecret: boolean;
   onUnlockAttempt: (secret: string) => Promise<boolean>;
   onSetSecret: (secret: string) => Promise<{ ok: boolean; reason?: string }>;
-  onExit: () => void;
 }
 
 const MENU_BAR = [
@@ -25,7 +24,7 @@ const MENU_BAR = [
   { label: "說明(H)", items: ["檢視說明(H)", "分隔", "關於記事本(A)"] },
 ];
 
-export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret, onExit }: Props) {
+export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Props) {
   const [text, setText] = useState("");
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [exitClicks, setExitClicks] = useState(0);
@@ -120,36 +119,21 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret, onExi
     textareaRef.current?.focus();
   }, []);
 
-  return (
-    <div className="h-screen flex flex-col bg-[#efefef] text-black font-sans select-none">
-      {/* Title bar */}
-      <div className="h-7 bg-[#fafafa] border-b border-[#dcdcdc] flex items-center justify-between px-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[11px]">📝 未命名 - 記事本</span>
-        </div>
-        <div className="flex gap-1">
-          <button
-            className="w-7 h-6 hover:bg-[#e5e5e5] flex items-center justify-center text-xs"
-            onClick={onExit}
-            title="結束"
-          >
-            ─
-          </button>
-          <button
-            className="w-7 h-6 hover:bg-[#e5e5e5] flex items-center justify-center text-xs"
-            onClick={() => void 0}
-          >
-            ▢
-          </button>
-          <button
-            className="w-7 h-6 hover:bg-red-500 hover:text-white flex items-center justify-center text-xs"
-            onClick={onExit}
-          >
-            ✕
-          </button>
-        </div>
-      </div>
+  // Absolute path of config.json (for the setup dialog) — fetched once, lazy.
+  const [configPath, setConfigPath] = useState<string>("");
+  useEffect(() => {
+    const api = (
+      window as unknown as { api?: { stealthConfigPath?: () => Promise<string> } }
+    ).api;
+    api?.stealthConfigPath?.().then(setConfigPath).catch(() => void 0);
+  }, []);
 
+  return (
+    // No fake title bar — the OS window already has one saying "未命名 - 記事本"
+    // (mainWindow.title + page-title-updated prevent). Drawing our own would
+    // stack two identical bars, which is the first thing a suspicious observer
+    // would spot.
+    <div className="h-screen flex flex-col bg-[#efefef] text-black font-sans select-none">
       {/* Menu bar */}
       <div className="h-6 bg-[#f5f5f5] border-b border-[#e5e5e5] flex items-center text-[12px] relative select-none">
         {MENU_BAR.map((m) => (
@@ -209,18 +193,33 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret, onExi
         <span className="ml-4">UTF-8</span>
       </div>
 
-      {/* Hidden-gesture setup dialog */}
+      {/* Hidden-gesture setup / reset dialog */}
       {showSetupDialog && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50">
-          <div className="bg-white border border-[#bfbfbf] shadow-lg w-[360px] p-4">
-            <div className="text-sm font-semibold mb-2">設定解鎖密碼</div>
-            <div className="text-xs text-slate-600 mb-3">
-              設定後，下次打開 Notepad 時輸入此密碼 + Enter 即可進入真正的應用。<br />
-              密碼以明碼存在 userData/config.json。
+          <div className="bg-white border border-[#bfbfbf] shadow-lg w-[420px] p-4">
+            <div className="text-sm font-semibold mb-2">
+              {hasSecret ? "重設解鎖密碼" : "設定解鎖密碼"}
+            </div>
+            <div className="text-xs text-slate-600 mb-3 leading-relaxed">
+              {hasSecret ? (
+                <>
+                  忘記密碼？直接在這裡覆寫一組新的。（一般解鎖請在下方文字區輸入密碼 + Enter）
+                  <br />
+                </>
+              ) : (
+                <>
+                  設定後，下次打開 Notepad 時在文字區輸入此密碼 + Enter 即可進入真正的應用。
+                  <br />
+                </>
+              )}
+              密碼以明碼存放於：
+              <div className="mt-1 font-mono text-[11px] text-slate-700 bg-slate-100 border border-slate-300 rounded px-2 py-1 break-all select-all">
+                {configPath || "(路徑載入中…)"}
+              </div>
             </div>
             <input
               className="w-full px-2 py-1 border border-[#bfbfbf] text-sm mb-2"
-              placeholder="輸入密碼"
+              placeholder={hasSecret ? "輸入新密碼" : "輸入密碼"}
               type="password"
               value={setupValue}
               onChange={(e) => setSetupValue(e.target.value)}
@@ -232,6 +231,7 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret, onExi
               type="password"
               value={setupConfirm}
               onChange={(e) => setSetupConfirm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitSetup()}
             />
             {setupErr && <div className="text-xs text-red-600 mb-2">{setupErr}</div>}
             <div className="flex justify-end gap-2">
@@ -249,7 +249,7 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret, onExi
                 className="px-3 py-1 bg-[#0b65c2] hover:bg-[#0955a5] text-white text-sm"
                 onClick={submitSetup}
               >
-                確定
+                {hasSecret ? "覆寫並解鎖" : "確定"}
               </button>
             </div>
           </div>

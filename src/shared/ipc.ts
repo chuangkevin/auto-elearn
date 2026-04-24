@@ -55,6 +55,10 @@ export interface AppState {
   user?: { name: string };
   /** cids the user ticked and asked us to process this run */
   pipelineCids?: string[];
+  /** True when the user viewed the Selecting screen while a pipeline is still
+   *  running in the background. Lets the UI flip back to the course picker
+   *  without tearing down the pipeline. */
+  returnedToSelect?: boolean;
   now: {
     courseId?: string;
     courseName?: string;
@@ -126,6 +130,8 @@ export const IPC = {
   STEALTH_SET_SECRET: "stealth:set-secret",
   /** renderer → main: re-lock the app (back to Noteqad) */
   STEALTH_LOCK: "stealth:lock",
+  /** renderer → main: absolute path of userData/config.json (for "your password is stored at..." UI) */
+  STEALTH_CONFIG_PATH: "stealth:config-path",
 } as const;
 
 export interface CredentialsStatus {

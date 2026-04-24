@@ -685,6 +685,7 @@ ipcMain.handle(IPC.STEALTH_STATUS, () => stealthCurrentState());
 ipcMain.handle(IPC.STEALTH_UNLOCK, (_evt, secret: string) => stealthTryUnlock(secret));
 ipcMain.handle(IPC.STEALTH_SET_SECRET, (_evt, secret: string) => stealthSetSecret(secret));
 ipcMain.on(IPC.STEALTH_LOCK, () => stealthLock());
+ipcMain.handle(IPC.STEALTH_CONFIG_PATH, () => join(app.getPath("userData"), "config.json"));
 
 ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
   const prev = loadRun();
