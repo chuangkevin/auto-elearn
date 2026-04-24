@@ -691,3 +691,53 @@ dashboard:
    - Phase 2：exam solver + answer store
    - Phase 3：survey + rating + LLM fallback
    - Phase 4：監視器打磨 + 完成驗收
+
+## 14. eCPA 自動登入鏈（2026-04-24 修訂）
+
+Silent login 透過 Electron `net.request` (`useSessionCookies: true`) 照抄瀏覽器實際打的 POST 順序，完全繞過瀏覽器 / synthesized click 問題。
+
+| Step | URL | Body | Response |
+|---|---|---|---|
+| seed | `GET elearn.hrd.gov.tw/mooc/index.php` | — | PHPSESSID |
+| enter | `GET ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD` | — | 302 → clogin.aspx（會拿到 ASP.NET_SessionId） |
+| resolve | `POST ecpa.dgpa.gov.tw/Home/GetUID` | `account=<短碼>` | **純文字 body = 全 ID**（`F130918271`），不是 JSON |
+| ticket | `POST ecpa.dgpa.gov.tw/Home/GetApTicketV2` | `account=<全ID>&password=...&ApID=CrossHRD` | **body 本身就是 APReqEncodedData** hex（≥100 chars）；空或 `0` = 帳密錯 |
+| log | `POST ecpa.dgpa.gov.tw/Home/EnterTwoWayLog` | `account=<全ID>&loginType=0&sn=&ticket=&appId=CrossHRD` | `0` = OK |
+| app2 | `POST ecpa.dgpa.gov.tw/Home/EnterApplicationTwoWay` | `appId=CrossHRD` | `0` = OK（沒有 ticket，不要在這裡找 APReqEncodedData） |
+| verify | `POST elearn.hrd.gov.tw/sso_verify.php` | `loginType=0&APReqEncodedData=<hex>` | 302 → sso_home → /mooc/index.php |
+
+**成功判定：** 檢查 `session.cookies.get({ url: elearn.hrd.gov.tw })` 是否有 `idx` + `suc`。
+**Fallback 順序：** (1) POST replay（本節）→ (2) hidden-window form drive → (3) 預填主 BrowserView 給使用者手動點登入。(1) 快速 + 可靠，(2)/(3) 備援。
+
+Headers 每個 POST 都要帶：`X-Requested-With: XMLHttpRequest`, `Referer: ecpa.dgpa.gov.tw/webform/clogin.aspx?returnUrl=...`, `Origin: ecpa.dgpa.gov.tw`。
+
+原始探測資料：`docs/research/07-ecpa-login-full-chain.md`（redacted）。
+
+## 15. 心跳 SPOC 子網域修正（2026-04-24）
+
+許多課程掛在子網域（例如 `mohw.elearn.hrd.gov.tw` = 衛福部 SPOC）。原版 `ecpa.js` 在 iframe 裡用相對 fetch（`/mooc/controllers/course_record.php?actype=end`），會自動 resolve 到 iframe 的 host。
+
+本 app 原本硬寫 `elearn.hrd.gov.tw` 當 heartbeat target — server 回 HTTP 200 但 **credit 0 時數**（該網域沒有對應的閱讀 session）。
+
+修：
+- `heartbeat/reader.ts` 同時讀 `frame.location.href`，`TicketInfo` 新增 `origin` 欄位
+- `http/elearn.ts` 的 `heartbeat()` 和 `enterReadingSession()` 都改收 `origin` 當絕對 base
+- engine `driveCourse()` 把 `ticket.origin` 傳進去
+
+心跳成功的 server 回應：`{"code":1,"msg":"success","timediff":"...","data":"..."}`（`code=1` 才代表真的 crediting）。
+
+## 16. 建置 / 發佈（2026-04-24）
+
+- 產出：`release/win-unpacked/Noteqad.exe`（未簽章 portable folder，約 290 MB）
+- NSIS `.exe` 安裝包目前卡在 electron-builder 的 winCodeSign 需要 symlink 權限（Windows 必須啟用開發人員模式或以管理員身分執行）；workaround 見 `docs/BUILD.md`
+- 單實例鎖：`app.requestSingleInstanceLock` — 避免連續 rebuild/relaunch 時疊加多個 process（10 個疊起來會看到「兩條 title bar」、IPC 被舊版處理等怪狀）
+- `userData` 路徑：`%APPDATA%/auto-elearn/`（`package.json` 的 `name` 勝過 electron-builder `productName`，別搞錯）
+
+## 17. Stealth Noteqad 偽裝（S task, 2026-04-24）
+
+- 登入 app 時，Shell 根據 `config.json` 的 `stealthSecret` 是否存在決定渲染 `<Noteqad>` 假 Notepad 還是真 `<App>`
+- 解鎖：textarea 最後一行打密碼 + Enter；失敗會在狀態列顯示「密碼錯誤」；IME 組字時會跳過 Enter 避免誤觸
+- 忘記密碼：檔案 → 結束 連點 5 次（15 秒內）→ 跳「重設密碼」對話框（完整路徑顯示給使用者複製）
+- 再鎖：🫥 按鈕或 `Ctrl+Alt+H`；pipeline 在背景繼續跑
+- OS title bar 鎖在「未命名 - 記事本」；`page-title-updated` 事件被攔下來；exe 檔名 `Noteqad.exe`
+- 密碼以明碼存 `config.json`（使用者明確指定）— 威脅模型是「旁人偷看畫面」，不是檔案系統外洩
