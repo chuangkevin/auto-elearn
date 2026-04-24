@@ -125,23 +125,56 @@ export async function performAutoLogin(
               setValue(accountEl, ${JSON.stringify(creds.account)});
               setValue(passwordEl, ${JSON.stringify(creds.password)});
 
-              // Find the submit button inside the same form/panel.
-              const form = passwordEl.form || passwordEl.closest('form') || passwordEl.closest('div');
-              let btn =
-                (form && form.querySelector('button[type="submit"], input[type="submit"]')) ||
-                (form && Array.from(form.querySelectorAll('button, a, input')).find(el => /登入|login/i.test(el.textContent || el.value || '')));
-              if (!btn) {
-                // Final fallback: submit the form directly if native
-                if (form && typeof form.submit === 'function') {
-                  setTimeout(() => { try { form.submit(); } catch {} }, 200);
-                  return { ok: true, reason: 'form.submit()' };
+              // Find the 登入 trigger. eCPA's is a styled <a>/<button> outside the
+              // form element, so we search broadly: the column containing the
+              // password input, then the whole document.
+              const form = passwordEl.form || passwordEl.closest('form');
+              const column = passwordEl.closest('div.col, div[class*="col-"], div.login-box, td, section') || passwordEl.parentElement;
+
+              function findTrigger(root) {
+                if (!root) return null;
+                // 1. Native submit elements
+                const native = root.querySelector('button[type="submit"], input[type="submit"]');
+                if (native && visible(native)) return native;
+                // 2. Anything with 登入/login text that's visible
+                const candidates = Array.from(root.querySelectorAll('button, a, input[type="button"], div[onclick], span[onclick]'));
+                for (const el of candidates) {
+                  if (!visible(el)) continue;
+                  const label = ((el.textContent || '') + ' ' + (el.value || '') + ' ' + (el.getAttribute('onclick') || '')).toLowerCase();
+                  if (/登入|login|signin/.test(label)) return el;
                 }
-                return { ok: false, reason: 'no submit button' };
+                return null;
               }
+
+              let btn = findTrigger(column) || findTrigger(form) || findTrigger(document.body);
+
               // Fire blur first so aspnet postbacks / GetUID fetches run.
               accountEl.dispatchEvent(new Event('blur', { bubbles: true }));
-              setTimeout(() => { try { btn.click(); } catch {} }, 250);
-              return { ok: true, reason: 'clicked ' + (btn.textContent || '').trim().slice(0, 20) };
+              passwordEl.dispatchEvent(new Event('blur', { bubbles: true }));
+
+              if (btn) {
+                setTimeout(() => { try { btn.click(); } catch {} }, 300);
+                return { ok: true, reason: 'clicked ' + ((btn.textContent || btn.value || '').trim().slice(0, 20)) };
+              }
+
+              // No visible button found — try submitting the form directly and
+              // pressing Enter on the password field as parallel fallbacks.
+              if (form && typeof form.submit === 'function') {
+                setTimeout(() => { try { form.submit(); } catch {} }, 200);
+              }
+              if (form) {
+                setTimeout(() => {
+                  try { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); } catch {}
+                }, 250);
+              }
+              setTimeout(() => {
+                try {
+                  passwordEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                  passwordEl.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                  passwordEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                } catch {}
+              }, 300);
+              return { ok: true, reason: 'no visible 登入 button — tried form.submit + Enter key' };
             })()`,
             true,
           );
