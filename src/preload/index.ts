@@ -34,6 +34,10 @@ const api = {
     ipcRenderer.invoke(IPC.UNENROLL_COURSE, cid),
   getCredsStatus: (): Promise<CredentialsStatus> => ipcRenderer.invoke(IPC.CREDS_STATUS),
   forgetCredentials: () => ipcRenderer.send(IPC.CREDS_FORGET),
+  saveCredentialsManual: (
+    payload: { account: string; password: string },
+  ): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke(IPC.CREDS_SAVE_MANUAL, payload),
   answerCredsPrompt: (save: boolean) => ipcRenderer.send(IPC.CREDS_SAVE_ANSWER, save),
   onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => {
     const listener = (_evt: Electron.IpcRendererEvent, p: CredsPromptPayload) => cb(p);

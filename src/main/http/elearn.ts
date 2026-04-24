@@ -167,6 +167,29 @@ export async function enrollCourse(session: Session, cid: string): Promise<{ ok:
   return { ok: status >= 200 && status < 400, status };
 }
 
+/**
+ * Announce to the server that we're entering a reading session for this course.
+ * Original `ecpa.js` does `targetFrame.location.href = "/mooc/index.php?ticket=...&cid=..."`
+ * BEFORE kicking off the 5s heartbeat loop — without this, the heartbeats are
+ * accepted (HTTP 200) but the server has no active reading session to credit
+ * time to, so 閱讀時數 stays at 0.
+ *
+ * We fire the same URL as a plain GET. The response sets whatever session-state
+ * cookies the server needs; subsequent heartbeats then count.
+ */
+export async function enterReadingSession(
+  session: Session,
+  pTicket: string,
+  encCid: string,
+): Promise<{ ok: boolean; status: number }> {
+  const url = `${BASE}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
+  const { status } = await elearnRequest(session, url, {
+    method: "GET",
+    referer: `${BASE}/mooc/index.php`,
+  });
+  return { ok: status >= 200 && status < 400, status };
+}
+
 /** Single heartbeat (setReading/end). */
 export async function heartbeat(
   session: Session,

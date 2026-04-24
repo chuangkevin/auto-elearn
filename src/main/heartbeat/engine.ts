@@ -1,5 +1,5 @@
 import type { Session } from "electron";
-import { heartbeat as sendHeartbeat } from "../http/elearn";
+import { enterReadingSession, heartbeat as sendHeartbeat } from "../http/elearn";
 import { extractTicket } from "./reader";
 import type { Tracked } from "../course/types";
 
@@ -57,6 +57,18 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   if (!ticket) {
     opts.onProgress?.(cid, "error", { reason: "no_ticket" });
     return;
+  }
+
+  // Critical: announce the reading session to the server. Without this GET the
+  // heartbeat POSTs return 200 but aren't credited as study time (閱讀時數 stays
+  // at 0). Matches what the original ecpa.js does before its setInterval loop.
+  try {
+    await enterReadingSession(session, ticket.pTicket, ticket.encCid);
+  } catch (e) {
+    opts.onProgress?.(cid, "error", {
+      reason: "enter_reading_failed",
+      msg: e instanceof Error ? e.message : String(e),
+    });
   }
 
   const needSec = Math.max(0, t.requiredSec - t.readSec);

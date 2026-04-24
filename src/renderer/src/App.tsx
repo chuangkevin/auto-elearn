@@ -29,6 +29,9 @@ declare global {
       unenrollCourse: (cid: string) => Promise<{ ok: boolean; error?: string }>;
       getCredsStatus: () => Promise<CredentialsStatus>;
       forgetCredentials: () => void;
+      saveCredentialsManual: (
+        payload: { account: string; password: string },
+      ) => Promise<{ ok: boolean; reason?: string }>;
       answerCredsPrompt: (save: boolean) => void;
       onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => () => void;
       onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => () => void;
@@ -143,6 +146,7 @@ function App() {
   // Credentials + auto-login UI state
   const [credsPrompt, setCredsPrompt] = useState<CredsPromptPayload | null>(null);
   const [credsStatus, setCredsStatus] = useState<CredentialsStatus | null>(null);
+  const [credsModalOpen, setCredsModalOpen] = useState(false);
   const [autoLogin, setAutoLogin] = useState<AutoLoginProgress | null>(null);
   const [resumePrompt, setResumePrompt] = useState<ResumePrompt | null>(null);
 
@@ -172,7 +176,7 @@ function App() {
 
   // Any App-owned modal open → hide BrowserView so the modal isn't occluded.
   useEffect(() => {
-    const anyModal = !!credsPrompt || !!resumePrompt;
+    const anyModal = !!credsPrompt || !!resumePrompt || credsModalOpen;
     if (anyModal) {
       hideBrowserView();
     } else {
@@ -180,7 +184,7 @@ function App() {
       setTimeout(pushBrowserViewBounds, 0);
       setTimeout(pushBrowserViewBounds, 120);
     }
-  }, [credsPrompt, resumePrompt]);
+  }, [credsPrompt, resumePrompt, credsModalOpen]);
 
   function answerCredsPrompt(save: boolean) {
     window.api.answerCredsPrompt(save);
@@ -352,15 +356,46 @@ function App() {
         </div>
       )}
 
-      {/* Saved-credentials status chip (bottom-left of top panel) */}
-      {credsStatus?.saved && (
-        <button
-          className="absolute left-3 top-3 z-40 px-2 py-1 rounded bg-slate-800/70 hover:bg-slate-700 text-xs text-emerald-300 border border-slate-600 backdrop-blur"
-          onClick={forgetCreds}
-          title="點擊清除儲存的帳密"
-        >
-          🔑 已記憶 {credsStatus.maskedAccount ?? ""}
-        </button>
+      {/* Credentials chip — always shown in bottom-left (stacked above 🫥 button).
+          Click to open a manage modal. Shows 已記憶 / 設定 state. */}
+      <button
+        className={`fixed left-3 bottom-11 z-40 px-2 py-1 rounded text-xs border backdrop-blur shadow-lg ${
+          credsStatus?.saved
+            ? "bg-slate-800/90 border-slate-600 text-emerald-300 hover:bg-slate-700"
+            : "bg-slate-800/90 border-slate-600 text-slate-400 hover:bg-slate-700 hover:text-emerald-300"
+        }`}
+        onClick={() => setCredsModalOpen(true)}
+        title={
+          credsStatus?.saved
+            ? "已儲存帳密；點擊管理（手動覆寫 / 清除）"
+            : "手動儲存 eCPA 帳號密碼以啟用自動重登"
+        }
+      >
+        {credsStatus?.saved ? `🔑 已記憶 ${credsStatus.maskedAccount ?? ""}` : "🔑 設定帳密"}
+      </button>
+
+      {credsModalOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60">
+          <CredsManageCard
+            status={credsStatus}
+            onClose={() => setCredsModalOpen(false)}
+            onClear={() => {
+              forgetCreds();
+              setCredsModalOpen(false);
+            }}
+            onSave={async (account, password) => {
+              const res = await window.api.saveCredentialsManual({ account, password });
+              if (res.ok) {
+                await window.api
+                  .getCredsStatus()
+                  .then(setCredsStatus)
+                  .catch(() => void 0);
+                setCredsModalOpen(false);
+              }
+              return res;
+            }}
+          />
+        </div>
       )}
 
       {/* Resume-previous-run prompt modal */}
@@ -568,6 +603,118 @@ export default function Shell() {
         </div>
       )}
     </>
+  );
+}
+
+function CredsManageCard({
+  status,
+  onClose,
+  onClear,
+  onSave,
+}: {
+  status: CredentialsStatus | null;
+  onClose: () => void;
+  onClear: () => void;
+  onSave: (account: string, password: string) => Promise<{ ok: boolean; reason?: string }>;
+}) {
+  useHideBrowserViewWhileMounted();
+  const [account, setAccount] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setErr(null);
+    if (!account.trim() || !password) {
+      setErr("帳號和密碼都要填");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await onSave(account.trim(), password);
+      if (!res.ok) setErr(res.reason ?? "儲存失敗");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
+      <h2 className="text-lg font-semibold mb-2">🔑 eCPA 帳密管理</h2>
+
+      {status?.saved ? (
+        <p className="text-sm text-slate-300 mb-4">
+          已儲存：<span className="text-emerald-300 font-mono">{status.maskedAccount}</span>
+          {status.lastUsedAt && (
+            <span className="block text-xs text-slate-500 mt-1">
+              最後使用：{new Date(status.lastUsedAt).toLocaleString()}
+            </span>
+          )}
+        </p>
+      ) : (
+        <p className="text-sm text-slate-400 mb-4 leading-relaxed">
+          未儲存。手動輸入 eCPA 的登入帳號（身分證字號或短碼）+ 密碼即可啟用自動重登。
+          若輸入短碼，系統會在第一次登入時自動解析為身分證字號存起來。
+        </p>
+      )}
+
+      <div className="space-y-2 mb-3">
+        <input
+          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
+          placeholder={status?.saved ? "輸入新的 eCPA 帳號（覆寫）" : "eCPA 帳號（身分證字號）"}
+          value={account}
+          onChange={(e) => setAccount(e.target.value)}
+          autoFocus
+          disabled={busy}
+        />
+        <input
+          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
+          placeholder="eCPA 密碼"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          disabled={busy}
+        />
+      </div>
+
+      {err && <div className="text-xs text-rose-400 mb-3">{err}</div>}
+
+      <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+        帳密會用 Windows DPAPI 加密後存在 <code>userData/credentials.bin</code>，
+        只有這台電腦上的你自己可以解開。
+      </p>
+
+      <div className="flex justify-between items-center">
+        {status?.saved ? (
+          <button
+            className="px-3 py-2 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 text-sm"
+            onClick={onClear}
+            disabled={busy}
+          >
+            🗑 清除帳密
+          </button>
+        ) : (
+          <span />
+        )}
+        <div className="flex gap-2">
+          <button
+            className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </button>
+          <button
+            className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+            onClick={submit}
+            disabled={busy}
+          >
+            {busy ? "儲存中..." : status?.saved ? "覆寫" : "儲存"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

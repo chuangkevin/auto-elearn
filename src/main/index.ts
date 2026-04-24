@@ -865,6 +865,27 @@ ipcMain.on(IPC.CREDS_FORGET, () => {
   log("info", "已清除儲存的帳密");
 });
 
+ipcMain.handle(
+  IPC.CREDS_SAVE_MANUAL,
+  (_evt, payload: { account: string; password: string }) => {
+    const account = (payload?.account ?? "").trim();
+    const password = payload?.password ?? "";
+    if (!account || !password) {
+      return { ok: false, reason: "帳號或密碼為空" };
+    }
+    const toSave: SavedCredentials = {
+      account,
+      password,
+      savedAt: new Date().toISOString(),
+    };
+    const res = saveCredentials(toSave);
+    if (res.ok) {
+      log("info", `已手動儲存帳密（${maskAccount(account)}）`);
+    }
+    return res;
+  },
+);
+
 ipcMain.on(IPC.PIPELINE_START, (_evt, cids: string[]) => {
   if (!Array.isArray(cids) || cids.length === 0) {
     log("warn", "沒有選取任何課程");

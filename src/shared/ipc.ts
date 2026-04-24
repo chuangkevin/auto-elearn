@@ -114,6 +114,8 @@ export const IPC = {
   CREDS_FORGET: "creds:forget",
   /** renderer → main: query current saved-credentials state */
   CREDS_STATUS: "creds:status",
+  /** renderer → main: manually save credentials without the sniffer flow */
+  CREDS_SAVE_MANUAL: "creds:save-manual",
   /** main → renderer: auto-login in progress / result */
   AUTOLOGIN_PROGRESS: "autologin:progress",
   /** main → renderer: previous run exists, offer to resume */
