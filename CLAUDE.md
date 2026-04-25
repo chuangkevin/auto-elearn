@@ -61,6 +61,28 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - Any requirement that should govern future implementation must be written into the formal rule sources (this file or a skill), not left only in chat context. Rule home: `skills/execution-style/SKILL.md`.
 - Any non-trivial feature request should first go through an exploration/confirmation step and be captured in OpenSpec before implementation.
 
+## Release 流程
+
+1. 確認所有功能正常
+2. 更新 `package.json` 版本號
+3. commit + push
+4. 打 tag：`git tag v{版本號}`
+5. push tag：`git push --tags`
+6. GitHub Actions 自動 build → zip → 發布到 Release
+7. 確認 Release 頁面有 zip 檔
+
+### Release 格式
+
+- portable `.exe` 打包成 `.zip`
+- zip 裡只有一個 `.exe`
+- 使用者解壓雙擊就用
+
+### 注意事項
+
+- 不要在 zip 裡放 `.env` 或任何設定檔
+- 帳密在 app 內設定，不需要使用者碰任何檔案
+- icon 用記事本（偽裝）
+
 ## When To Remove Or Replace Skills
 
 - Remove `skills/frontend-design/` if the project has no frontend.
