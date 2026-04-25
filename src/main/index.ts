@@ -156,7 +156,7 @@ function log(level: "info" | "warn" | "error", msg: string) {
 function createWindow() {
   const iconPath = app.isPackaged
     ? join(process.resourcesPath, "resources/icon.ico")
-    : join(__dirname, "../../resources/icon.ico");
+    : join(app.getAppPath(), "resources/icon.ico");
 
   mainWindow = new BrowserWindow({
     width: 1360,
