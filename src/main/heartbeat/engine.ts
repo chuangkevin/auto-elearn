@@ -88,13 +88,16 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     });
   }
 
-  // Step 2: explicit actype=start POST — ecpa.js fires this once when the
-  // reader iframe finishes loading; without it the server has no open timer
-  // record and every actype=end heartbeat returns "success" but credits 0s.
+  // Step 2: explicit actype=start POST — manifest.js fires this once (3s after
+  // lesson click); without it the server has no open timer record and every
+  // actype=end heartbeat returns "success" but credits 0 seconds.
+  // Capture timediff from the response — it becomes the initial bt for the loop.
+  let bt = "0";
   try {
     const startRes = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
+    bt = startRes.timediff;
     opts.onProgress?.(cid, "tick", {
-      startSession: { status: startRes.status, ok: startRes.ok, body: startRes.body.slice(0, 200) },
+      startSession: { status: startRes.status, ok: startRes.ok, body: startRes.body.slice(0, 200), timediff: bt },
     });
   } catch (e) {
     opts.onProgress?.(cid, "error", {
@@ -111,29 +114,27 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   let serverConfirmed = false;
   let lastPollAt = Date.now();
   const pollInterval = opts.pollIntervalMs ?? 30_000;
-  // Refresh the server session every 4 min in case the pTicket has a short TTL.
-  const SESSION_REFRESH_MS = 4 * 60 * 1000;
-  let lastRefreshAt = Date.now();
 
   while (!opts.signal?.aborted) {
     const elapsedSec = Math.floor((Date.now() - startAt) / 1000);
     if (elapsedSec >= maxSec) break;
 
     try {
-      const { ok, status, body } = await sendHeartbeat(session, ticket.pTicket, ticket.encCid, ticket.origin);
+      const { ok, status, body, timediff } = await sendHeartbeat(
+        session, ticket.pTicket, ticket.encCid, ticket.origin, opts.intervalMs, bt,
+      );
       if (ok) {
+        bt = timediff;
         pings++;
         failures = 0;
         opts.onTick?.(cid, pings, elapsedSec);
-        // Log response body on first tick and every ~60s thereafter so we can
-        // monitor whether timediff stays non-zero (= time is being credited).
+        // Log response on first tick and every ~60s so we can verify timediff
+        // is advancing (= server is crediting time).
         if (pings === 1 || pings % 12 === 0) {
-          let timediff = "?";
-          try { timediff = String((JSON.parse(body) as Record<string, unknown>).timediff ?? "?"); } catch { /* ignore */ }
           opts.onProgress?.(cid, "tick", {
             firstResponse: body.slice(0, 300),
             status,
-            timediff,
+            timediff: bt,
           });
         }
       } else {
@@ -150,19 +151,6 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
       });
       if (failures >= 5) break;
       await sleep(3000);
-    }
-
-    // Periodic session refresh — re-enter + re-start every 4 min so the server
-    // doesn't drop our session if the pTicket has a short TTL.
-    if (Date.now() - lastRefreshAt >= SESSION_REFRESH_MS) {
-      lastRefreshAt = Date.now();
-      try {
-        await enterReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
-        const refreshStart = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
-        opts.onProgress?.(cid, "tick", {
-          refreshSession: { ok: refreshStart.ok, status: refreshStart.status, body: refreshStart.body.slice(0, 200) },
-        });
-      } catch { /* non-fatal; keep heartbeating */ }
     }
 
     // Server-side progress poll — fires every pollInterval regardless of ping rate

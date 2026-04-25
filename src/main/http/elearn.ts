@@ -192,17 +192,16 @@ export async function enterReadingSession(
 }
 
 /**
- * Explicitly open a server-side reading session (mirrors what ecpa.js does on
- * page-load before starting its setInterval loop).  Without this POST the
- * server never creates a timer record and every `actype=end` heartbeat returns
- * {"code":1,"msg":"success"} but credits 0 seconds.
+ * Explicitly open a server-side reading session (mirrors what manifest.js does
+ * 3 seconds after a lesson is clicked: `setReading('start', 0)`).
+ * Returns the server's `timediff` value — use it as `bt` in the first heartbeat.
  */
 export async function startReadingSession(
   session: Session,
   pTicket: string,
   encCid: string,
   origin: string = BASE,
-): Promise<{ ok: boolean; status: number; body: string }> {
+): Promise<{ ok: boolean; status: number; body: string; timediff: string }> {
   const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
   const { status, text } = await elearnRequest(
     session,
@@ -214,12 +213,19 @@ export async function startReadingSession(
         type: "start",
         ticket: pTicket,
         enCid: encCid,
+        period: "0",
+        bt: "0",
       },
       referer: readerUrl,
       originHeader: origin,
     },
   );
-  return { ok: status >= 200 && status < 400, status, body: text };
+  let timediff = "0";
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (parsed.timediff !== undefined) timediff = String(parsed.timediff);
+  } catch { /* ignore parse errors */ }
+  return { ok: status >= 200 && status < 400, status, body: text, timediff };
 }
 
 /**
@@ -230,13 +236,20 @@ export async function startReadingSession(
  * away with a relative URL because it ran inside the iframe; sending to the
  * main portal `elearn.hrd.gov.tw` when the course is on a sub-domain returns
  * 200 but credits zero time.
+ *
+ * `periodMs`: milliseconds elapsed since the last heartbeat (or since start).
+ *   Pass `opts.intervalMs` — the server uses this to credit reading time.
+ * `bt`: the `timediff` value from the most recent server response (start or end).
+ *   Initialise from `startReadingSession().timediff` and update after each call.
  */
 export async function heartbeat(
   session: Session,
   pTicket: string,
   encCid: string,
   origin: string = BASE,
-): Promise<{ ok: boolean; status: number; body: string }> {
+  periodMs = 5000,
+  bt = "0",
+): Promise<{ ok: boolean; status: number; body: string; timediff: string }> {
   const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
   const { status, text } = await elearnRequest(
     session,
@@ -248,6 +261,8 @@ export async function heartbeat(
         type: "end",
         ticket: pTicket,
         enCid: encCid,
+        period: String(periodMs),
+        bt,
       },
       // Referer must look like the in-iframe reading page, otherwise the server
       // discards the tick silently (HTTP 200 but no time credited).
@@ -255,5 +270,10 @@ export async function heartbeat(
       originHeader: origin,
     },
   );
-  return { ok: status >= 200 && status < 400, status, body: text };
+  let timediff = bt;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (parsed.timediff !== undefined) timediff = String(parsed.timediff);
+  } catch { /* ignore parse errors */ }
+  return { ok: status >= 200 && status < 400, status, body: text, timediff };
 }
