@@ -1,7 +1,17 @@
 import { BrowserView, BrowserWindow, type WebContents } from "electron";
 
-const ECPA_CLOGIN = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
+// webform/clogin.aspx is required — sso_verify.php checks the Referer and
+// rejects tickets originating from uIAM/clogin.asp, redirecting to the login
+// page instead of the elearn home. The Naminglogo + showecpa params prime the
+// correct session state for the GetApTicketV2 → sso_verify.php chain.
+const ECPA_CLOGIN =
+  "https://ecpa.dgpa.gov.tw/webform/clogin.aspx" +
+  "?returnUrl=https%3A%2F%2Felearn.hrd.gov.tw%2Fsso_verify.php" +
+  "&Naminglogo=https%3A%2F%2Fecpa.dgpa.gov.tw%2Fwebform%2Flogo-hrd.png" +
+  "&showecpa=Y";
 const ELEARN_HOME_PREFIX = "https://elearn.hrd.gov.tw/mooc/";
+// sso_verify.php failure redirects to this path — exclude it from success detection
+const ELEARN_LOGIN_PATH = "/mooc/user/login";
 
 /**
  * Drive the eCPA login flow inside the VISIBLE BrowserView so cookies land
@@ -41,7 +51,9 @@ export async function autoLoginInView(
     const timer = setTimeout(() => done({ ok: false, error: "auto-login timeout" }), timeoutMs);
 
     const onNav = (_e: unknown, url: string) => {
-      if (url.startsWith(ELEARN_HOME_PREFIX)) done({ ok: true });
+      if (url.startsWith(ELEARN_HOME_PREFIX) && !url.includes(ELEARN_LOGIN_PATH)) {
+        done({ ok: true });
+      }
     };
 
     // Step 1: navigate to clogin.aspx to seed ASP.NET_SessionId in the view's cookie jar.
