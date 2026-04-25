@@ -1634,7 +1634,7 @@ function Monitor({ state }: { state: AppState }) {
                     />
                   </div>
                   <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
-                    {formatHms(c.readSec)} / {formatHms(c.requiredSec)}
+                    {pct}% · {Math.floor(c.readSec / 60)}/{Math.floor(c.requiredSec / 60)} 分
                   </span>
                   <span className="text-[10px] text-slate-400 whitespace-nowrap min-w-[3rem] text-right">
                     {phaseLabel(c.phase)}

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu, screen } from "electron";
+import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu, screen, type Session } from "electron";
 import { join } from "node:path";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
@@ -26,7 +26,7 @@ import {
   searchCourses,
   type Course,
 } from "./http/elearn";
-import { runHeartbeatBatch } from "./heartbeat/engine";
+import { runHeartbeatBatch, type PollData } from "./heartbeat/engine";
 import {
   clearCredentials,
   hasSavedCredentials,
@@ -149,6 +149,28 @@ function log(level: "info" | "warn" | "error", msg: string) {
   pushState();
   // eslint-disable-next-line no-console
   console.log(`[${level}] ${msg}`);
+}
+
+// ── Server-progress poll cache (shared across parallel driveCourse calls) ──
+let _pollCache: { ts: number; map: Map<string, PollData> } | null = null;
+
+async function fetchProgressCached(session: Session): Promise<Map<string, PollData>> {
+  const now = Date.now();
+  if (_pollCache && now - _pollCache.ts < 5_000) return _pollCache.map;
+  const courses = await getSigningCourses(session);
+  const map = new Map<string, PollData>(
+    courses.map((c) => [
+      c.cid,
+      {
+        isReadDones: c.isReadDones ?? 0,
+        isExamDones: c.isExamDones ?? 0,
+        isSurveyDones: c.isSurveyDones ?? 0,
+        passPercent: c.passPercent,
+      },
+    ]),
+  );
+  _pollCache = { ts: now, map };
+  return map;
 }
 
 // ── Gemini key dialog ─────────────────────────────────────────
@@ -623,6 +645,32 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       jitterMs: HEARTBEAT_JITTER_MS,
       graceSec: 120,
       signal: abortSignal,
+      pollIntervalMs: 30_000,
+      pollFn: async (cid) => {
+        try {
+          const map = await fetchProgressCached(session);
+          return map.get(cid) ?? null;
+        } catch {
+          return null;
+        }
+      },
+      onPoll: (cid, data) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        if (data.isReadDones === 1 && card.readSec < card.requiredSec) {
+          card.readSec = card.requiredSec;
+          log("info", `[${card.name}] 📡 伺服器確認閱讀完成 (${data.passPercent != null ? `整體 ${data.passPercent}%` : ""})`);
+        }
+        if (data.isExamDones === 1) card.examDone = true;
+        if (data.isSurveyDones === 1) card.surveyDone = true;
+        const parts: string[] = [];
+        if (data.passPercent != null) parts.push(`整體 ${data.passPercent}%`);
+        parts.push(`閱讀${data.isReadDones === 1 ? "✓" : "⏳"}`);
+        parts.push(`測驗${data.isExamDones === 1 ? "✓" : "○"}`);
+        parts.push(`問卷${data.isSurveyDones === 1 ? "✓" : "○"}`);
+        state.now.detail = `📡 ${parts.join(" · ")}`;
+        pushState();
+      },
       onProgress: (cid, stage, extra) => {
         const card = state.courses.find((c) => c.cid === cid);
         if (!card) return;
@@ -645,7 +693,8 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           }
         } else if (stage === "done") {
           const pings = (extra as { pings?: number })?.pings ?? 0;
-          log("info", `閱讀結束：${card.name} (${pings} pings)`);
+          const serverConfirmed = (extra as { serverConfirmed?: boolean })?.serverConfirmed ?? false;
+          log("info", `閱讀結束：${card.name} (${pings} pings, ${serverConfirmed ? "伺服器確認達標" : "計時到期"})`);
           card.phase = "exam";
           runningCids.delete(cid);
           if (focusedCid === cid) focusNextCourse();
@@ -659,20 +708,21 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       onTick: (cid, pings, elapsedSec) => {
         const card = state.courses.find((c) => c.cid === cid);
         if (!card) return;
-        card.readSec = Math.min(card.requiredSec, elapsedSec);
+        // Keep readSec as max(server-confirmed, local elapsed) so UI never goes backwards
+        if (elapsedSec > card.readSec) card.readSec = Math.min(card.requiredSec, elapsedSec);
         card.lastPingAt = Date.now();
         state.now.courseId = cid;
         state.now.courseName = card.name;
         state.now.action = "heartbeat";
-        state.now.detail = `${formatHms(card.readSec)} / ${formatHms(card.requiredSec)} (${pings} pings)`;
+        const readMin = Math.floor(card.readSec / 60);
+        const reqMin = Math.floor(card.requiredSec / 60);
+        const pct = card.requiredSec > 0 ? Math.min(100, Math.round((card.readSec / card.requiredSec) * 100)) : 0;
+        state.now.detail = `${pct}% · 已讀 ${readMin} 分鐘 / 需 ${reqMin} 分鐘 (${pings} pings)`;
         pushState();
         // Log every 6 pings (~30s) for a while, then taper to every 30 pings
-        // once the course is clearly progressing. Gives the user feedback
-        // during the critical first 2–3 minutes where server decides whether
-        // to credit.
         const interval = pings < 30 ? 6 : 30;
         if (pings === 1 || pings % interval === 0) {
-          log("info", `${card.name}: ${pings} ping, 累積 ${formatHms(elapsedSec)}`);
+          log("info", `${card.name}: ${pings} ping, 已讀 ${readMin} 分鐘 / 需 ${reqMin} 分鐘 (${pct}%)`);
         }
       },
     });

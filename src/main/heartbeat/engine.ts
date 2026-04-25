@@ -5,6 +5,13 @@ import type { Tracked } from "../course/types";
 
 export type ProgressStage = "open" | "tick" | "done" | "error";
 
+export interface PollData {
+  isReadDones: number;
+  isExamDones: number;
+  isSurveyDones: number;
+  passPercent?: number;
+}
+
 export interface HeartbeatOptions {
   parallel: number;
   intervalMs: number;
@@ -15,6 +22,12 @@ export interface HeartbeatOptions {
   onProgress?: (cid: string, stage: ProgressStage, extra?: Record<string, unknown>) => void;
   /** Called each tick so caller can update UI progress. */
   onTick?: (cid: string, pings: number, elapsedSec: number) => void;
+  /** Fetch server-side progress for one course. Called every pollIntervalMs. */
+  pollFn?: (cid: string) => Promise<PollData | null>;
+  /** Called with server data each time pollFn resolves. */
+  onPoll?: (cid: string, data: PollData) => void;
+  /** How often to call pollFn (ms). Default 30 000. */
+  pollIntervalMs?: number;
   /** Abort signal (checked between ticks). */
   signal?: { aborted: boolean };
 }
@@ -82,6 +95,9 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   const startAt = Date.now();
   let pings = 0;
   let failures = 0;
+  let serverConfirmed = false;
+  let lastPollAt = Date.now();
+  const pollInterval = opts.pollIntervalMs ?? 30_000;
 
   while (!opts.signal?.aborted) {
     const elapsedSec = Math.floor((Date.now() - startAt) / 1000);
@@ -118,12 +134,29 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
       await sleep(3000);
     }
 
+    // Server-side progress poll — fires every pollInterval regardless of ping rate
+    if (opts.pollFn && Date.now() - lastPollAt >= pollInterval) {
+      lastPollAt = Date.now();
+      try {
+        const data = await opts.pollFn(cid);
+        if (data) {
+          opts.onPoll?.(cid, data);
+          if (data.isReadDones === 1) {
+            serverConfirmed = true;
+            break;
+          }
+        }
+      } catch {
+        // poll errors are non-fatal; continue heartbeat
+      }
+    }
+
     // Sleep until next tick (interval ± jitter)
     const jitter = Math.floor((Math.random() * 2 - 1) * opts.jitterMs);
     await sleep(Math.max(1000, opts.intervalMs + jitter));
   }
 
-  opts.onProgress?.(cid, "done", { pings });
+  opts.onProgress?.(cid, "done", { pings, serverConfirmed });
 }
 
 function sleep(ms: number) {
