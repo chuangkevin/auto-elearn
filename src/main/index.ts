@@ -355,6 +355,20 @@ async function tryAutoLogin(): Promise<boolean> {
   if (!elearnView) return false;
   const creds = loadCredentials();
   if (!creds) return false;
+
+  // Wait up to 6 s for BrowserView to finish loading elearn with any cached
+  // session. Skip the SSO chain entirely if already logged in — running it
+  // against a live session clears the idx cookie and immediately logs out.
+  for (let i = 0; i < 6; i++) {
+    const already = await isBrowserViewLoggedIn();
+    if (already === true) {
+      log("info", "BrowserView 已登入（idx cookie 有效），跳過 SSO");
+      return true;
+    }
+    if (already === false) break; // elearn loaded, confirmed not logged in
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
   autoLoginInFlight = true;
   emitAutoLogin({ stage: "start" });
   log("info", `偵測到已儲存帳密（${maskAccount(creds.account)}），背景自動登入中...`);
