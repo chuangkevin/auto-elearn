@@ -1,4 +1,4 @@
-import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu } from "electron";
+import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu, screen } from "electron";
 import { join } from "node:path";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
@@ -221,6 +221,18 @@ function createWindow() {
   });
   // Electron keeps refreshing title from the rendered document; lock it down.
   mainWindow.on("page-title-updated", (e) => e.preventDefault());
+
+  // Keep at least 100px of the title bar inside the display's work area so the
+  // user can always grab the window back. Works across multi-monitor setups.
+  mainWindow.on("move", () => {
+    if (!mainWindow) return;
+    const bounds = mainWindow.getBounds();
+    const wa = screen.getDisplayMatching(bounds).workArea;
+    const MARGIN = 100;
+    const x = Math.max(wa.x - bounds.width + MARGIN, Math.min(bounds.x, wa.x + wa.width - MARGIN));
+    const y = Math.max(wa.y, Math.min(bounds.y, wa.y + wa.height - MARGIN));
+    if (x !== bounds.x || y !== bounds.y) mainWindow.setPosition(x, y);
+  });
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
   buildAppMenu();
