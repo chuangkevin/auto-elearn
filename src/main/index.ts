@@ -154,6 +154,10 @@ function log(level: "info" | "warn" | "error", msg: string) {
 
 // ── Window + BrowserView ──────────────────────────────────────
 function createWindow() {
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, "resources/icon.ico")
+    : join(__dirname, "../../resources/icon.ico");
+
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
@@ -161,6 +165,7 @@ function createWindow() {
     minHeight: 720,
     show: false,
     autoHideMenuBar: true,
+    icon: iconPath,
     // Disguise: OS title bar always shows the Notepad title, regardless of whether
     // the app is locked or unlocked. Matches the stealth-mode intent.
     title: "未命名 - 記事本",
