@@ -682,13 +682,24 @@ async function runPipelineFor(cids: string[]): Promise<void> {
             navigateViewToCourse(cid);
           }
         } else if (stage === "tick") {
-          const first = (extra as { firstResponse?: string })?.firstResponse;
-          if (first !== undefined) {
-            log("info", `[${card.name}] 心跳 server 回應: ${JSON.stringify(first)}`);
+          const e2 = extra as {
+            firstResponse?: string; status?: number; timediff?: string;
+            enterSession?: { status: number; ok: boolean };
+            startSession?: { status: number; ok: boolean; body: string };
+            refreshSession?: { ok: boolean; status: number; body: string };
+          };
+          if (e2.enterSession) {
+            log("info", `[${card.name}] enterReadingSession → ${e2.enterSession.ok ? "OK" : "FAIL"} (${e2.enterSession.status})`);
           }
-          const enter = (extra as { enterSession?: { status: number; ok: boolean } })?.enterSession;
-          if (enter) {
-            log("info", `[${card.name}] enterReadingSession → ${enter.ok ? "OK" : "FAIL"} (status ${enter.status})`);
+          if (e2.startSession) {
+            log("info", `[${card.name}] startReadingSession → ${e2.startSession.ok ? "OK" : "FAIL"} (${e2.startSession.status}) ${e2.startSession.body}`);
+          }
+          if (e2.refreshSession) {
+            log("info", `[${card.name}] ♻ 重新建立 session → ${e2.refreshSession.ok ? "OK" : "FAIL"} (${e2.refreshSession.status}) ${e2.refreshSession.body}`);
+          }
+          if (e2.firstResponse !== undefined) {
+            const td = e2.timediff !== undefined ? ` timediff=${e2.timediff}` : "";
+            log("info", `[${card.name}] 心跳回應${td}: ${e2.firstResponse}`);
           }
         } else if (stage === "done") {
           const pings = (extra as { pings?: number })?.pings ?? 0;

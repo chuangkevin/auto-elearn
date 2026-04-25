@@ -1,5 +1,5 @@
 import type { Session } from "electron";
-import { enterReadingSession, heartbeat as sendHeartbeat } from "../http/elearn";
+import { enterReadingSession, heartbeat as sendHeartbeat, startReadingSession } from "../http/elearn";
 import { extractTicket } from "./reader";
 import type { Tracked } from "../course/types";
 
@@ -75,9 +75,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   // SPOC providers silently drop our heartbeats.
   opts.onProgress?.(cid, "open", { origin: ticket.origin });
 
-  // Critical: announce the reading session to the server. Without this GET the
-  // heartbeat POSTs return 200 but aren't credited as study time (閱讀時數 stays
-  // at 0). Matches what the original ecpa.js does before its setInterval loop.
+  // Step 1: re-load the reader page (sets server session state for this ticket)
   try {
     const enter = await enterReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
     opts.onProgress?.(cid, "tick", {
@@ -90,6 +88,21 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     });
   }
 
+  // Step 2: explicit actype=start POST — ecpa.js fires this once when the
+  // reader iframe finishes loading; without it the server has no open timer
+  // record and every actype=end heartbeat returns "success" but credits 0s.
+  try {
+    const startRes = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
+    opts.onProgress?.(cid, "tick", {
+      startSession: { status: startRes.status, ok: startRes.ok, body: startRes.body.slice(0, 200) },
+    });
+  } catch (e) {
+    opts.onProgress?.(cid, "error", {
+      reason: "start_reading_failed",
+      msg: e instanceof Error ? e.message : String(e),
+    });
+  }
+
   const needSec = Math.max(0, t.requiredSec - t.readSec);
   const maxSec = needSec + opts.graceSec;
   const startAt = Date.now();
@@ -98,6 +111,9 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   let serverConfirmed = false;
   let lastPollAt = Date.now();
   const pollInterval = opts.pollIntervalMs ?? 30_000;
+  // Refresh the server session every 4 min in case the pTicket has a short TTL.
+  const SESSION_REFRESH_MS = 4 * 60 * 1000;
+  let lastRefreshAt = Date.now();
 
   while (!opts.signal?.aborted) {
     const elapsedSec = Math.floor((Date.now() - startAt) / 1000);
@@ -109,13 +125,15 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
         pings++;
         failures = 0;
         opts.onTick?.(cid, pings, elapsedSec);
-        // One-shot surface the FIRST response body so we can see what the
-        // server actually says — "OK" / empty / an error JSON. Without this we
-        // have no way to tell why 閱讀時數 stays 0 despite 200 OKs.
-        if (pings === 1) {
+        // Log response body on first tick and every ~60s thereafter so we can
+        // monitor whether timediff stays non-zero (= time is being credited).
+        if (pings === 1 || pings % 12 === 0) {
+          let timediff = "?";
+          try { timediff = String((JSON.parse(body) as Record<string, unknown>).timediff ?? "?"); } catch { /* ignore */ }
           opts.onProgress?.(cid, "tick", {
             firstResponse: body.slice(0, 300),
             status,
+            timediff,
           });
         }
       } else {
@@ -132,6 +150,19 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
       });
       if (failures >= 5) break;
       await sleep(3000);
+    }
+
+    // Periodic session refresh — re-enter + re-start every 4 min so the server
+    // doesn't drop our session if the pTicket has a short TTL.
+    if (Date.now() - lastRefreshAt >= SESSION_REFRESH_MS) {
+      lastRefreshAt = Date.now();
+      try {
+        await enterReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
+        const refreshStart = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
+        opts.onProgress?.(cid, "tick", {
+          refreshSession: { ok: refreshStart.ok, status: refreshStart.status, body: refreshStart.body.slice(0, 200) },
+        });
+      } catch { /* non-fatal; keep heartbeating */ }
     }
 
     // Server-side progress poll — fires every pollInterval regardless of ping rate

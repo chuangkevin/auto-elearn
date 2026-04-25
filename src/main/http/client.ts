@@ -6,6 +6,8 @@ export interface ElearnRequestOptions {
   body?: Record<string, string>;
   referer?: string;
   timeoutMs?: number;
+  /** Set when making XHR-style POSTs that need Origin (e.g. course_record.php). */
+  originHeader?: string;
 }
 
 /** Build a Cookie header from the BrowserView's session. */
@@ -40,6 +42,7 @@ export async function elearnRequest(
     Cookie: cookie,
   };
   if (opts.referer) headers.Referer = opts.referer;
+  if (opts.originHeader) headers.Origin = opts.originHeader;
   let body: string | undefined;
   if (method === "POST" && opts.body) {
     headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";

@@ -201,6 +201,37 @@ export async function enterReadingSession(
 }
 
 /**
+ * Explicitly open a server-side reading session (mirrors what ecpa.js does on
+ * page-load before starting its setInterval loop).  Without this POST the
+ * server never creates a timer record and every `actype=end` heartbeat returns
+ * {"code":1,"msg":"success"} but credits 0 seconds.
+ */
+export async function startReadingSession(
+  session: Session,
+  pTicket: string,
+  encCid: string,
+  origin: string = BASE,
+): Promise<{ ok: boolean; status: number; body: string }> {
+  const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
+  const { status, text } = await elearnRequest(
+    session,
+    `${origin}/mooc/controllers/course_record.php?actype=start`,
+    {
+      method: "POST",
+      body: {
+        action: "setReading",
+        type: "start",
+        ticket: pTicket,
+        enCid: encCid,
+      },
+      referer: readerUrl,
+      originHeader: origin,
+    },
+  );
+  return { ok: status >= 200 && status < 400, status, body: text };
+}
+
+/**
  * Single heartbeat (setReading/end).
  *
  * CRITICAL: `origin` must be the origin of the reading iframe (e.g.
@@ -215,6 +246,7 @@ export async function heartbeat(
   encCid: string,
   origin: string = BASE,
 ): Promise<{ ok: boolean; status: number; body: string }> {
+  const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
   const { status, text } = await elearnRequest(
     session,
     `${origin}/mooc/controllers/course_record.php?actype=end`,
@@ -228,7 +260,8 @@ export async function heartbeat(
       },
       // Referer must look like the in-iframe reading page, otherwise the server
       // discards the tick silently (HTTP 200 but no time credited).
-      referer: `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`,
+      referer: readerUrl,
+      originHeader: origin,
     },
   );
   return { ok: status >= 200 && status < 400, status, body: text };
