@@ -657,18 +657,17 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       onPoll: (cid, data) => {
         const card = state.courses.find((c) => c.cid === cid);
         if (!card) return;
-        if (data.isReadDones === 1 && card.readSec < card.requiredSec) {
-          card.readSec = card.requiredSec;
-          log("info", `[${card.name}] 📡 伺服器確認閱讀完成 (${data.passPercent != null ? `整體 ${data.passPercent}%` : ""})`);
-        }
         if (data.isExamDones === 1) card.examDone = true;
         if (data.isSurveyDones === 1) card.surveyDone = true;
-        const parts: string[] = [];
-        if (data.passPercent != null) parts.push(`整體 ${data.passPercent}%`);
-        parts.push(`閱讀${data.isReadDones === 1 ? "✓" : "⏳"}`);
-        parts.push(`測驗${data.isExamDones === 1 ? "✓" : "○"}`);
-        parts.push(`問卷${data.isSurveyDones === 1 ? "✓" : "○"}`);
-        state.now.detail = `📡 ${parts.join(" · ")}`;
+        const readStatus = data.isReadDones === 1 ? "閱讀✓" : "閱讀⏳";
+        const examStatus = data.isExamDones === 1 ? "測驗✓" : "測驗○";
+        const surveyStatus = data.isSurveyDones === 1 ? "問卷✓" : "問卷○";
+        const pctStr = data.passPercent != null ? ` 整體${data.passPercent}%` : "";
+        log("info", `[${card.name}] 📡 server 進度:${pctStr} ${readStatus} ${examStatus} ${surveyStatus}`);
+        if (data.isReadDones === 1 && card.readSec < card.requiredSec) {
+          card.readSec = card.requiredSec;
+          log("info", `[${card.name}] 📡 伺服器確認閱讀達標，提前結束心跳`);
+        }
         pushState();
       },
       onProgress: (cid, stage, extra) => {
