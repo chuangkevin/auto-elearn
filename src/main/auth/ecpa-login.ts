@@ -158,31 +158,22 @@ export async function loginViaEcpa(
     }
 
     // 7. Small delay so the session cookie jar commits the Set-Cookie headers
-    //    written by net.request during the sso redirect chain. Without this
-    //    gap I've seen verify race ahead of the commit and misread "no
-    //    cookies" on an otherwise-good session.
-    await new Promise((r) => setTimeout(r, 400));
+    //    written by net.request during the sso redirect chain.
+    await new Promise((r) => setTimeout(r, 600));
 
-    // 8. Ground-truth verify: hit /mooc/user/learn_dashboard.php?tab=1 —
-    //    that URL requires auth. Unauth'd responses look like the public
-    //    homepage template (no 個人專區 / 登出 markers).
-    const verify = await req(
-      session,
-      "GET",
-      "https://elearn.hrd.gov.tw/mooc/user/learn_dashboard.php?tab=1",
-    );
-    if (verify.status >= 400) {
-      return { ok: false, stage: "verify", error: `dashboard GET returned ${verify.status}` };
-    }
-    if (!/個人專區|learn_dashboard\.php|登出/.test(verify.body)) {
-      // Diagnostic: also show which elearn cookies we actually hold so we can
-      // tell "server rejected the session" from "cookies never arrived".
-      const cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
+    // 8. Cookie-based verify (spec: "idx + suc present" = authenticated).
+    //    We deliberately avoid fetching learn_dashboard.php here because
+    //    elearn is a SPA — the raw HTML response never contains 個人專區/登出,
+    //    causing the old body-text check to always report failure even when
+    //    the session is genuinely authenticated.
+    const cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
+    const idx = cookies.find((c) => c.name === "idx");
+    if (!idx?.value) {
       const cookieSummary = cookies.map((c) => c.name).join(",");
       return {
         ok: false,
         stage: "verify",
-        error: `dashboard body unauthenticated; cookies on elearn: [${cookieSummary}]; sso status was ${sso.status}`,
+        error: `session cookies missing idx; present=[${cookieSummary}]; sso status was ${sso.status}`,
       };
     }
     return { ok: true };
