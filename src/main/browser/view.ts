@@ -50,10 +50,28 @@ export async function autoLoginInView(
 
     const timer = setTimeout(() => done({ ok: false, error: "auto-login timeout" }), timeoutMs);
 
+    // URL must look like elearn home AND must actually show 個人專區 in DOM.
+    // sso_verify.php may redirect to explorer.php (not login page) on ticket
+    // rejection — a URL-only check would produce a false positive there.
     const onNav = (_e: unknown, url: string) => {
-      if (url.startsWith(ELEARN_HOME_PREFIX) && !url.includes(ELEARN_LOGIN_PATH)) {
-        done({ ok: true });
-      }
+      if (!url.startsWith(ELEARN_HOME_PREFIX) || url.includes(ELEARN_LOGIN_PATH)) return;
+      view.webContents.off("did-navigate", onNav); // prevent re-entry
+      view.webContents.once("did-finish-load", async () => {
+        if (settled) return;
+        try {
+          const loggedIn: boolean = await view.webContents.executeJavaScript(
+            `(() => {
+              const a = document.querySelector('a[href="/mooc/user/learn_dashboard.php"]');
+              return !!a && (a.textContent || '').trim().includes('個人專區');
+            })()`,
+            true,
+          );
+          if (loggedIn) done({ ok: true });
+          else done({ ok: false, error: "sso_verify 重定向到 elearn 但未登入" });
+        } catch {
+          done({ ok: false, error: "DOM 驗證失敗" });
+        }
+      });
     };
 
     // Step 1: navigate to clogin.aspx to seed ASP.NET_SessionId in the view's cookie jar.

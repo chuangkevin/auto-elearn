@@ -547,11 +547,12 @@ function formatHms(sec: number): string {
 }
 
 // ── BrowserView login watchdog ────────────────────────────────
-async function isBrowserViewLoggedIn(): Promise<boolean> {
-  if (!elearnView) return false;
+// Returns: true = logged in, false = on elearn but NOT logged in, null = not on elearn / loading
+async function isBrowserViewLoggedIn(): Promise<boolean | null> {
+  if (!elearnView) return null;
   const url = elearnView.webContents.getURL();
-  if (!url.includes("elearn.hrd.gov.tw")) return false;
-  if (elearnView.webContents.isLoading()) return true; // mid-nav; assume ok
+  if (!url.includes("elearn.hrd.gov.tw")) return null; // on ECPA or other — skip
+  if (elearnView.webContents.isLoading()) return null; // mid-nav — skip
   try {
     const found: boolean = await elearnView.webContents.executeJavaScript(
       `(() => {
@@ -562,7 +563,7 @@ async function isBrowserViewLoggedIn(): Promise<boolean> {
     );
     return found;
   } catch {
-    return true; // page not ready; assume ok to avoid false alarm
+    return null; // page not ready — skip
   }
 }
 
@@ -574,8 +575,10 @@ function startLoginWatchdog() {
     const s = state.status;
     if (s === "boot" || s === "setup" || s === "await_login") return;
 
-    const loggedIn = await isBrowserViewLoggedIn();
-    if (loggedIn) {
+    const status = await isBrowserViewLoggedIn();
+    if (status === null) return; // not on elearn or loading — skip, don't count as miss
+
+    if (status === true) {
       loginMissCount = 0;
       if (state.loginStatus !== "ok") {
         state.loginStatus = "ok";
@@ -584,6 +587,7 @@ function startLoginWatchdog() {
       return;
     }
 
+    // status === false: on elearn but not logged in
     loginMissCount++;
     if (loginMissCount < 2) return; // one miss may be mid-navigation
     loginMissCount = 0;
@@ -606,22 +610,23 @@ function startLoginWatchdog() {
     pushState();
 
     const ok = await tryAutoLogin();
-    if (ok) {
+    // Always verify DOM — tryAutoLogin can return ok=true if SSO lands on an
+    // elearn URL but doesn't actually establish a session (false positive).
+    const verified = await isBrowserViewLoggedIn();
+    if (ok && verified === true) {
       state.loginStatus = "ok";
       if (wasRunning) {
-        const stillIn = await isBrowserViewLoggedIn();
-        if (stillIn) {
-          state.status = "running";
-          state.pauseReason = undefined;
-          log("info", "BrowserView session 已恢復，繼續刷課");
-        } else {
-          state.loginStatus = "failed";
-          log("error", "重登報告成功但 BrowserView 仍未登入");
-        }
+        state.status = "running";
+        state.pauseReason = undefined;
+        log("info", "BrowserView session 已恢復，繼續刷課");
       }
-    } else {
+    } else if (!ok) {
       state.loginStatus = "failed";
       log("error", "BrowserView 自動重登失敗，請手動重新登入");
+    } else {
+      // tryAutoLogin ok but DOM still not logged in
+      state.loginStatus = "failed";
+      log("error", "重登報告成功但 BrowserView 仍未登入（SSO 可能失敗）");
     }
     pushState();
     reloginInFlight = false;
