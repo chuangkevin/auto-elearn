@@ -33,21 +33,12 @@ function flattenCourseList(body: string): Course[] {
   }
   if (!Array.isArray(data)) return [];
   const out: Course[] = [];
-  let _debugLogged = false;
   for (const entry of data) {
     if (!entry || typeof entry !== "object") continue;
     for (const v of Object.values(entry as Record<string, unknown>)) {
       if (v && typeof v === "object") {
         const c = v as Record<string, unknown>;
         if (c.cid !== undefined) {
-          // DEBUG: log all keys for first in-progress course (isReadDones=0) once
-          if (!_debugLogged && (c.isReadDones ?? 1) === 0) {
-            _debugLogged = true;
-            // eslint-disable-next-line no-console
-            console.log("[DEBUG flattenCourseList] in-progress course raw keys:", Object.keys(c));
-            // eslint-disable-next-line no-console
-            console.log("[DEBUG flattenCourseList] in-progress course raw data:", JSON.stringify(c).slice(0, 800));
-          }
           out.push({
             cid: String(c.cid),
             caption: String(c.caption ?? ""),
