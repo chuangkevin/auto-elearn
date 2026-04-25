@@ -1,5 +1,6 @@
 import { BrowserWindow, type Session } from "electron";
-import { matchAgainstDb, pickOptionIndex, type AnswerSource } from "./matcher";
+import { findBestAnswer, type AnswerSource } from "./matcher";
+import { saveLearnedAnswer } from "./answer-store";
 
 export interface SolveResult {
   ok: boolean;
@@ -128,65 +129,97 @@ export async function solveExam(
     result.total = questions.length;
     log(`抓到 ${questions.length} 題`);
 
-    // 5-6. Pick answers + fill
+    // 5-6. Pick answers + fill (three-layer: learned → DB → LLM → random)
+    // Collect LLM-answered questions so we can write them back if the exam passes.
+    const llmAnswered: Array<{ question: string; answer: string }> = [];
+
     for (const q of questions) {
       if (timeLeft() <= 0) {
         result.error = "exam timeout";
         return result;
       }
-      let pickedIdx: number;
-      let source: AnswerSource;
-
-      const match = matchAgainstDb(q.text);
-      if (match) {
-        pickedIdx = pickOptionIndex(match.correctText, q.options);
-        source = match.source;
-        log(
-          `Q${q.index + 1} 命中(${source} conf=${match.confidence.toFixed(2)})：${
-            q.options[pickedIdx]?.slice(0, 20) ?? "?"
-          }`,
-        );
-      } else {
-        pickedIdx = Math.floor(Math.random() * Math.max(1, q.options.length));
-        source = "random";
-        log(`Q${q.index + 1} 亂猜：${q.options[pickedIdx]?.slice(0, 20) ?? "?"}`);
-      }
+      const { source, pickedIdx, confidence } = await findBestAnswer(q.text, q.options);
       result.bySource[source]++;
+
+      const answerText = q.options[pickedIdx]?.slice(0, 30) ?? "?";
+      log(`Q${q.index + 1} [${source} ${confidence.toFixed(2)}] ${answerText}`);
+
+      if (source === "llm") {
+        llmAnswered.push({ question: q.text, answer: q.options[pickedIdx] ?? "" });
+      }
 
       await selectOption(win, q.inputName, pickedIdx + 1);
     }
 
-    // 7. Submit
-    log("送出答案...");
-    const submitted = await executeInAllFrames<boolean>(
-      win,
-      `(() => {
-        const btn = DOC.querySelector("input[type='submit'][value*='送出答案']")
-                 || DOC.querySelector("input[type='submit'][value*='交卷']")
-                 || DOC.querySelector("input[type='submit'][value*='送出']");
-        if (btn) { btn.click(); return true; }
-        return null;
-      })()`,
-    );
-    if (!submitted) {
-      result.error = "找不到送出答案按鈕";
-      return result;
-    }
-    await settle(win, 3000);
+    // 7. Submit + retry up to 3 times on fail
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      log(`送出答案 (第 ${attempt} 次)...`);
+      const submitted = await executeInAllFrames<boolean>(
+        win,
+        `(() => {
+          const btn = DOC.querySelector("input[type='submit'][value*='送出答案']")
+                   || DOC.querySelector("input[type='submit'][value*='交卷']")
+                   || DOC.querySelector("input[type='submit'][value*='送出']");
+          if (btn) { btn.click(); return true; }
+          return null;
+        })()`,
+      );
+      if (!submitted) {
+        result.error = "找不到送出答案按鈕";
+        return result;
+      }
+      await settle(win, 3000);
 
-    // 8. Detect pass. Any visible "及格" / "通過" / score >= 60 signals pass.
-    const verdict = await executeInAllFrames<{ passed: boolean; text: string }>(
-      win,
-      `(() => {
-        const t = DOC.body ? DOC.body.innerText : '';
-        if (!t) return null;
-        const passed = /及格|通過|恭喜.*完成|分數[：: ]?\\s*(100|9\\d|8\\d|7\\d|6\\d)/.test(t);
-        return { passed, text: t.slice(0, 200) };
-      })()`,
-    );
-    result.passed = !!verdict?.passed;
-    result.ok = true;
-    log(`測驗結果：${result.passed ? "通過" : "未過或無法判定"}`);
+      // 8. Detect pass/fail
+      const verdict = await executeInAllFrames<{ passed: boolean; text: string }>(
+        win,
+        `(() => {
+          const t = DOC.body ? DOC.body.innerText : '';
+          if (!t) return null;
+          const passed = /及格|通過|恭喜.*完成|分數[：: ]?\\s*(100|9\\d|8\\d|7\\d|6\\d)/.test(t);
+          return { passed, text: t.slice(0, 200) };
+        })()`,
+      );
+      result.passed = !!verdict?.passed;
+      result.ok = true;
+      log(`測驗結果：${result.passed ? "通過 ✓" : "未過"}`);
+
+      if (result.passed) {
+        // Write-back: save LLM-answered questions to learned_answers
+        for (const { question, answer } of llmAnswered) {
+          saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.9 });
+        }
+        break;
+      }
+
+      if (attempt < MAX_ATTEMPTS) {
+        log(`第 ${attempt} 次未過，重試...`);
+        // Navigate back to exam entry to retry
+        await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
+        await settle(win, 2000);
+        await executeInAllFrames(
+          win,
+          `(() => {
+            const btn = Array.from(DOC.querySelectorAll('div.main-text')).find(el => el.textContent.trim() === '進行測驗')
+                     || DOC.querySelector('input.cssBtn[value="進行測驗"]');
+            if (btn) { btn.click(); return true; }
+            return null;
+          })()`,
+        );
+        await settle(win, 2500);
+        await executeInAllFrames(
+          win,
+          `(() => {
+            const btn = DOC.querySelector("input.cssBtn[value='開始作答']");
+            if (btn) { btn.click(); return true; }
+            return null;
+          })()`,
+        );
+        await settle(win, 2500);
+      }
+    }
+
     return result;
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);

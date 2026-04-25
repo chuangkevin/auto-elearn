@@ -2,6 +2,7 @@ import { app } from "electron";
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
+import { getDb } from "../db";
 
 /**
  * Answer-store wraps `resources/mixed.db`, the 98,569-row question bank decompiled
@@ -103,5 +104,58 @@ export function closeDb(): void {
   if (db) {
     db.close();
     db = null;
+  }
+}
+
+/**
+ * Query the writable `learned_answers` table (in userData/auto-elearn.db).
+ * Returns the best match or null. Checked before the read-only `questions` bank.
+ */
+export function lookupLearnedAnswer(raw: string): DbRow | null {
+  try {
+    const d = getDb();
+    const norm = normalizeQuestion(raw);
+    if (!norm) return null;
+    const NORM_EXPR = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(question,' ',''),'　',''),'?',''),'？',''),'，','')`;
+    const row = d
+      .prepare(
+        `SELECT question, answer AS correct FROM learned_answers
+         WHERE ${NORM_EXPR} LIKE ? ORDER BY confidence DESC LIMIT 1`,
+      )
+      .get(`%${norm}%`) as { question: string; correct: string } | undefined;
+    if (!row) return null;
+    return { question: row.question, correct: row.correct, distractors: [] };
+  } catch {
+    return null;
+  }
+}
+
+export interface SaveAnswerOpts {
+  question: string;
+  answer: string;
+  source: string;
+  courseId?: string;
+  confidence?: number;
+}
+
+/** Persist a newly learned Q&A pair to the writable DB. */
+export function saveLearnedAnswer(opts: SaveAnswerOpts): void {
+  try {
+    getDb()
+      .prepare(
+        `INSERT OR REPLACE INTO learned_answers
+           (question, answer, source, captured_at, course_id, confidence)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        opts.question,
+        opts.answer,
+        opts.source,
+        Date.now(),
+        opts.courseId ?? null,
+        opts.confidence ?? 1.0,
+      );
+  } catch {
+    /* non-fatal */
   }
 }

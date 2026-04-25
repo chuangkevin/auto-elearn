@@ -1,4 +1,5 @@
-import { lookupByLike, normalizeQuestion, type DbRow } from "./answer-store";
+import { lookupByLike, lookupLearnedAnswer, normalizeQuestion, type DbRow } from "./answer-store";
+import { generateText, hasGeminiKey } from "../llm/gemini";
 
 export type AnswerSource = "db" | "fuzzy" | "llm" | "random";
 
@@ -74,6 +75,77 @@ export function matchAgainstDb(questionText: string): MatchResult | null {
     confidence: best.sim,
     dbRow: best.row,
   };
+}
+
+/**
+ * Three-layer async answer lookup: learned_answers → questions DB → Gemini LLM.
+ * Returns the best answer with source label and 0-based option index.
+ */
+export async function findBestAnswer(
+  questionText: string,
+  options: string[],
+): Promise<{ source: AnswerSource; pickedIdx: number; confidence: number }> {
+  // Layer 1: learned_answers (highest priority — we observed this correct before)
+  const learned = lookupLearnedAnswer(questionText);
+  if (learned) {
+    return { source: "db", pickedIdx: pickOptionIndex(learned.correct, options), confidence: 1.0 };
+  }
+
+  // Layer 2: 98K question bank (exact then fuzzy)
+  const dbMatch = matchAgainstDb(questionText);
+  if (dbMatch) {
+    return {
+      source: dbMatch.source,
+      pickedIdx: pickOptionIndex(dbMatch.correctText, options),
+      confidence: dbMatch.confidence,
+    };
+  }
+
+  // Layer 3: Gemini LLM fallback
+  const llmMatch = await matchWithLlm(questionText, options);
+  if (llmMatch) {
+    return { source: "llm", pickedIdx: llmMatch.pickedIdx, confidence: llmMatch.confidence };
+  }
+
+  // Random guess as last resort
+  return {
+    source: "random",
+    pickedIdx: Math.floor(Math.random() * Math.max(1, options.length)),
+    confidence: 0,
+  };
+}
+
+/**
+ * Ask Gemini to pick the correct option. Returns null if no key, request fails,
+ * or confidence too low.
+ */
+export async function matchWithLlm(
+  questionText: string,
+  options: string[],
+): Promise<{ pickedIdx: number; confidence: number } | null> {
+  if (!hasGeminiKey() || options.length === 0) return null;
+  const optLines = options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("\n");
+  const prompt = `你是台灣公務員訓練題目解題助手。請從以下選項挑出正確答案。
+題目：${questionText}
+選項：
+${optLines}
+僅回 JSON，格式：{"pick":"A","confidence":0.9} 不要加任何說明或 markdown。`;
+  try {
+    const raw = await generateText(prompt, { maxOutputTokens: 64, timeoutMs: 12_000 });
+    if (!raw) return null;
+    const parsed = JSON.parse(raw.replace(/```[a-z]*|```/gi, "").trim()) as {
+      pick?: string;
+      confidence?: number;
+    };
+    const letter = (parsed.pick ?? "").toUpperCase();
+    const idx = letter.charCodeAt(0) - 65;
+    if (idx < 0 || idx >= options.length) return null;
+    const confidence = Math.max(0, Math.min(1, parsed.confidence ?? 0.7));
+    if (confidence < 0.5) return null;
+    return { pickedIdx: idx, confidence };
+  } catch {
+    return null;
+  }
 }
 
 /**
