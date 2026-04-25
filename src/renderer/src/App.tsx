@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Noteqad from "./Noteqad";
 import type {
@@ -101,29 +102,31 @@ function useAppState(): AppState | null {
   return s;
 }
 
-/**
- * Electron BrowserView paints ABOVE the renderer HTML, so any modal / overlay is
- * occluded by it wherever the view sits. While a modal is open we collapse the
- * view to 0x0 (invisible) and restore on unmount.
- */
+// Counter tracks how many modals are currently open.
+// pushBrowserViewBounds is a no-op while any modal holds the view hidden.
+let _modalDepth = 0;
+
 function hideBrowserView() {
   window.api.setViewBounds({ x: 0, y: 0, width: 0, height: 0 });
 }
 
-/** Hook: hide the BrowserView for the lifetime of this component. */
+/** Hide the BrowserView for the lifetime of this component. */
 function useHideBrowserViewWhileMounted() {
   useEffect(() => {
+    _modalDepth++;
     hideBrowserView();
     return () => {
-      // Two pushes — the first fires right away, the second after the modal's
-      // exit animation + any flex settlement.
-      setTimeout(pushBrowserViewBounds, 0);
-      setTimeout(pushBrowserViewBounds, 120);
+      _modalDepth--;
+      if (_modalDepth === 0) {
+        setTimeout(pushBrowserViewBounds, 0);
+        setTimeout(pushBrowserViewBounds, 120);
+      }
     };
   }, []);
 }
 
 function pushBrowserViewBounds() {
+  if (_modalDepth > 0) return; // a modal is holding the view hidden
   const viewport = document.getElementById("browserview-mount");
   if (!viewport) return;
   const r = viewport.getBoundingClientRect();
@@ -174,18 +177,6 @@ function App() {
     window.api.answerResumePrompt(resume);
     setResumePrompt(null);
   }
-
-  // Any App-owned modal open → hide BrowserView so the modal isn't occluded.
-  useEffect(() => {
-    const anyModal = !!credsPrompt || !!resumePrompt || credsModalOpen;
-    if (anyModal) {
-      hideBrowserView();
-    } else {
-      // After close, wait a tick for layout to settle, then re-push.
-      setTimeout(pushBrowserViewBounds, 0);
-      setTimeout(pushBrowserViewBounds, 120);
-    }
-  }, [credsPrompt, resumePrompt, credsModalOpen]);
 
   function answerCredsPrompt(save: boolean) {
     window.api.answerCredsPrompt(save);
@@ -288,12 +279,101 @@ function App() {
 
   return (
     <div className="h-screen flex flex-row relative">
+      {/* Left panel: relative+overflow-hidden so absolute-positioned modals
+          are clipped to this column and never spill onto the BrowserView. */}
       <div
         ref={leftRef}
-        className="overflow-auto"
+        className="relative overflow-hidden"
         style={{ flex: leftFlex, minWidth: 0 }}
       >
-        <TopPanel state={state} />
+        <div className="overflow-auto h-full">
+          <TopPanel state={state} />
+        </div>
+
+        {/* Auto-login status toast — inside left panel so it stays left */}
+        {autoLogin && (
+          <div
+            className={`absolute left-1/2 -translate-x-1/2 top-3 z-50 px-4 py-2 rounded text-sm shadow-lg border backdrop-blur ${
+              autoLogin.stage === "success"
+                ? "bg-emerald-600/90 border-emerald-400 text-white"
+                : autoLogin.stage === "failed"
+                ? "bg-rose-600/90 border-rose-400 text-white"
+                : "bg-slate-800/90 border-slate-600 text-slate-100"
+            }`}
+          >
+            {autoLogin.stage === "start" && "🔐 背景自動登入中..."}
+            {autoLogin.stage === "filling" && "🔐 填寫登入表單..."}
+            {autoLogin.stage === "submitted" && "🔐 等待驗證..."}
+            {autoLogin.stage === "success" && "✅ 自動登入成功"}
+            {autoLogin.stage === "failed" && `❌ 自動登入失敗：${autoLogin.error ?? "請手動登入"}`}
+          </div>
+        )}
+
+        {/* Modal overlays — absolute inset-0 so they cover only the left panel */}
+        {credsModalOpen && (
+          <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/60">
+            <ModalGuard>
+              <CredsManageCard
+                status={credsStatus}
+                onClose={() => setCredsModalOpen(false)}
+                onClear={() => {
+                  forgetCreds();
+                  setCredsModalOpen(false);
+                }}
+                onSave={async (account, password) => {
+                  const res = await window.api.saveCredentialsManual({ account, password });
+                  if (res.ok) {
+                    await window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
+                    setCredsModalOpen(false);
+                  }
+                  return res;
+                }}
+              />
+            </ModalGuard>
+          </div>
+        )}
+        {resumePrompt && (
+          <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
+            <ModalGuard>
+              <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
+                <h2 className="text-lg font-semibold text-slate-100 mb-2">偵測到上次未完成的進度</h2>
+                <p className="text-sm text-slate-300 mb-1">
+                  上次中斷時間：<span className="text-slate-400"> {new Date(resumePrompt.startedAt).toLocaleString()}</span>
+                </p>
+                <p className="text-sm text-slate-300 mb-4">
+                  還有 <span className="font-bold text-emerald-300">{resumePrompt.pipelineCids.length}</span>{" "}
+                  門課在進行中，要繼續嗎？
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerResume(false)}>丟棄</button>
+                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold" onClick={() => answerResume(true)}>繼續上次進度</button>
+                </div>
+              </div>
+            </ModalGuard>
+          </div>
+        )}
+        {credsPrompt && (
+          <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
+            <ModalGuard>
+              <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
+                <h2 className="text-lg font-semibold text-slate-100 mb-2">儲存帳密以便自動重登？</h2>
+                <p className="text-sm text-slate-300 mb-1">
+                  偵測到 eCPA 登入成功（帳號 <span className="text-emerald-300">{credsPrompt.maskedAccount}</span>）。
+                </p>
+                <p className="text-sm text-slate-400 mb-4 leading-relaxed">
+                  儲存後，session 過期時系統會用此帳密在背景重新登入，不打斷你刷課。
+                  帳密經 Windows DPAPI 加密後存在 <code>userData</code>，只有你這台電腦的你可以解開。
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerCredsPrompt(false)}>不要，這次就好</button>
+                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm" onClick={() => answerCredsPrompt(true)}>儲存並啟用自動重登</button>
+                </div>
+              </div>
+            </ModalGuard>
+          </div>
+        )}
+        {/* Portal target for ConfirmBatchModal (rendered deep in Selecting tree) */}
+        <div id="left-modal-root" />
       </div>
       <div
         onMouseDown={(e) => {
@@ -338,25 +418,6 @@ function App() {
         {collapsed ? "🖥 展開瀏覽器" : "📴 收起瀏覽器"}
       </button>
 
-      {/* Auto-login status toast */}
-      {autoLogin && (
-        <div
-          className={`absolute left-1/2 -translate-x-1/2 top-3 z-50 px-4 py-2 rounded text-sm shadow-lg border backdrop-blur ${
-            autoLogin.stage === "success"
-              ? "bg-emerald-600/90 border-emerald-400 text-white"
-              : autoLogin.stage === "failed"
-              ? "bg-rose-600/90 border-rose-400 text-white"
-              : "bg-slate-800/90 border-slate-600 text-slate-100"
-          }`}
-        >
-          {autoLogin.stage === "start" && "🔐 背景自動登入中..."}
-          {autoLogin.stage === "filling" && "🔐 填寫登入表單..."}
-          {autoLogin.stage === "submitted" && "🔐 等待驗證..."}
-          {autoLogin.stage === "success" && "✅ 自動登入成功"}
-          {autoLogin.stage === "failed" && `❌ 自動登入失敗：${autoLogin.error ?? "請手動登入"}`}
-        </div>
-      )}
-
       {/* Credentials chip — always shown in bottom-left (stacked above 🫥 button).
           Click to open a manage modal. Shows 已記憶 / 設定 state. */}
       <button
@@ -375,90 +436,6 @@ function App() {
         {credsStatus?.saved ? `🔑 已記憶 ${credsStatus.maskedAccount ?? ""}` : "🔑 設定帳密"}
       </button>
 
-      {credsModalOpen && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60">
-          <CredsManageCard
-            status={credsStatus}
-            onClose={() => setCredsModalOpen(false)}
-            onClear={() => {
-              forgetCreds();
-              setCredsModalOpen(false);
-            }}
-            onSave={async (account, password) => {
-              const res = await window.api.saveCredentialsManual({ account, password });
-              if (res.ok) {
-                await window.api
-                  .getCredsStatus()
-                  .then(setCredsStatus)
-                  .catch(() => void 0);
-                setCredsModalOpen(false);
-              }
-              return res;
-            }}
-          />
-        </div>
-      )}
-
-      {/* Resume-previous-run prompt modal */}
-      {resumePrompt && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
-          <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl">
-            <h2 className="text-lg font-semibold text-slate-100 mb-2">偵測到上次未完成的進度</h2>
-            <p className="text-sm text-slate-300 mb-1">
-              上次中斷時間：
-              <span className="text-slate-400"> {new Date(resumePrompt.startedAt).toLocaleString()}</span>
-            </p>
-            <p className="text-sm text-slate-300 mb-4">
-              還有 <span className="font-bold text-emerald-300">{resumePrompt.pipelineCids.length}</span>{" "}
-              門課在進行中，要繼續嗎？
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
-                onClick={() => answerResume(false)}
-              >
-                丟棄
-              </button>
-              <button
-                className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
-                onClick={() => answerResume(true)}
-              >
-                繼續上次進度
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Save-creds prompt modal */}
-      {credsPrompt && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
-          <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl">
-            <h2 className="text-lg font-semibold text-slate-100 mb-2">儲存帳密以便自動重登？</h2>
-            <p className="text-sm text-slate-300 mb-1">
-              偵測到 eCPA 登入成功（帳號 <span className="text-emerald-300">{credsPrompt.maskedAccount}</span>）。
-            </p>
-            <p className="text-sm text-slate-400 mb-4 leading-relaxed">
-              儲存後，session 過期時系統會用此帳密在背景重新登入，不打斷你刷課。
-              帳密經 Windows DPAPI 加密後存在 <code>userData</code>，只有你這台電腦的你可以解開。
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
-                onClick={() => answerCredsPrompt(false)}
-              >
-                不要，這次就好
-              </button>
-              <button
-                className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm"
-                onClick={() => answerCredsPrompt(true)}
-              >
-                儲存並啟用自動重登
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -580,10 +557,8 @@ export default function Shell() {
       </button>
 
       {setupOpen && (
-        <div
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60"
-          // Mount effect inside a tiny child so we can use our hook
-        >
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60">
+          <ModalGuard>
           <StealthSetupCard
             value={setupValue}
             confirmValue={setupConfirm}
@@ -609,6 +584,7 @@ export default function Shell() {
               setStealth("unlocked");
             }}
           />
+          </ModalGuard>
         </div>
       )}
     </>
@@ -626,7 +602,6 @@ function CredsManageCard({
   onClear: () => void;
   onSave: (account: string, password: string) => Promise<{ ok: boolean; reason?: string }>;
 }) {
-  useHideBrowserViewWhileMounted();
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -744,7 +719,6 @@ function StealthSetupCard({
   onCancel: () => void;
   onSubmit: () => void;
 }) {
-  useHideBrowserViewWhileMounted();
   const [configPath, setConfigPath] = useState<string>("");
   useEffect(() => {
     window.api.stealthConfigPath().then(setConfigPath).catch(() => void 0);
@@ -1338,6 +1312,12 @@ function Selecting({ state }: { state: AppState }) {
   );
 }
 
+/** Mounts invisibly; hides the BrowserView for its lifetime via the counter guard. */
+function ModalGuard({ children }: { children: React.ReactNode }) {
+  useHideBrowserViewWhileMounted();
+  return <>{children}</>;
+}
+
 function ConfirmBatchModal({
   onClose,
   onConfirm,
@@ -1349,10 +1329,12 @@ function ConfirmBatchModal({
   toEnroll: { cid: string; name: string; hours: number }[];
   toUnenroll: { cid: string; name: string }[];
 }) {
-  useHideBrowserViewWhileMounted();
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
-      <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-xl w-[90vw] max-h-[80vh] overflow-auto p-6 shadow-2xl">
+  const portalRoot = document.getElementById("left-modal-root");
+  if (!portalRoot) return null;
+  return createPortal(
+    <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
+      <ModalGuard>
+      <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-xl w-[90%] max-h-[80%] overflow-auto p-6 shadow-2xl">
         <h2 className="text-lg font-semibold text-slate-100 mb-4">確認批次操作</h2>
 
         {toUnenroll.length > 0 && (
@@ -1410,7 +1392,9 @@ function ConfirmBatchModal({
           </button>
         </div>
       </div>
-    </div>
+      </ModalGuard>
+    </div>,
+    portalRoot,
   );
 }
 
