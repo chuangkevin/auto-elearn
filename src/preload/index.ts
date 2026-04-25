@@ -61,6 +61,8 @@ const api = {
     ipcRenderer.invoke(IPC.STEALTH_SET_SECRET, secret),
   stealthLock: () => ipcRenderer.send(IPC.STEALTH_LOCK),
   stealthConfigPath: (): Promise<string> => ipcRenderer.invoke(IPC.STEALTH_CONFIG_PATH),
+  getGeminiKey: (): Promise<string> => ipcRenderer.invoke(IPC.GEMINI_KEY_GET),
+  setGeminiKey: (key: string): Promise<void> => ipcRenderer.invoke(IPC.GEMINI_KEY_SET, key),
 };
 
 contextBridge.exposeInMainWorld("api", api);

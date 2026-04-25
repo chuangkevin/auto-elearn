@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'">
+  <title>設定 Gemini API Key</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Microsoft JhengHei', 'Segoe UI', sans-serif;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 24px;
+      user-select: none;
+      -webkit-app-region: drag;
+    }
+    h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: #cba6f7; }
+    label { display: block; font-size: 12px; color: #a6adc8; margin-bottom: 6px; }
+    .input-wrap { position: relative; -webkit-app-region: no-drag; }
+    input {
+      width: 100%;
+      padding: 8px 36px 8px 10px;
+      background: #313244;
+      border: 1px solid #45475a;
+      border-radius: 6px;
+      color: #cdd6f4;
+      font-size: 13px;
+      font-family: 'Consolas', monospace;
+      outline: none;
+      -webkit-app-region: no-drag;
+    }
+    input:focus { border-color: #cba6f7; }
+    .eye {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      cursor: pointer; font-size: 14px; color: #6c7086;
+      -webkit-app-region: no-drag;
+    }
+    .eye:hover { color: #cdd6f4; }
+    .hint { font-size: 11px; color: #6c7086; margin-top: 6px; }
+    .status { font-size: 12px; margin-top: 10px; min-height: 18px; }
+    .btns {
+      display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end;
+      -webkit-app-region: no-drag;
+    }
+    button {
+      padding: 6px 18px; border: none; border-radius: 6px;
+      cursor: pointer; font-size: 13px; font-family: inherit;
+    }
+    .save { background: #cba6f7; color: #1e1e2e; font-weight: 600; }
+    .save:hover { background: #b4befe; }
+    .clear { background: #45475a; color: #cdd6f4; }
+    .clear:hover { background: #585b70; }
+    .cancel { background: #313244; color: #a6adc8; border: 1px solid #45475a; }
+    .cancel:hover { background: #45475a; }
+  </style>
+</head>
+<body>
+  <h3>🔑 設定 Gemini API Key</h3>
+  <label for="key">API Key</label>
+  <div class="input-wrap">
+    <input id="key" type="password" placeholder="AIzaSy…" autocomplete="off" spellcheck="false">
+    <span class="eye" id="eye" title="顯示/隱藏">👁</span>
+  </div>
+  <div class="hint">Key 存在本機 config.json，不上傳。無 Key 時解題改用 random。</div>
+  <div class="status" id="status"></div>
+  <div class="btns">
+    <button class="clear" onclick="clearKey()">清除</button>
+    <button class="cancel" onclick="window.close()">取消</button>
+    <button class="save" id="saveBtn" onclick="saveKey()">儲存</button>
+  </div>
+
+  <script>
+    const input  = document.getElementById('key');
+    const status = document.getElementById('status');
+    const eye    = document.getElementById('eye');
+
+    eye.addEventListener('click', () => {
+      input.type = input.type === 'password' ? 'text' : 'password';
+    });
+
+    window.api.getGeminiKey().then(k => { if (k) input.value = k; });
+    input.focus();
+
+    function setStatus(msg, color) {
+      status.textContent = msg;
+      status.style.color = color;
+    }
+
+    async function saveKey() {
+      const key = input.value.trim();
+      if (!key) { setStatus('請輸入 API Key', '#f38ba8'); return; }
+      await window.api.setGeminiKey(key);
+      setStatus('已儲存 ✓', '#a6e3a1');
+      setTimeout(() => window.close(), 700);
+    }
+
+    async function clearKey() {
+      await window.api.setGeminiKey('');
+      input.value = '';
+      setStatus('已清除', '#fab387');
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter') saveKey();
+      if (e.key === 'Escape') window.close();
+    });
+  </script>
+</body>
+</html>

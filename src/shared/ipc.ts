@@ -135,6 +135,10 @@ export const IPC = {
   STEALTH_LOCK: "stealth:lock",
   /** renderer → main: absolute path of userData/config.json (for "your password is stored at..." UI) */
   STEALTH_CONFIG_PATH: "stealth:config-path",
+  /** dialog → main: get current Gemini API key (masked) */
+  GEMINI_KEY_GET: "gemini:key-get",
+  /** dialog → main: save or clear Gemini API key */
+  GEMINI_KEY_SET: "gemini:key-set",
 } as const;
 
 export interface CredentialsStatus {

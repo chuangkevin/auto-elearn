@@ -1,4 +1,4 @@
-import { app, BrowserWindow, BrowserView, ipcMain, shell } from "electron";
+import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu } from "electron";
 import { join } from "node:path";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
@@ -15,6 +15,7 @@ import {
 } from "../shared/ipc";
 import { createBus } from "./bus";
 import { attachElearnView, autoLoginInView, detectLogin, dismissNuisancePopups } from "./browser/view";
+import { loadConfig, saveConfig } from "./llm/gemini";
 import { discover } from "./course/discovery";
 import { enrollMany } from "./course/enrollment";
 import { unenrollCourse } from "./course/unenroll";
@@ -150,6 +151,50 @@ function log(level: "info" | "warn" | "error", msg: string) {
   console.log(`[${level}] ${msg}`);
 }
 
+// ── Gemini key dialog ─────────────────────────────────────────
+function showGeminiKeyDialog(): void {
+  if (!mainWindow) return;
+  const preloadPath = join(__dirname, "../preload/index.js");
+  const htmlPath = app.isPackaged
+    ? join(process.resourcesPath, "resources/gemini-key-dialog.html")
+    : join(app.getAppPath(), "resources/gemini-key-dialog.html");
+
+  const dlg = new BrowserWindow({
+    width: 480,
+    height: 240,
+    parent: mainWindow,
+    modal: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    title: "設定 Gemini API Key",
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  dlg.setMenu(null);
+  dlg.loadFile(htmlPath);
+}
+
+function buildAppMenu(): void {
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "說明(&H)",
+      submenu: [
+        {
+          label: "設定 Gemini API Key(&G)…",
+          click: () => showGeminiKeyDialog(),
+        },
+      ],
+    },
+  ]);
+  mainWindow?.setMenu(menu);
+}
+
 // ── Window + BrowserView ──────────────────────────────────────
 function createWindow() {
   const iconPath = app.isPackaged
@@ -178,6 +223,7 @@ function createWindow() {
   mainWindow.on("page-title-updated", (e) => e.preventDefault());
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
+  buildAppMenu();
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
     return { action: "deny" };
@@ -820,6 +866,11 @@ ipcMain.handle(IPC.STEALTH_UNLOCK, (_evt, secret: string) => stealthTryUnlock(se
 ipcMain.handle(IPC.STEALTH_SET_SECRET, (_evt, secret: string) => stealthSetSecret(secret));
 ipcMain.on(IPC.STEALTH_LOCK, () => stealthLock());
 ipcMain.handle(IPC.STEALTH_CONFIG_PATH, () => join(app.getPath("userData"), "config.json"));
+
+ipcMain.handle(IPC.GEMINI_KEY_GET, () => loadConfig().geminiApiKey ?? "");
+ipcMain.handle(IPC.GEMINI_KEY_SET, (_evt, key: string) => {
+  saveConfig({ geminiApiKey: key.trim() || undefined });
+});
 
 ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
   const prev = loadRun();
