@@ -42,6 +42,7 @@ declare global {
       stealthSetSecret: (secret: string) => Promise<{ ok: boolean; reason?: string }>;
       stealthLock: () => void;
       stealthConfigPath: () => Promise<string>;
+      openGeminiDialog: () => void;
     };
   }
 }
@@ -80,7 +81,7 @@ const RUNNING_BROWSER_RATIO = 0.6;   // keep same — user explicitly liked narr
 const COLLAPSED_BROWSER_PX = 28;     // collapsed "peek" width
 const MIN_BROWSER = 0.1;
 const MAX_BROWSER = 0.9;
-const DIVIDER_PX = 6;
+const DIVIDER_PX = 8;
 
 const STATES_THAT_DONT_NEED_BROWSER: Array<string> = [
   "enrolling",
@@ -127,9 +128,9 @@ function pushBrowserViewBounds() {
   if (!viewport) return;
   const r = viewport.getBoundingClientRect();
   window.api.setViewBounds({
-    x: Math.round(r.left),
+    x: Math.ceil(r.left),
     y: Math.round(r.top),
-    width: Math.round(r.width),
+    width: Math.floor(r.width),
     height: Math.round(r.height),
   });
 }
@@ -569,6 +570,14 @@ export default function Shell() {
           🫥 啟用偽裝
         </button>
       )}
+      {/* Gear button — always visible, opens Gemini API key dialog */}
+      <button
+        className="fixed left-24 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-amber-300 hover:bg-slate-700 backdrop-blur shadow-lg"
+        title="設定 Gemini API Key"
+        onClick={() => window.api.openGeminiDialog()}
+      >
+        ⚙ Gemini
+      </button>
 
       {setupOpen && (
         <div

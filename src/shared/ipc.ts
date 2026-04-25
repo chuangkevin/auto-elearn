@@ -139,6 +139,8 @@ export const IPC = {
   GEMINI_KEY_GET: "gemini:key-get",
   /** dialog → main: save or clear Gemini API key */
   GEMINI_KEY_SET: "gemini:key-set",
+  /** renderer → main: open the Gemini key dialog */
+  OPEN_GEMINI_DIALOG: "gemini:open-dialog",
 } as const;
 
 export interface CredentialsStatus {

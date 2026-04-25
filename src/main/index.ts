@@ -871,6 +871,7 @@ ipcMain.handle(IPC.GEMINI_KEY_GET, () => loadConfig().geminiApiKey ?? "");
 ipcMain.handle(IPC.GEMINI_KEY_SET, (_evt, key: string) => {
   saveConfig({ geminiApiKey: key.trim() || undefined });
 });
+ipcMain.on(IPC.OPEN_GEMINI_DIALOG, () => showGeminiKeyDialog());
 
 ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
   const prev = loadRun();
