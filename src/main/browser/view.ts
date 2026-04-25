@@ -14,12 +14,18 @@ const ELEARN_HOME_PREFIX = "https://elearn.hrd.gov.tw/mooc/";
  * sso_verify.php via a hidden DOM form so the BrowserView follows the redirect
  * chain back to elearn and receives the idx/suc cookies directly.
  */
-export function autoLoginInView(
+export async function autoLoginInView(
   view: BrowserView,
   creds: { account: string; password: string },
   opts: { timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   const timeoutMs = opts.timeoutMs ?? 60_000;
+
+  // Clear stale ECPA session cookies so a cached SSO session can't cause an
+  // instant redirect to elearn (bypassing the login chain) on restart.
+  await view.webContents.session
+    .clearStorageData({ origin: "https://ecpa.dgpa.gov.tw", storages: ["cookies"] })
+    .catch(() => {});
 
   return new Promise((resolve) => {
     let settled = false;
@@ -38,13 +44,14 @@ export function autoLoginInView(
       if (url.startsWith(ELEARN_HOME_PREFIX)) done({ ok: true });
     };
 
-    view.webContents.on("did-navigate", onNav);
-
     // Step 1: navigate to clogin.aspx to seed ASP.NET_SessionId in the view's cookie jar.
+    // Register onNav AFTER loadURL resolves so we don't catch the initial redirect chain.
     view.webContents
       .loadURL(ECPA_CLOGIN)
       .then(() => {
         if (settled) return Promise.resolve(null);
+        // Only now watch for the elearn redirect — triggered by f.submit() below.
+        view.webContents.on("did-navigate", onNav);
         // Step 2: run the eCPA XHR chain from inside the page (same-origin, cookies auto-included)
         // then submit the ticket to sso_verify.php via a hidden form so the view follows the
         // SSO redirect chain and receives the elearn cookies directly.
