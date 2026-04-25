@@ -54,6 +54,8 @@ export interface AppState {
   status: AppStatus;
   pauseReason?: string;
   user?: { name: string };
+  /** BrowserView session health, updated by the login watchdog */
+  loginStatus?: "ok" | "relogging" | "failed";
   /** cids the user ticked and asked us to process this run */
   pipelineCids?: string[];
   /** True when the user viewed the Selecting screen while a pipeline is still

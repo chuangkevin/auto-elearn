@@ -1081,8 +1081,19 @@ function Selecting({ state }: { state: AppState }) {
     <div className="p-6 space-y-6 text-slate-100">
       <header className="flex items-center justify-between">
         <div>
-          <div className="text-xs uppercase text-slate-400">已登入</div>
-          <h1 className="text-xl font-bold">{state.user?.name ?? "使用者"}</h1>
+          <div className="text-xs uppercase text-slate-400">
+            {state.loginStatus === "relogging"
+              ? "重新登入中"
+              : state.loginStatus === "failed"
+              ? "登入失敗"
+              : "已登入"}
+          </div>
+          <h1 className="text-xl font-bold flex items-center gap-1">
+            {state.user?.name ?? "使用者"}
+            {state.loginStatus === "ok" && <span className="text-emerald-400 text-base">✅</span>}
+            {state.loginStatus === "relogging" && <span className="text-amber-400 text-base animate-pulse">🔄</span>}
+            {state.loginStatus === "failed" && <span className="text-rose-400 text-base">❌</span>}
+          </h1>
         </div>
         <button
           className="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm"
@@ -1539,8 +1550,10 @@ function Monitor({ state }: { state: AppState }) {
   return (
     <div className="p-6 pb-14 space-y-4 text-slate-100 h-full flex flex-col">
       <header className="flex items-center justify-between">
-        <h1 className="text-lg font-bold">
+        <h1 className="text-lg font-bold flex items-center gap-1">
           {statusLabel(state.status)} · {state.user?.name ?? ""}
+          {state.loginStatus === "relogging" && <span className="text-amber-400 animate-pulse">🔄</span>}
+          {state.loginStatus === "failed" && <span className="text-rose-400">❌</span>}
         </h1>
         <div className="flex items-center gap-2">
           {state.status === "running" && (

@@ -99,6 +99,12 @@ let watchdogTimer: NodeJS.Timeout | null = null;
 /** Count of consecutive failed reachability checks so we can also flag offline (E.c). */
 let consecutiveDeadChecks = 0;
 
+// BrowserView login watchdog — polls DOM every 30 s regardless of pipeline state.
+let loginWatchdogTimer: NodeJS.Timeout | null = null;
+let reloginInFlight = false;
+/** Consecutive misses before we declare logged-out (avoids false alarm mid-navigation). */
+let loginMissCount = 0;
+
 function persistRun(status: PersistedRun["status"]) {
   if (!state.pipelineCids || state.pipelineCids.length === 0) return;
   const existing = loadRun();
@@ -298,7 +304,9 @@ function createWindow() {
   detectLogin(elearnView.webContents)
     .then(async (user) => {
       state.user = { name: user };
+      state.loginStatus = "ok";
       log("info", `偵測到登入：${user}`);
+      startLoginWatchdog();
       await dismissNuisancePopups(elearnView!.webContents);
       await refreshCourses();
 
@@ -414,7 +422,9 @@ async function showPrefilledEcpaLogin(creds: SavedCredentials): Promise<void> {
   detectLogin(wc)
     .then(async (user) => {
       state.user = { name: user };
+      state.loginStatus = "ok";
       log("info", `偵測到登入：${user}`);
+      startLoginWatchdog();
       await dismissNuisancePopups(wc);
       await refreshCourses();
       state.status = "selecting";
@@ -534,6 +544,95 @@ function formatHms(sec: number): string {
   const s = Math.floor(sec % 60);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+// ── BrowserView login watchdog ────────────────────────────────
+async function isBrowserViewLoggedIn(): Promise<boolean> {
+  if (!elearnView) return false;
+  const url = elearnView.webContents.getURL();
+  if (!url.includes("elearn.hrd.gov.tw")) return false;
+  if (elearnView.webContents.isLoading()) return true; // mid-nav; assume ok
+  try {
+    const found: boolean = await elearnView.webContents.executeJavaScript(
+      `(() => {
+        const a = document.querySelector('a[href="/mooc/user/learn_dashboard.php"]');
+        return !!a && (a.textContent || '').trim().includes('個人專區');
+      })()`,
+      true,
+    );
+    return found;
+  } catch {
+    return true; // page not ready; assume ok to avoid false alarm
+  }
+}
+
+function startLoginWatchdog() {
+  stopLoginWatchdog();
+  loginMissCount = 0;
+  loginWatchdogTimer = setInterval(async () => {
+    if (autoLoginInFlight || reloginInFlight) return;
+    const s = state.status;
+    if (s === "boot" || s === "setup" || s === "await_login") return;
+
+    const loggedIn = await isBrowserViewLoggedIn();
+    if (loggedIn) {
+      loginMissCount = 0;
+      if (state.loginStatus !== "ok") {
+        state.loginStatus = "ok";
+        pushState();
+      }
+      return;
+    }
+
+    loginMissCount++;
+    if (loginMissCount < 2) return; // one miss may be mid-navigation
+    loginMissCount = 0;
+
+    if (!hasSavedCredentials()) {
+      log("warn", "BrowserView 偵測到登出，但沒有儲存帳密，無法自動重登");
+      state.loginStatus = "failed";
+      pushState();
+      return;
+    }
+
+    reloginInFlight = true;
+    log("warn", "BrowserView 偵測到登出，自動重新登入中...");
+    state.loginStatus = "relogging";
+    const wasRunning = state.status === "running";
+    if (wasRunning) {
+      state.status = "paused";
+      state.pauseReason = "session_expired";
+    }
+    pushState();
+
+    const ok = await tryAutoLogin();
+    if (ok) {
+      state.loginStatus = "ok";
+      if (wasRunning) {
+        const stillIn = await isBrowserViewLoggedIn();
+        if (stillIn) {
+          state.status = "running";
+          state.pauseReason = undefined;
+          log("info", "BrowserView session 已恢復，繼續刷課");
+        } else {
+          state.loginStatus = "failed";
+          log("error", "重登報告成功但 BrowserView 仍未登入");
+        }
+      }
+    } else {
+      state.loginStatus = "failed";
+      log("error", "BrowserView 自動重登失敗，請手動重新登入");
+    }
+    pushState();
+    reloginInFlight = false;
+  }, 30_000);
+}
+
+function stopLoginWatchdog() {
+  if (loginWatchdogTimer) {
+    clearInterval(loginWatchdogTimer);
+    loginWatchdogTimer = null;
+  }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────
