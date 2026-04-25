@@ -1,5 +1,112 @@
 import { BrowserView, BrowserWindow, type WebContents } from "electron";
 
+const ECPA_CLOGIN = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
+const ELEARN_HOME_PREFIX = "https://elearn.hrd.gov.tw/mooc/";
+
+/**
+ * Drive the eCPA login flow inside the VISIBLE BrowserView so cookies land
+ * in the same jar the view already uses — no cookie-isolation issues.
+ *
+ * Strategy: navigate to clogin.aspx (seeds ASP.NET_SessionId), then run the
+ * GetUID → GetApTicketV2 → EnterTwoWayLog → EnterApplicationTwoWay chain as
+ * same-origin fetch() calls from inside the page (no forbidden-header / CORS
+ * problems, no sendInputEvent focus requirement). Finally POST the ticket to
+ * sso_verify.php via a hidden DOM form so the BrowserView follows the redirect
+ * chain back to elearn and receives the idx/suc cookies directly.
+ */
+export function autoLoginInView(
+  view: BrowserView,
+  creds: { account: string; password: string },
+  opts: { timeoutMs?: number } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const done = (r: { ok: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      view.webContents.off("did-navigate", onNav);
+      resolve(r);
+    };
+
+    const timer = setTimeout(() => done({ ok: false, error: "auto-login timeout" }), timeoutMs);
+
+    const onNav = (_e: unknown, url: string) => {
+      if (url.startsWith(ELEARN_HOME_PREFIX)) done({ ok: true });
+    };
+
+    view.webContents.on("did-navigate", onNav);
+
+    // Step 1: navigate to clogin.aspx to seed ASP.NET_SessionId in the view's cookie jar.
+    view.webContents
+      .loadURL(ECPA_CLOGIN)
+      .then(() => {
+        if (settled) return Promise.resolve(null);
+        // Step 2: run the eCPA XHR chain from inside the page (same-origin, cookies auto-included)
+        // then submit the ticket to sso_verify.php via a hidden form so the view follows the
+        // SSO redirect chain and receives the elearn cookies directly.
+        return view.webContents.executeJavaScript(
+          `(async () => {
+            const post = (url, params) => fetch(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+              },
+              body: new URLSearchParams(params).toString(),
+              credentials: 'include',
+            }).then(r => r.text());
+
+            let acc = ${JSON.stringify(creds.account)};
+            if (!/^[A-Za-z]\\d{9}$/.test(acc)) {
+              const uid = await post('https://ecpa.dgpa.gov.tw/Home/GetUID', { account: acc });
+              const t = uid.trim();
+              const m = /^[A-Za-z]\\d{9}$/.test(t) ? t : (uid.match(/\\b([A-Za-z]\\d{9})\\b/) || [])[1];
+              if (!m) return { ok: false, error: 'GetUID failed: ' + uid.slice(0, 80) };
+              acc = m;
+            }
+
+            const hex = await post('https://ecpa.dgpa.gov.tw/Home/GetApTicketV2',
+              { account: acc, password: ${JSON.stringify(creds.password)}, ApID: 'CrossHRD' });
+            if (!/^[0-9A-Fa-f]{100,}$/.test(hex.trim()))
+              return { ok: false, error: '帳號或密碼錯誤: ' + hex.slice(0, 80) };
+
+            await post('https://ecpa.dgpa.gov.tw/Home/EnterTwoWayLog',
+              { account: acc, loginType: '0', sn: '', ticket: '', appId: 'CrossHRD' });
+            await post('https://ecpa.dgpa.gov.tw/Home/EnterApplicationTwoWay',
+              { appId: 'CrossHRD' });
+
+            // Submit via a hidden form so the view navigates and picks up elearn cookies.
+            const f = document.createElement('form');
+            f.method = 'POST';
+            f.action = 'https://elearn.hrd.gov.tw/sso_verify.php';
+            f.style.display = 'none';
+            [['loginType', '0'], ['APReqEncodedData', hex.trim()]].forEach(([k, v]) => {
+              const i = document.createElement('input');
+              i.type = 'hidden'; i.name = k; i.value = v;
+              f.appendChild(i);
+            });
+            document.body.appendChild(f);
+            f.submit();   // BrowserView follows the SSO redirect; did-navigate fires when done
+            return { ok: true };
+          })()`,
+          true,
+        );
+      })
+      .then((result: { ok: boolean; error?: string } | null) => {
+        if (settled || result === null) return;
+        if (!result.ok) done({ ok: false, error: result.error });
+        // result.ok → wait for did-navigate to fire on the elearn mooc/* URL
+      })
+      .catch((e: unknown) => {
+        done({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      });
+  });
+}
+
 /**
  * Mount an elearn-only BrowserView onto the main window.
  * Caller is responsible for setBounds().

@@ -14,7 +14,7 @@ import {
   type ViewBounds,
 } from "../shared/ipc";
 import { createBus } from "./bus";
-import { attachElearnView, detectLogin, dismissNuisancePopups } from "./browser/view";
+import { attachElearnView, autoLoginInView, detectLogin, dismissNuisancePopups } from "./browser/view";
 import { discover } from "./course/discovery";
 import { enrollMany } from "./course/enrollment";
 import { unenrollCourse } from "./course/unenroll";
@@ -36,8 +36,6 @@ import {
 } from "./auth/credentials";
 import { groupByCategory, resolveAgencyCodes } from "./course/agency-code-map";
 import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
-import { performAutoLogin } from "./auth/auto-login";
-import { loginViaEcpa } from "./auth/ecpa-login";
 import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
@@ -273,36 +271,24 @@ async function tryAutoLogin(): Promise<boolean> {
   emitAutoLogin({ stage: "start" });
   log("info", `偵測到已儲存帳密（${maskAccount(creds.account)}），背景自動登入中...`);
   try {
-    // Path 1 — raw POST replay via Electron `net.request`. No browser, no aspnet
-    // isTrusted headaches. Usually finishes in <3 seconds.
-    const session = elearnView.webContents.session;
-    const replay = await loginViaEcpa(session, creds.account, creds.password);
-    if (replay.ok) {
+    // Drive login directly in the visible BrowserView — same cookie jar, no isolation.
+    const result = await autoLoginInView(elearnView, creds, { timeoutMs: 60_000 });
+    if (result.ok) {
       emitAutoLogin({ stage: "success" });
-      log("info", "自動登入成功（POST replay）");
+      log("info", "自動登入成功（view）");
       touchCredentials();
-      elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
+      // SSO redirect already navigated the view to elearn; detectLogin will
+      // fire and transition state to "selecting" once 個人專區 appears.
       return true;
     }
-    log("warn", `POST replay 登入失敗（${replay.stage}）：${replay.error ?? "unknown"}；改試隱藏瀏覽器`);
+    log("warn", `自動登入失敗：${result.error ?? "unknown"}；改跳預填表單`);
 
-    // Path 2 — fall back to hidden-window form drive (worked in some edge
-    // cases the POST replay didn't). 20s budget.
-    const hidden = await performAutoLogin(creds, session, { timeoutMs: 20_000 });
-    if (hidden.ok) {
-      emitAutoLogin({ stage: "success" });
-      log("info", "自動登入成功（hidden window）");
-      touchCredentials();
-      elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
-      return true;
-    }
-    log("warn", `隱藏瀏覽器登入失敗：${hidden.error ?? "unknown"}；改跳預填表單`);
-
-    // Path 3 — visible pre-fill, user clicks 登入 once.
+    // Fallback — BrowserView already on eCPA; showPrefilledEcpaLogin will
+    // re-navigate + pre-fill so the user just clicks 登入.
     await showPrefilledEcpaLogin(creds);
     emitAutoLogin({
       stage: "failed",
-      error: "兩種靜默方式都失敗；瀏覽器已導到 eCPA、帳密已預填，點橘框登入即可",
+      error: "自動填表失敗；瀏覽器已導到 eCPA、帳密已預填，點橘框登入即可",
     });
     return false;
   } catch (e) {
