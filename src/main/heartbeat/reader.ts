@@ -105,11 +105,27 @@ export async function extractTicket(
             function scan(frame) {
               try {
                 if (frame.pTicket && frame.cid) {
+                  let actid = (typeof frame.globalCurrentActivity === 'string' && frame.globalCurrentActivity)
+                    ? frame.globalCurrentActivity : null;
+                  // 環境檢測 node (I_SCO_99999999_*) is not a real lesson — skip it.
+                  // Find the first real lesson from onclick attributes instead.
+                  if (!actid || /9999999/.test(actid)) {
+                    try {
+                      const links = Array.from(frame.document.querySelectorAll('a[onclick]'));
+                      for (const el of links) {
+                        const oc = el.getAttribute('onclick') || '';
+                        if (/goToActivity/.test(oc) && !/9999999/.test(oc)) {
+                          const m = oc.match(/goToActivity\\(['"]([^'"]+)['"]\\)/);
+                          if (m) { actid = m[1]; break; }
+                        }
+                      }
+                    } catch {}
+                  }
                   return {
                     pTicket: String(frame.pTicket),
                     cid: String(frame.cid),
                     href: String(frame.location.href),
-                    actid: typeof frame.globalCurrentActivity === 'string' ? frame.globalCurrentActivity : null,
+                    actid,
                   };
                 }
               } catch {}
@@ -165,6 +181,7 @@ export async function extractTicket(
         } catch {
           /* non-fatal — ticket already captured */
         }
+        console.log("[TICKET]", JSON.stringify({ pTicket: data.pTicket.slice(0, 8) + "...", actid, origin }));
         await sleep(20000);
         return { pTicket: data.pTicket, encCid: data.cid, origin, actid };
       }

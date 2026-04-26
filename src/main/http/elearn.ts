@@ -220,7 +220,9 @@ export async function getServerTime(session: Session, origin: string): Promise<s
   } catch { /* fall through */ }
   // Fallback: local time expressed as UTC+8 (Taiwan standard time)
   const utc8 = new Date(Date.now() + 8 * 3_600_000);
-  return utc8.toISOString().replace("T", " ").slice(0, 19);
+  const fallback = utc8.toISOString().replace("T", " ").slice(0, 19);
+  console.log("[SERVER-TIME-FALLBACK]", fallback);
+  return fallback;
 }
 
 /**
@@ -252,6 +254,7 @@ export async function startReadingSession(
     bt: bt ?? "0",
   };
   if (actid) body.actid = actid;
+  console.log("[HB-START-REQ]", JSON.stringify({ url: `${origin}/mooc/controllers/course_record.php?actype=start`, body }));
   const { status, text } = await elearnRequest(
     session,
     `${origin}/mooc/controllers/course_record.php?actype=start`,
@@ -267,6 +270,7 @@ export async function startReadingSession(
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (parsed.timediff !== undefined) timediff = String(parsed.timediff);
   } catch { /* ignore parse errors */ }
+  console.log("[HB-START-RES]", text.slice(0, 300));
   return { ok: status >= 200 && status < 400, status, body: text, timediff };
 }
 
@@ -303,6 +307,7 @@ export async function heartbeat(
     bt,
   };
   if (actid) body.actid = actid;
+  console.log("[HB-END-REQ]", JSON.stringify({ url: `${origin}/mooc/controllers/course_record.php?actype=end`, body }));
   const { status, text } = await elearnRequest(
     session,
     `${origin}/mooc/controllers/course_record.php?actype=end`,
@@ -320,5 +325,6 @@ export async function heartbeat(
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (parsed.timediff !== undefined) timediff = String(parsed.timediff);
   } catch { /* ignore parse errors */ }
+  console.log("[HB-END-RES]", text.slice(0, 300));
   return { ok: status >= 200 && status < 400, status, body: text, timediff };
 }

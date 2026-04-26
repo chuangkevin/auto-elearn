@@ -121,6 +121,14 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   let lastPollAt = Date.now();
   const pollInterval = opts.pollIntervalMs ?? 30_000;
 
+  // CRITICAL: the server validates elapsed >= period before crediting reading time.
+  // Sleep one full interval BEFORE the first heartbeat so the server sees the
+  // correct time delta (bt → current_server_time ≈ period).
+  {
+    const jitter = Math.floor((Math.random() * 2 - 1) * opts.jitterMs);
+    await sleep(Math.max(1000, opts.intervalMs + jitter));
+  }
+
   while (!opts.signal?.aborted) {
     const elapsedSec = Math.floor((Date.now() - startAt) / 1000);
     if (elapsedSec >= maxSec) break;
@@ -176,7 +184,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
       }
     }
 
-    // Sleep until next tick (interval ± jitter)
+    // Sleep before NEXT tick — server must see elapsed >= period
     const jitter = Math.floor((Math.random() * 2 - 1) * opts.jitterMs);
     await sleep(Math.max(1000, opts.intervalMs + jitter));
   }
