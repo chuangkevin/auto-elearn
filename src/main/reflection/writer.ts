@@ -1,5 +1,13 @@
 import { BrowserWindow, type Session } from "electron";
 import { generateText, hasGeminiKey } from "../llm/gemini";
+import {
+  wait,
+  execJs,
+  suppressDialogs,
+  enterLC,
+  getSysbarLinks,
+  clickSysbarLink,
+} from "../browser/lc-nav";
 
 export interface ReflectionResult {
   ok: boolean;
@@ -18,21 +26,15 @@ function randomGeneric(): string {
   return GENERIC_TEMPLATES[Math.floor(Math.random() * GENERIC_TEMPLATES.length)];
 }
 
-/**
- * Best-effort: if the course page / reflection page has a textarea for 心得 / 學習心得,
- * fill it with Gemini-generated content (if API key is configured) or a generic
- * template. Skips gracefully when no textarea is found or no key is present.
- */
 export async function writeReflection(
   cid: string,
   courseName: string,
   session: Session,
   opts: { onProgress?: (msg: string) => void; timeoutMs?: number } = {},
 ): Promise<ReflectionResult> {
-  const { onProgress } = opts;
-  const timeoutMs = opts.timeoutMs ?? 45_000;
+  const log = opts.onProgress ?? (() => void 0);
 
-  // 1. Get text to put in the field
+  // Generate text first (no browser needed)
   let text: string | null = null;
   let source: ReflectionResult["source"] = "none";
   if (hasGeminiKey()) {
@@ -47,82 +49,83 @@ export async function writeReflection(
     text = randomGeneric();
     source = "generic";
   }
-  onProgress?.(`心得來源：${source}`);
+  log(`心得來源：${source}`);
 
   const win = new BrowserWindow({
     show: false,
-    width: 1200,
+    width: 1280,
     height: 900,
-    webPreferences: {
-      session,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
   });
-  win.webContents.on("did-frame-finish-load", () => {
-    win.webContents
-      .executeJavaScript(
-        `try { window.alert = () => void 0; window.confirm = () => true; } catch(e){}`,
-        true,
-      )
-      .catch(() => void 0);
-  });
+  suppressDialogs(win);
 
   const result: ReflectionResult = { ok: false, source, text };
 
   try {
-    await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
-    await new Promise((r) => setTimeout(r, Math.min(1200, timeoutMs / 4)));
-
-    // Try to click a 心得 / 學習心得 link first, if one is visible
-    await win.webContents
-      .executeJavaScript(
-        `(() => {
-          const tryClick = el => { if (el) { el.click(); return true; } return false; };
-          const hit = Array.from(document.querySelectorAll('a, button, div.main-text, input'))
-            .find(el => /學習心得|填寫心得|寫心得/.test((el.textContent || el.value || '').trim()));
-          return tryClick(hit);
-        })()`,
-        true,
-      )
-      .catch(() => void 0);
-    await new Promise((r) => setTimeout(r, 1500));
-
-    // Find a textarea; fill it; submit.
-    const filled = await win.webContents
-      .executeJavaScript(
-        `(() => {
-          const attempt = (DOC) => {
-            const ta = DOC.querySelector('textarea');
-            if (!ta) return null;
-            const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')?.set;
-            if (setter) setter.call(ta, ${JSON.stringify(text)}); else ta.value = ${JSON.stringify(text)};
-            ta.dispatchEvent(new Event('input', { bubbles: true }));
-            ta.dispatchEvent(new Event('change', { bubbles: true }));
-            const form = ta.form || ta.closest('form');
-            const btn = (form && form.querySelector("input[type='submit'], button[type='submit']"))
-                     || Array.from((form || DOC).querySelectorAll('button, input'))
-                        .find(el => /送出|確定|繳交|提交/.test((el.textContent || el.value || '')));
-            if (btn) btn.click();
-            return { ok: true, clicked: !!btn };
-          };
-          let v = attempt(document);
-          if (v) return v;
-          for (let i = 0; i < window.frames.length; i++) {
-            try { const doc = window.frames[i].document; v = attempt(doc); if (v) return v; } catch(e){}
-          }
-          return null;
-        })()`,
-        true,
-      )
-      .catch(() => null);
-
-    if (!filled) {
-      result.error = "頁面沒有心得 textarea，略過";
+    const lcOk = await enterLC(win, cid);
+    if (!lcOk) {
+      result.error = "無法進入學習中心";
       return result;
     }
+
+    const links = await getSysbarLinks(win);
+    if (!links.some((l) => /心得/.test(l))) {
+      result.error = "無心得選單，略過";
+      return result;
+    }
+
+    await clickSysbarLink(win, "心得");
+
+    // The reflection textarea is directly in s_main (no popup)
+    // Wait for it to appear
+    await wait(1500);
+
+    const safeText = JSON.stringify(text);
+    const filled = await execJs<boolean>(
+      win,
+      `(() => {
+        const tryDoc = (doc) => {
+          const ta = doc.querySelector('textarea');
+          if (!ta) return false;
+          const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')?.set;
+          if (setter) setter.call(ta, ${safeText}); else ta.value = ${safeText};
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.dispatchEvent(new Event('change', { bubbles: true }));
+          const form = ta.form || ta.closest('form');
+          const btn = (form && form.querySelector("input[type='submit'],button[type='submit']"))
+                   || Array.from((form || doc).querySelectorAll('button,input'))
+                      .find(el => /送出|確定|繳交|提交/.test(el.textContent || el.value || ''));
+          if (btn) { btn.click(); return true; }
+          return true; // filled but no submit found
+        };
+        // Try s_main by name
+        const byName = window.frames['s_main'];
+        if (byName) { try { if (tryDoc(byName.document)) return true; } catch(e) {} }
+        // Iterate frames
+        for (let i = 0; i < window.frames.length; i++) {
+          try {
+            if (window.frames[i].name === 's_main') {
+              if (tryDoc(window.frames[i].document)) return true;
+            }
+          } catch(e) {}
+        }
+        // Fallback: frame[1]
+        if (window.frames.length >= 2) {
+          try { if (tryDoc(window.frames[1].document)) return true; } catch(e) {}
+        }
+        // Last resort: top document
+        return tryDoc(document);
+      })()`,
+    );
+
+    if (!filled) {
+      result.error = "找不到心得 textarea，略過";
+      return result;
+    }
+
+    await wait(2000);
+    log("心得已填寫並送出 ✓");
     result.ok = true;
-    onProgress?.("心得已填寫並送出");
     return result;
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
@@ -131,7 +134,7 @@ export async function writeReflection(
     try {
       win.destroy();
     } catch {
-      /* already gone */
+      /* already closed */
     }
   }
 }

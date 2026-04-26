@@ -1,0 +1,172 @@
+import { BrowserWindow } from "electron";
+
+/** ms-level sleep */
+export function wait(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Run JS in win's top-level document; returns typed result or null on error. */
+export async function execJs<T>(win: BrowserWindow, code: string): Promise<T | null> {
+  try {
+    return (await win.webContents.executeJavaScript(code, true)) as T | null;
+  } catch {
+    return null;
+  }
+}
+
+/** Suppress alert/confirm/prompt in all frames of win. */
+export function suppressDialogs(win: BrowserWindow): void {
+  win.webContents.on("did-frame-finish-load", () => {
+    win.webContents
+      .executeJavaScript(
+        `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`,
+        true,
+      )
+      .catch(() => void 0);
+  });
+}
+
+/**
+ * Navigate win to the SCORM Learning Center for the given CID.
+ *
+ * Flow: /info/{cid} → click button.btnAction ("上課去") →
+ *   Case A: page navigates in-tab to center.elearn.hrd.gov.tw frameset
+ *   Case B: window.open() fires → we capture URL and loadURL into win
+ *
+ * Returns true when the LC frameset (≥2 frames) is ready.
+ */
+export async function enterLC(win: BrowserWindow, cid: string): Promise<boolean> {
+  let capturedLcUrl: string | null = null;
+
+  // Must set handler BEFORE navigating so any window.open is caught
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (!capturedLcUrl) capturedLcUrl = url;
+    return { action: "deny" };
+  });
+
+  await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
+  await wait(2000);
+
+  // Click launch button
+  await execJs(
+    win,
+    `(() => {
+      let b = document.querySelector('button.btnAction');
+      if (!b) b = Array.from(document.querySelectorAll('button,a'))
+        .find(el => /上課去|繼續學習|開始學習/.test(el.textContent || ''));
+      if (b) { b.click(); return true; }
+      return false;
+    })()`,
+  );
+
+  await wait(4500);
+
+  // Case A: same-tab navigation
+  const url = win.webContents.getURL();
+  if (url.includes(".elearn.hrd.gov.tw/mooc") || url.includes("center.elearn.hrd.gov.tw")) {
+    await wait(1000);
+    return true;
+  }
+
+  // Case B: popup was captured — load into same win
+  if (capturedLcUrl) {
+    await win.loadURL(capturedLcUrl);
+    await wait(3500);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Return all link texts from the mooc_sysbar frame (up to 8 s retry).
+ * Tries frame by name, then by index.
+ */
+export async function getSysbarLinks(win: BrowserWindow, retryMs = 8000): Promise<string[]> {
+  const deadline = Date.now() + retryMs;
+  while (true) {
+    const links = await execJs<string[]>(
+      win,
+      `(() => {
+        const byName = window.frames['mooc_sysbar'];
+        const tryDoc = (doc) => {
+          try {
+            const ls = Array.from(doc.querySelectorAll('a'))
+              .map(a => (a.textContent || '').trim()).filter(Boolean);
+            return ls.length ? ls : null;
+          } catch(e) { return null; }
+        };
+        if (byName) { const r = tryDoc(byName.document); if (r) return r; }
+        for (let i = 0; i < window.frames.length; i++) {
+          try {
+            if (window.frames[i].name === 'mooc_sysbar') {
+              const r = tryDoc(window.frames[i].document);
+              if (r) return r;
+            }
+          } catch(e) {}
+        }
+        // Fallback: frame[0] in a 2-frame layout is usually sysbar
+        if (window.frames.length >= 2) {
+          try { const r = tryDoc(window.frames[0].document); if (r) return r; } catch(e) {}
+        }
+        return [];
+      })()`,
+    );
+    if (links && links.length > 0) return links;
+    if (Date.now() >= deadline) return [];
+    await wait(1000);
+  }
+}
+
+/**
+ * Click a link in the mooc_sysbar frame whose text matches `pattern` (regex string).
+ * Returns true if found and clicked.
+ */
+export async function clickSysbarLink(win: BrowserWindow, pattern: string): Promise<boolean> {
+  const result = await execJs<boolean>(
+    win,
+    `(() => {
+      const pat = new RegExp(${JSON.stringify(pattern)});
+      const tryFrame = (f) => {
+        try {
+          const a = Array.from(f.document.querySelectorAll('a'))
+            .find(a => pat.test(a.textContent || ''));
+          if (a) { a.click(); return true; }
+        } catch(e) {}
+        return false;
+      };
+      const byName = window.frames['mooc_sysbar'];
+      if (byName && tryFrame(byName)) return true;
+      for (let i = 0; i < window.frames.length; i++) {
+        try {
+          if (window.frames[i].name === 'mooc_sysbar' && tryFrame(window.frames[i])) return true;
+        } catch(e) {}
+      }
+      if (window.frames.length >= 2 && tryFrame(window.frames[0])) return true;
+      return false;
+    })()`,
+  );
+  if (result) await wait(2500);
+  return !!result;
+}
+
+/**
+ * Set up a one-shot window.open interceptor on win.
+ * Returns a promise that resolves to the captured URL (or null on timeout).
+ * Call this BEFORE triggering the action that opens the window.
+ */
+export function awaitWindowOpen(win: BrowserWindow, timeoutMs = 8000): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    const timer = setTimeout(() => {
+      win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      resolve(null);
+    }, timeoutMs);
+
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      clearTimeout(timer);
+      win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      resolve(url);
+      return { action: "deny" };
+    });
+  });
+}

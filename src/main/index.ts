@@ -897,6 +897,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       selected.has(t.course.cid) &&
       t.course.isClassing &&
       t.course.isReadtimeValidCaption !== "已通過" &&
+      (t.course.isExamDones ?? 0) !== 1 &&
       (completedHeartbeat.has(t.course.cid) || skipRead.some((s) => s.course.cid === t.course.cid)),
   );
   if (needExam.length > 0) {
@@ -916,9 +917,11 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         onProgress: (msg) => log("info", `  [${name}] ${msg}`),
       });
       if (res.ok) {
+        const scoreStr = res.score != null ? `${res.score}分` : "?";
+        const readStr = res.readExamScore != null ? ` 閱讀:${res.readExamScore}分` : "";
         log(
           "info",
-          `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
+          `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
         );
         if (card && res.passed) card.examDone = true;
       } else {

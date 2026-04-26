@@ -1,12 +1,22 @@
 import { BrowserWindow, type Session } from "electron";
 import { findBestAnswer, type AnswerSource } from "./matcher";
 import { saveLearnedAnswer } from "./answer-store";
+import {
+  wait,
+  execJs,
+  suppressDialogs,
+  enterLC,
+  getSysbarLinks,
+  clickSysbarLink,
+} from "../browser/lc-nav";
 
 export interface SolveResult {
   ok: boolean;
   total: number;
   bySource: Record<AnswerSource, number>;
   passed?: boolean;
+  score?: number;
+  readExamScore?: number;
   error?: string;
 }
 
@@ -14,35 +24,279 @@ interface ExtractedQuestion {
   index: number;
   text: string;
   options: string[];
-  /** The `name` attribute shared by this question's radios/checkboxes */
+  /** radio/checkbox name attribute */
   inputName: string;
-  /** Whether these are checkbox (multi-select) or radio (single-select) */
+  /** actual value attributes, parallel to options[] */
+  values: string[];
   isMultiple: boolean;
 }
 
-/**
- * Attempt to complete the exam for a single course.
- *
- * Flow:
- *   1. Load /info/<cid> in a hidden window
- *   2. Drill into iframe, click 進行測驗 (which opens exam in another iframe/page)
- *   3. On exam page, click 開始作答
- *   4. Enumerate each `tr.bg03 / tr.bg04` row; extract question + 4 options
- *   5. Lookup answer in DB; fall back to fuzzy; else random
- *   6. Check the matching radio/checkbox
- *   7. Submit via 送出答案
- *   8. Parse pass/fail screen
- */
+const MAX_EXAM_ATTEMPTS = 10;
+
+// ─── Question extraction ──────────────────────────────────────
+
+async function extractQuestions(win: BrowserWindow): Promise<ExtractedQuestion[]> {
+  // Poll for questions to appear (exam may need a moment after examBegin())
+  for (let i = 0; i < 15; i++) {
+    const has = await execJs<boolean>(win, `!!document.querySelector('tr.bg03,tr.bg04')`);
+    if (has) break;
+    await wait(1000);
+  }
+
+  return (
+    (await execJs<ExtractedQuestion[]>(
+      win,
+      `(() => {
+        const rows = Array.from(document.querySelectorAll('tr.bg03,tr.bg04'));
+        if (!rows.length) return null;
+        const out = [];
+        rows.forEach((row, index) => {
+          const inputs = Array.from(row.querySelectorAll('input[type=radio],input[type=checkbox]'));
+          if (!inputs.length) return;
+
+          // Strip option list from clone to get pure question text
+          const clone = row.cloneNode(true);
+          clone.querySelectorAll('ol,ul').forEach(el => el.remove());
+          const text = (clone.textContent || '').trim().replace(/\\s+/g,' ').slice(0,300);
+
+          // Options: prefer <li> text, fallback to label/parent
+          const options = [];
+          const values = [];
+          row.querySelectorAll('li').forEach(li => {
+            const c = li.cloneNode(true);
+            c.querySelectorAll('input').forEach(el => el.remove());
+            options.push((c.textContent||'').trim().replace(/\\s+/g,' ').slice(0,150));
+          });
+          inputs.forEach(inp => values.push(inp.value));
+          if (!options.length) {
+            inputs.forEach(inp => {
+              const p = inp.closest('label') || inp.parentElement;
+              options.push(((p ? p.textContent : '')||'').trim().replace(/\\s+/g,' ').slice(0,150));
+            });
+          }
+
+          out.push({
+            index,
+            text,
+            options,
+            values,
+            inputName: inputs[0].name || '',
+            isMultiple: inputs[0].type === 'checkbox',
+          });
+        });
+        return out.length ? out : null;
+      })()`,
+    )) ?? []
+  );
+}
+
+// ─── Option selection ─────────────────────────────────────────
+
+async function selectOption(
+  win: BrowserWindow,
+  inputName: string,
+  value: string,
+): Promise<void> {
+  if (!inputName) return;
+  const safeN = inputName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const safeV = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  await execJs(
+    win,
+    `(() => {
+      const el = document.querySelector('input[name="${safeN}"][value="${safeV}"]');
+      if (el) { el.checked = true; el.dispatchEvent(new Event('change',{bubbles:true})); return true; }
+      return null;
+    })()`,
+  );
+}
+
+// ─── Submit + score parsing ───────────────────────────────────
+
+async function submitAndParseScore(win: BrowserWindow): Promise<number | null> {
+  const clicked = await execJs<boolean>(
+    win,
+    `(() => {
+      const btn = document.querySelector("input[type='submit'][value*='送出答案']")
+               || document.querySelector("input[type='submit'][value*='繳卷']")
+               || document.querySelector("input[type='submit'][value*='送出']");
+      if (btn) { btn.click(); return true; }
+      return null;
+    })()`,
+  );
+  if (!clicked) return null;
+  await wait(4000);
+
+  return execJs<number>(
+    win,
+    `(() => {
+      const t = document.body ? document.body.innerText : '';
+      const m = t.match(/總分\\s*[=＝]\\s*(\\d+)/);
+      if (m) return parseInt(m[1]);
+      // Fallback: look for standalone score pattern
+      const m2 = t.match(/(\\d+)\\s*分/);
+      return m2 ? parseInt(m2[1]) : null;
+    })()`,
+  );
+}
+
+// ─── Get exam URL from s_main togo button ────────────────────
+
+async function getExamUrl(win: BrowserWindow): Promise<string | null> {
+  // Wait up to 5s for s_main to finish loading
+  for (let i = 0; i < 5; i++) {
+    const url = await execJs<string>(
+      win,
+      `(() => {
+        const checkFrame = (f) => {
+          try {
+            const doc = f.document;
+            const btn = doc.querySelector('[onclick*="togo("]');
+            if (!btn) return null;
+            const m = btn.getAttribute('onclick').match(/togo\\('([^']+)'/);
+            if (!m) return null;
+            const id = m[1];
+            const base = f.location.href.replace(/\\/[^\\/]*$/, '/');
+            return base + 'exam_start.php?' + id + '+0';
+          } catch(e) { return null; }
+        };
+        // Try s_main by name
+        const byName = window.frames['s_main'];
+        if (byName) { const u = checkFrame(byName); if (u) return u; }
+        // Iterate frames
+        for (let i = 0; i < window.frames.length; i++) {
+          try {
+            if (window.frames[i].name === 's_main') {
+              const u = checkFrame(window.frames[i]);
+              if (u) return u;
+            }
+          } catch(e) {}
+        }
+        // Fallback: frame[1] in 2-frame layout
+        if (window.frames.length >= 2) {
+          try { const u = checkFrame(window.frames[1]); if (u) return u; } catch(e) {}
+        }
+        return null;
+      })()`,
+    );
+    if (url) return url;
+    await wait(1000);
+  }
+  return null;
+}
+
+// ─── Run one exam attempt at examUrl ─────────────────────────
+
+async function runOneAttempt(
+  win: BrowserWindow,
+  examUrl: string,
+  label: string,
+  bySource: Record<AnswerSource, number>,
+  onProgress: (msg: string) => void,
+): Promise<{ score: number | null; questions: ExtractedQuestion[] }> {
+  await win.loadURL(examUrl);
+  await wait(2000);
+
+  // Trigger examBegin() if available
+  await execJs(win, `(() => { try { if (typeof examBegin==='function') examBegin(); } catch(e){} })();`);
+
+  const questions = await extractQuestions(win);
+  if (questions.length === 0) {
+    onProgress(`[${label}] 無法取得題目`);
+    return { score: null, questions: [] };
+  }
+  onProgress(`[${label}] ${questions.length} 題`);
+
+  const llmAnswered: Array<{ question: string; answer: string }> = [];
+
+  for (const q of questions) {
+    const { source, pickedIdx, confidence } = await findBestAnswer(q.text, q.options);
+    bySource[source]++;
+
+    const value = q.values[pickedIdx] ?? String(pickedIdx + 1);
+    onProgress(`  Q${q.index + 1} [${source} ${confidence.toFixed(2)}] → ${q.options[pickedIdx]?.slice(0, 30) ?? value}`);
+
+    if (source === "llm") {
+      llmAnswered.push({ question: q.text, answer: q.options[pickedIdx] ?? "" });
+    }
+
+    await selectOption(win, q.inputName, value);
+  }
+
+  const score = await submitAndParseScore(win);
+  onProgress(`[${label}] 分數：${score ?? "?"}`);
+
+  // Persist LLM answers if exam passed
+  if (score !== null && score >= 60) {
+    for (const { question, answer } of llmAnswered) {
+      saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.9 });
+    }
+  }
+
+  return { score, questions };
+}
+
+// ─── Exam loop (retry until 100 or max attempts) ──────────────
+
+async function runExamLoop(
+  win: BrowserWindow,
+  cid: string,
+  menuPattern: string,
+  label: string,
+  bySource: Record<AnswerSource, number>,
+  onProgress: (msg: string) => void,
+): Promise<number | null> {
+  let best: number | null = null;
+
+  for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
+    // Re-enter LC for fresh state on each attempt
+    const ok = await enterLC(win, cid);
+    if (!ok) {
+      onProgress(`enterLC 失敗 (attempt ${attempt})`);
+      break;
+    }
+
+    const links = await getSysbarLinks(win);
+    if (!links.some((l) => new RegExp(menuPattern).test(l))) {
+      onProgress(`找不到「${menuPattern}」選單（links: ${links.join("|")}）`);
+      break;
+    }
+
+    const clicked = await clickSysbarLink(win, menuPattern);
+    if (!clicked) {
+      onProgress(`clickSysbarLink 失敗`);
+      break;
+    }
+
+    const examUrl = await getExamUrl(win);
+    if (!examUrl) {
+      onProgress(`找不到 togo 按鈕`);
+      break;
+    }
+
+    const { score } = await runOneAttempt(win, examUrl, `${label} #${attempt}`, bySource, onProgress);
+
+    if (score !== null && (best === null || score > best)) best = score;
+
+    if (best === 100) {
+      onProgress(`🎯 100 分！`);
+      break;
+    }
+    if (attempt < MAX_EXAM_ATTEMPTS) {
+      onProgress(`第 ${attempt} 次得 ${score ?? "?"}，重考...`);
+    }
+  }
+
+  return best;
+}
+
+// ─── Public API ───────────────────────────────────────────────
+
 export async function solveExam(
   cid: string,
   session: Session,
-  opts: {
-    onProgress?: (msg: string) => void;
-    timeoutMs?: number;
-  } = {},
+  opts: { onProgress?: (msg: string) => void; timeoutMs?: number } = {},
 ): Promise<SolveResult> {
-  const { onProgress } = opts;
-  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const onProgress = opts.onProgress ?? (() => void 0);
   const result: SolveResult = {
     ok: false,
     total: 0,
@@ -51,172 +305,66 @@ export async function solveExam(
 
   const win = new BrowserWindow({
     show: false,
-    width: 1200,
+    width: 1280,
     height: 900,
-    webPreferences: {
-      session,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
   });
-
-  // Suppress any popups the exam page throws by monkey-patching alert/confirm/prompt
-  // once the frame is ready. Electron's WebContents doesn't expose a "dialog" event.
-  win.webContents.on("did-frame-finish-load", () => {
-    win.webContents
-      .executeJavaScript(
-        `try { window.alert = () => void 0; window.confirm = () => true; window.prompt = () => ''; } catch(e){}`,
-        true,
-      )
-      .catch(() => void 0);
-  });
-
-  const log = (msg: string) => {
-    onProgress?.(msg);
-  };
-
-  const deadline = Date.now() + timeoutMs;
-  function timeLeft() {
-    return Math.max(0, deadline - Date.now());
-  }
+  suppressDialogs(win);
 
   try {
-    // 1. Info page
-    await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
-    await settle(win, 800);
-
-    // 2. Click 進行測驗 inside iframe. The site nests the exam in frames; we search all.
-    const clickedStart = await executeInAllFrames<{ ok: boolean; where?: string }>(
-      win,
-      `(() => {
-        const tryClick = (el) => { if (el) { el.click(); return true; } return false; };
-        let btn = Array.from(DOC.querySelectorAll('div.main-text')).find(el => el.textContent.trim() === '進行測驗');
-        if (btn) return { ok: tryClick(btn), where: 'div.main-text' };
-        btn = DOC.querySelector('input.cssBtn[value="進行測驗"]');
-        if (btn) return { ok: tryClick(btn), where: 'input.cssBtn' };
-        btn = Array.from(DOC.querySelectorAll('a')).find(el => el.textContent.trim() === '進行測驗');
-        if (btn) return { ok: tryClick(btn), where: 'a' };
-        return null;
-      })()`,
-    );
-    if (!clickedStart?.ok) {
-      result.error = "找不到「進行測驗」按鈕";
+    // Initial LC entry to discover sysbar items
+    const ok = await enterLC(win, cid);
+    if (!ok) {
+      result.error = "無法進入學習中心";
       return result;
     }
-    log(`點擊「進行測驗」(${clickedStart.where})`);
-    // New tab / iframe navigation — wait for exam form to appear
-    await settle(win, 2500);
 
-    // 3. Click 開始作答 (sometimes the exam page shows an intro first)
-    await executeInAllFrames(
-      win,
-      `(() => {
-        const btn = DOC.querySelector("input.cssBtn[value='開始作答']")
-                 || DOC.querySelector("input[type='submit'][value*='開始作答']")
-                 || Array.from(DOC.querySelectorAll('button, a')).find(el => (el.textContent || '').includes('開始作答'));
-        if (btn) { btn.click(); return true; }
-        return null;
-      })()`,
-    );
-    await settle(win, 2500);
+    const links = await getSysbarLinks(win);
+    onProgress(`sysbar: ${links.join(" | ")}`);
 
-    // 4. Extract questions
-    const questions = await extractQuestions(win);
-    if (questions.length === 0) {
-      result.error = "無法解析題目（tr.bg03/bg04 抓不到內容）";
-      return result;
-    }
-    result.total = questions.length;
-    log(`抓到 ${questions.length} 題`);
+    const hasMainExam = links.some((l) => /測驗|考試/.test(l) && !/閱讀/.test(l));
+    const hasReadExam = links.some((l) => /閱讀/.test(l));
 
-    // 5-6. Pick answers + fill (three-layer: learned → DB → LLM → random)
-    // Collect LLM-answered questions so we can write them back if the exam passes.
-    const llmAnswered: Array<{ question: string; answer: string }> = [];
-
-    for (const q of questions) {
-      if (timeLeft() <= 0) {
-        result.error = "exam timeout";
-        return result;
-      }
-      const { source, pickedIdx, confidence } = await findBestAnswer(q.text, q.options);
-      result.bySource[source]++;
-
-      const answerText = q.options[pickedIdx]?.slice(0, 30) ?? "?";
-      log(`Q${q.index + 1} [${source} ${confidence.toFixed(2)}] ${answerText}`);
-
-      if (source === "llm") {
-        llmAnswered.push({ question: q.text, answer: q.options[pickedIdx] ?? "" });
-      }
-
-      await selectOption(win, q.inputName, pickedIdx + 1);
-    }
-
-    // 7. Submit + retry up to 3 times on fail
-    const MAX_ATTEMPTS = 3;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      log(`送出答案 (第 ${attempt} 次)...`);
-      const submitted = await executeInAllFrames<boolean>(
-        win,
-        `(() => {
-          const btn = DOC.querySelector("input[type='submit'][value*='送出答案']")
-                   || DOC.querySelector("input[type='submit'][value*='交卷']")
-                   || DOC.querySelector("input[type='submit'][value*='送出']");
-          if (btn) { btn.click(); return true; }
-          return null;
-        })()`,
-      );
-      if (!submitted) {
-        result.error = "找不到送出答案按鈕";
-        return result;
-      }
-      await settle(win, 3000);
-
-      // 8. Detect pass/fail
-      const verdict = await executeInAllFrames<{ passed: boolean; text: string }>(
-        win,
-        `(() => {
-          const t = DOC.body ? DOC.body.innerText : '';
-          if (!t) return null;
-          const passed = /及格|通過|恭喜.*完成|分數[：: ]?\\s*(100|9\\d|8\\d|7\\d|6\\d)/.test(t);
-          return { passed, text: t.slice(0, 200) };
-        })()`,
-      );
-      result.passed = !!verdict?.passed;
+    if (!hasMainExam && !hasReadExam) {
+      onProgress("sysbar 無測驗選單，略過");
       result.ok = true;
-      log(`測驗結果：${result.passed ? "通過 ✓" : "未過"}`);
+      return result;
+    }
 
-      if (result.passed) {
-        // Write-back: save LLM-answered questions to learned_answers
-        for (const { question, answer } of llmAnswered) {
-          saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.9 });
-        }
-        break;
-      }
+    // ── Main exam ──
+    if (hasMainExam) {
+      onProgress("=== 測驗 ===");
+      const score = await runExamLoop(
+        win,
+        cid,
+        "測驗|考試",
+        "測驗",
+        result.bySource,
+        onProgress,
+      );
+      result.score = score ?? undefined;
+      result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random;
+      result.passed = (score ?? 0) >= 60;
+      result.ok = true;
+    }
 
-      if (attempt < MAX_ATTEMPTS) {
-        log(`第 ${attempt} 次未過，重試...`);
-        // Navigate back to exam entry to retry
-        await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
-        await settle(win, 2000);
-        await executeInAllFrames(
-          win,
-          `(() => {
-            const btn = Array.from(DOC.querySelectorAll('div.main-text')).find(el => el.textContent.trim() === '進行測驗')
-                     || DOC.querySelector('input.cssBtn[value="進行測驗"]');
-            if (btn) { btn.click(); return true; }
-            return null;
-          })()`,
-        );
-        await settle(win, 2500);
-        await executeInAllFrames(
-          win,
-          `(() => {
-            const btn = DOC.querySelector("input.cssBtn[value='開始作答']");
-            if (btn) { btn.click(); return true; }
-            return null;
-          })()`,
-        );
-        await settle(win, 2500);
+    // ── Reading exam (閱讀測驗) ──
+    if (hasReadExam) {
+      onProgress("=== 閱讀測驗 ===");
+      const rScore = await runExamLoop(
+        win,
+        cid,
+        "閱讀",
+        "閱讀測驗",
+        result.bySource,
+        onProgress,
+      );
+      result.readExamScore = rScore ?? undefined;
+      if (!hasMainExam) {
+        result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random;
+        result.score = rScore ?? undefined;
+        result.passed = (rScore ?? 0) >= 60;
+        result.ok = true;
       }
     }
 
@@ -230,107 +378,5 @@ export async function solveExam(
     } catch {
       /* already closed */
     }
-  }
-}
-
-async function extractQuestions(win: BrowserWindow): Promise<ExtractedQuestion[]> {
-  return (
-    (await executeInAllFrames<ExtractedQuestion[]>(
-      win,
-      `(() => {
-        const rows = Array.from(DOC.querySelectorAll('tr.bg03, tr.bg04'));
-        if (rows.length === 0) return null;
-        const out = [];
-        rows.forEach((row, index) => {
-          // Clone the row and strip the <ol> so innerText gives just the question stem
-          const clone = row.cloneNode(true);
-          clone.querySelectorAll('ol, ul').forEach(el => el.remove());
-          const text = (clone.textContent || '').trim();
-
-          const inputs = Array.from(row.querySelectorAll('input[type=radio], input[type=checkbox]'));
-          if (inputs.length === 0) return;
-          const inputName = inputs[0].name || '';
-          const isMultiple = inputs[0].type === 'checkbox';
-
-          // Options: <li> parent text minus the input
-          const options = [];
-          const lis = row.querySelectorAll('li');
-          lis.forEach(li => {
-            const liClone = li.cloneNode(true);
-            liClone.querySelectorAll('input').forEach(el => el.remove());
-            options.push((liClone.textContent || '').trim());
-          });
-          if (options.length === 0) {
-            inputs.forEach(inp => {
-              const parent = inp.closest('label') || inp.parentElement;
-              const t = parent ? (parent.textContent || '').trim() : '';
-              options.push(t);
-            });
-          }
-          out.push({ index, text, options, inputName, isMultiple });
-        });
-        return out.length ? out : null;
-      })()`,
-    )) ?? []
-  );
-}
-
-async function selectOption(win: BrowserWindow, inputName: string, optionValue: number): Promise<void> {
-  if (!inputName) return;
-  const safeName = inputName.replace(/"/g, '\\"');
-  await executeInAllFrames(
-    win,
-    `(() => {
-      const el = DOC.querySelector('input[name="${safeName}"][value="${optionValue}"]');
-      if (el) { el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); return true; }
-      return null;
-    })()`,
-  );
-}
-
-function settle(win: BrowserWindow, ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const onNav = () => {
-      /* reset timer on navigation */
-    };
-    win.webContents.on("did-navigate", onNav);
-    win.webContents.on("did-navigate-in-page", onNav);
-    setTimeout(() => {
-      win.webContents.removeListener("did-navigate", onNav);
-      win.webContents.removeListener("did-navigate-in-page", onNav);
-      resolve();
-    }, ms);
-  });
-}
-
-/**
- * Run the given IIFE against the top window and walk same-origin subframes until
- * one returns a truthy value. The caller's script must use `DOC` instead of
- * `document` so we can substitute each frame's document per iteration.
- *
- * Example: `executeInAllFrames(win, "DOC.querySelector('form')?.action")`
- */
-async function executeInAllFrames<T>(win: BrowserWindow, bodyUsingDOC: string): Promise<T | null> {
-  const wrapped = `(() => {
-    const attempt = (DOC) => {
-      try { return (${bodyUsingDOC}); } catch (e) { return null; }
-    };
-    // main document first
-    let v = attempt(document);
-    if (v) return v;
-    // iterate same-origin subframes
-    for (let i = 0; i < window.frames.length; i++) {
-      try {
-        const fdoc = window.frames[i].document;
-        v = attempt(fdoc);
-        if (v) return v;
-      } catch (e) { /* cross-origin — skip */ }
-    }
-    return null;
-  })()`;
-  try {
-    return (await win.webContents.executeJavaScript(wrapped, true)) as T | null;
-  } catch {
-    return null;
   }
 }
