@@ -336,7 +336,7 @@ export async function heartbeat(
     type: "end",
     ticket: pTicket,
     enCid: encCid,
-    period: String(periodMs),
+    period: String(Math.round(periodMs / 1000)),
     bt,
   };
   if (actid) body.actid = actid;

@@ -105,21 +105,24 @@ export async function extractTicket(
             function scan(frame) {
               try {
                 if (frame.pTicket && frame.cid) {
-                  let actid = (typeof frame.globalCurrentActivity === 'string' && frame.globalCurrentActivity)
-                    ? frame.globalCurrentActivity : null;
-                  // 環境檢測 node (I_SCO_99999999_*) is not a real lesson — skip it.
-                  // Find the first real lesson from onclick attributes instead.
-                  if (!actid || /9999999/.test(actid)) {
-                    try {
-                      const links = Array.from(frame.document.querySelectorAll('a[onclick]'));
-                      for (const el of links) {
-                        const oc = el.getAttribute('onclick') || '';
-                        if (/goToActivity/.test(oc) && !/9999999/.test(oc)) {
-                          const m = oc.match(/goToActivity\\(['"]([^'"]+)['"]\\)/);
-                          if (m) { actid = m[1]; break; }
-                        }
+                  // Find first real lesson actid from onclick — do NOT read
+                  // globalCurrentActivity yet; the player may still be on the
+                  // env-check node (I_SCO_99999999_*).
+                  let actid = null;
+                  try {
+                    const links = Array.from(frame.document.querySelectorAll('a[onclick]'));
+                    for (const el of links) {
+                      const oc = el.getAttribute('onclick') || '';
+                      if (/goToActivity/.test(oc) && !/9999999/.test(oc)) {
+                        const m = oc.match(/goToActivity\\(['"]([^'"]+)['"]\\)/);
+                        if (m) { actid = m[1]; break; }
                       }
-                    } catch {}
+                    }
+                  } catch {}
+                  // Navigate the player to the real lesson so globalCurrentActivity
+                  // is set correctly by the time dwell ends.
+                  if (actid && typeof frame.goToActivity === 'function') {
+                    try { frame.goToActivity(actid); } catch {}
                   }
                   return {
                     pTicket: String(frame.pTicket),
@@ -148,16 +151,6 @@ export async function extractTicket(
         } catch {
           /* fall through to default */
         }
-        const actid: string | undefined = typeof data.actid === "string" ? data.actid : undefined;
-        // Leave the reader page open for ~20 seconds AFTER finding the ticket
-        // so the SPOC's own JS finishes initialising the reading session on
-        // the server. Video-based courses (好好用 AI 的 AI Academy / Meta,
-        // etc.) need extra time for the player to load + autoplay + send
-        // their initial progress pings. 全民 AI 通識課 worked at 8s dwell;
-        // 好好用 AI didn't — bumping to 20s to cover slower players.
-        //
-        // Also proactively try to start video playback and fire any
-        // viewport/intersection handlers the tracker might listen for.
         try {
           await win.webContents.executeJavaScript(
             `(() => {
@@ -171,7 +164,6 @@ export async function extractTicket(
                   }
                 };
                 walk(document);
-                // Simulate a scroll + focus so intersection/visibility observers fire.
                 window.dispatchEvent(new Event('focus'));
                 window.dispatchEvent(new Event('scroll'));
               } catch (e) {}
@@ -181,9 +173,35 @@ export async function extractTicket(
         } catch {
           /* non-fatal — ticket already captured */
         }
-        console.log("[TICKET]", JSON.stringify({ pTicket: data.pTicket.slice(0, 8) + "...", actid, origin }));
+        // Dwell: wait for the player to finish navigating to the real lesson,
+        // then read globalCurrentActivity which should now reflect the actual node.
         await sleep(20000);
-        return { pTicket: data.pTicket, encCid: data.cid, origin, actid };
+        let finalActid: string | undefined = typeof data.actid === "string" ? data.actid : undefined;
+        try {
+          const actAfterDwell: unknown = await win.webContents.executeJavaScript(
+            `(() => {
+              function scan(frame) {
+                try {
+                  if (frame.pTicket && frame.cid) {
+                    const act = typeof frame.globalCurrentActivity === 'string' ? frame.globalCurrentActivity : null;
+                    return (act && !/9999999/.test(act)) ? act : null;
+                  }
+                } catch {}
+                try {
+                  for (let i = 0; i < frame.frames.length; i++) {
+                    const r = scan(frame.frames[i]); if (r) return r;
+                  }
+                } catch {}
+                return null;
+              }
+              return scan(window);
+            })()`,
+            true,
+          );
+          if (typeof actAfterDwell === "string" && actAfterDwell) finalActid = actAfterDwell;
+        } catch { /* non-fatal — keep onclick actid */ }
+        console.log("[TICKET]", JSON.stringify({ pTicket: data.pTicket.slice(0, 8) + "...", actid: finalActid, origin }));
+        return { pTicket: data.pTicket, encCid: data.cid, origin, actid: finalActid };
       }
       await sleep(500);
     }

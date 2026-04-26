@@ -207,6 +207,22 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     });
   }
 
+  // Poll for up to 3 minutes (every 15s) waiting for isReadDones=1 after the
+  // finish signal — gives the server time to process accumulated reading time.
+  if (!serverConfirmed && opts.pollFn) {
+    const pollDeadline = Date.now() + 180_000;
+    while (!serverConfirmed && Date.now() < pollDeadline && !opts.signal?.aborted) {
+      await sleep(15_000);
+      try {
+        const pollResult = await opts.pollFn(cid);
+        if (pollResult) {
+          opts.onPoll?.(cid, pollResult);
+          if (pollResult.isReadDones === 1) serverConfirmed = true;
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
   // Step 4: SCORM JS finish — open a fresh reader window, wait for the SCORM
   // player to init, then fire LMSSetValue(lesson_status=completed)+LMSFinish.
   // Only needed when the HTTP finish didn't already confirm completion.
