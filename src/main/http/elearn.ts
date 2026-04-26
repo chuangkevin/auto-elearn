@@ -182,13 +182,16 @@ export async function enterReadingSession(
   pTicket: string,
   encCid: string,
   origin: string = BASE,
-): Promise<{ ok: boolean; status: number }> {
+): Promise<{ ok: boolean; status: number; body: string }> {
   const url = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
-  const { status } = await elearnRequest(session, url, {
+  const { status, text } = await elearnRequest(session, url, {
     method: "GET",
     referer: `${origin}/mooc/index.php`,
+    // Follow redirects: the server may 302 to the actual reader page; undici
+    // must follow so the reading-session server state is established.
+    maxRedirections: 10,
   });
-  return { ok: status >= 200 && status < 400, status };
+  return { ok: status === 200, status, body: text };
 }
 
 /**

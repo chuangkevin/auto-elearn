@@ -79,7 +79,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   try {
     const enter = await enterReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
     opts.onProgress?.(cid, "tick", {
-      enterSession: { status: enter.status, ok: enter.ok },
+      enterSession: { status: enter.status, ok: enter.ok, body: enter.body.slice(0, 200) },
     });
   } catch (e) {
     opts.onProgress?.(cid, "error", {

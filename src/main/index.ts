@@ -802,12 +802,12 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         } else if (stage === "tick") {
           const e2 = extra as {
             firstResponse?: string; status?: number; timediff?: string;
-            enterSession?: { status: number; ok: boolean };
+            enterSession?: { status: number; ok: boolean; body?: string };
             startSession?: { status: number; ok: boolean; body: string };
             refreshSession?: { ok: boolean; status: number; body: string };
           };
           if (e2.enterSession) {
-            log("info", `[${card.name}] enterReadingSession → ${e2.enterSession.ok ? "OK" : "FAIL"} (${e2.enterSession.status})`);
+            log("info", `[${card.name}] enterReadingSession → ${e2.enterSession.ok ? "OK" : "FAIL"} (${e2.enterSession.status}) ${e2.enterSession.body ?? ""}`);
           }
           if (e2.startSession) {
             log("info", `[${card.name}] startReadingSession → ${e2.startSession.ok ? "OK" : "FAIL"} (${e2.startSession.status}) ${e2.startSession.body}`);

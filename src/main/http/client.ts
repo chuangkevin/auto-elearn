@@ -8,6 +8,8 @@ export interface ElearnRequestOptions {
   timeoutMs?: number;
   /** Set when making XHR-style POSTs that need Origin (e.g. course_record.php). */
   originHeader?: string;
+  /** Follow up to N redirects (default: 0 = no redirect following). */
+  maxRedirections?: number;
 }
 
 /** Build a Cookie header from the BrowserView's session. */
@@ -55,6 +57,7 @@ export async function elearnRequest(
     body,
     headersTimeout: opts.timeoutMs ?? 15000,
     bodyTimeout: opts.timeoutMs ?? 15000,
+    maxRedirections: opts.maxRedirections ?? 0,
   });
   const text = await res.body.text();
   return { status: res.statusCode, text, headers: res.headers as Record<string, string | string[] | undefined> };
