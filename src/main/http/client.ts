@@ -1,5 +1,4 @@
 import type { Session } from "electron";
-import { request } from "undici";
 
 export interface ElearnRequestOptions {
   method?: "GET" | "POST";
@@ -8,14 +7,8 @@ export interface ElearnRequestOptions {
   timeoutMs?: number;
   /** Set when making XHR-style POSTs that need Origin (e.g. course_record.php). */
   originHeader?: string;
-  /** Follow up to N redirects (default: 0 = no redirect following). */
+  /** Kept for API compatibility; session.fetch handles redirects automatically. */
   maxRedirections?: number;
-}
-
-/** Build a Cookie header from the BrowserView's session. */
-async function cookieHeader(session: Session, url: string): Promise<string> {
-  const cookies = await session.cookies.get({ url });
-  return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
 }
 
 function toFormBody(obj: Record<string, string>): string {
@@ -25,8 +18,12 @@ function toFormBody(obj: Record<string, string>): string {
 }
 
 /**
- * Fire an HTTP request reusing the BrowserView's session cookies.
- * Returns the raw text body.
+ * Fire an HTTP request using Electron's session.fetch(), which automatically
+ * includes all session cookies (including httpOnly) from the BrowserView's
+ * cookie jar — no manual extraction needed.
+ *
+ * Replaces the previous undici approach where session.cookies.get() was called
+ * manually but failed to deliver all required cookies to the server.
  */
 export async function elearnRequest(
   session: Session,
@@ -34,31 +31,37 @@ export async function elearnRequest(
   opts: ElearnRequestOptions = {},
 ): Promise<{ status: number; text: string; headers: Record<string, string | string[] | undefined> }> {
   const method = opts.method ?? "GET";
-  const cookie = await cookieHeader(session, url);
-  const headers: Record<string, string> = {
+  const fetchHeaders: Record<string, string> = {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 auto-elearn/0.1",
     Accept: "application/json, text/html, */*",
     "Accept-Language": "zh-TW,zh;q=0.9",
     "X-Requested-With": "XMLHttpRequest",
-    Cookie: cookie,
   };
-  if (opts.referer) headers.Referer = opts.referer;
-  if (opts.originHeader) headers.Origin = opts.originHeader;
+  if (opts.referer) fetchHeaders.Referer = opts.referer;
+  if (opts.originHeader) fetchHeaders.Origin = opts.originHeader;
   let body: string | undefined;
   if (method === "POST" && opts.body) {
-    headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+    fetchHeaders["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
     body = toFormBody(opts.body);
   }
 
-  const res = await request(url, {
-    method,
-    headers,
-    body,
-    headersTimeout: opts.timeoutMs ?? 15000,
-    bodyTimeout: opts.timeoutMs ?? 15000,
-    maxRedirections: opts.maxRedirections ?? 0,
-  });
-  const text = await res.body.text();
-  return { status: res.statusCode, text, headers: res.headers as Record<string, string | string[] | undefined> };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
+  try {
+    const res = await session.fetch(url, {
+      method,
+      headers: fetchHeaders,
+      body,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    const headers: Record<string, string | undefined> = {};
+    res.headers.forEach((v: string, k: string) => {
+      headers[k] = v;
+    });
+    return { status: res.status, text, headers };
+  } finally {
+    clearTimeout(timer);
+  }
 }

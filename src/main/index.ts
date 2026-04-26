@@ -740,8 +740,20 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   state.status = "running";
   const tracked = await discover(session);
   const selected = new Set(cids);
+
+  // Courses already confirmed read by the server skip heartbeat entirely.
+  const skipRead = tracked.filter(
+    (t) => selected.has(t.course.cid) && t.course.isClassing && (t.course.isReadDones ?? 0) === 1,
+  );
+  if (skipRead.length > 0) {
+    log(
+      "info",
+      `${skipRead.length} 門課 server 已確認閱讀完成（isReadDones=1），跳過心跳直接進入測驗：${skipRead.map((t) => t.course.caption).join("、")}`,
+    );
+  }
+
   const needReading = tracked.filter(
-    (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
+    (t) => selected.has(t.course.cid) && t.course.isClassing && (t.course.isReadDones ?? 0) === 0 && t.phase === "reading",
   );
 
   if (needReading.length === 0) {
