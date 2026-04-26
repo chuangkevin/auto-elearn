@@ -857,12 +857,16 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   }
 
   // 3. Exam phase — for every selected course with exam not yet done, try to solve.
+  // Gate on isReadDones===1 (server-confirmed) instead of exam_exists: getSigningCourses
+  // often omits exam_exists or sets it only after reading is confirmed, so that field
+  // defaults to "0" and would silently skip all exams. Let solveExam handle courses
+  // that have no exam button gracefully (returns error, logged as warning).
   const afterReadingTracked = await discover(session);
   const needExam = afterReadingTracked.filter(
     (t) =>
       selected.has(t.course.cid) &&
       t.course.isClassing &&
-      (t.course.exam_exists === "1" || t.course.exam_exists === 1 as unknown as string) &&
+      (t.course.isReadDones ?? 0) === 1 &&
       (t.course.isExamDones ?? 0) === 0,
   );
   if (needExam.length > 0) {
