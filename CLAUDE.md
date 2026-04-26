@@ -61,6 +61,45 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - Any requirement that should govern future implementation must be written into the formal rule sources (this file or a skill), not left only in chat context. Rule home: `skills/execution-style/SKILL.md`.
 - Any non-trivial feature request should first go through an exploration/confirmation step and be captured in OpenSpec before implementation.
 
+## Domain Knowledge — e等公務園 (elearn.hrd.gov.tw)
+
+### 測驗入口（正確路徑）
+- **錯誤做法**：在 `/info/{cid}` 找「進行測驗」按鈕 → 不可靠，此按鈕可能不存在或失效
+- **正確做法**：
+  1. `/info/{cid}` → 點 `button.btnAction`（上課去）
+  2. 等 SCORM Learning Center frameset 載入（同分頁跳轉 OR window.open popup）
+  3. 在 `mooc_sysbar` frame 找「測驗/考試」或「閱讀測驗」連結並點擊
+  4. 在 `s_main` frame 找 `[onclick*="togo("]` 按鈕，抓取 ID
+  5. 導到 `exam_start.php?{id}+0`（相對於 s_main 的 location base）
+  6. 呼叫 `examBegin()` → 等 `tr.bg03, tr.bg04` 出現 → 答題 → 提交
+- 共用 LC 導航邏輯在 `src/main/browser/lc-nav.ts`（`enterLC`, `getSysbarLinks`, `clickSysbarLink`, `awaitWindowOpen`）
+
+### 閱讀完成判斷
+- **不使用** `isReadDones === 1`（server 永遠回傳 0，無用）
+- **正確依據**：`isReadtimeValidCaption` 欄位
+  - `"已通過"` → 全課已完成，跳過所有動作
+  - `"未報名"` → 機關推薦但用戶未點課，不是真正課程
+
+### Heartbeat session.fetch
+- 使用 Electron session 的 `session.fetch()` 發心跳請求，自動帶 cookie，**不要用 undici**
+- undici 是獨立 HTTP client，不共享 Electron session cookie jar
+
+### 答題流程（三層優先順序）
+1. `learned_answers` 本地學習庫（最高優先）
+2. `resources/mixed.db` 題庫（98,569 題，dice similarity >= 0.6 命中）
+3. Gemini LLM fallback（`gemini-2.5-flash`，key 從 AppData/.../config.json）
+
+### 測驗重考
+- 目標分數：100 分
+- 最多重試次數：`MAX_EXAM_ATTEMPTS = 10`（`solver.ts`）
+- 每次重試都重新進入 LC（re-enter）
+
+### 問卷入口
+- sysbar「問卷」→ s_main 找 `.process-btn.pay.active` 點擊 → 攔截 window.open → 填 radio value='1' → 送出
+
+### 心得入口
+- sysbar「心得」→ s_main 直接有 `textarea`（無 popup）→ Gemini 生成 120-180 字 → 送出
+
 ## Release 流程
 
 1. 確認所有功能正常
