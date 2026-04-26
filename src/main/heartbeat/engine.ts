@@ -1,6 +1,6 @@
 import type { Session } from "electron";
-import { enterReadingSession, getServerTime, heartbeat as sendHeartbeat, startReadingSession } from "../http/elearn";
-import { extractTicket } from "./reader";
+import { enterReadingSession, finishReadingSession, getServerTime, heartbeat as sendHeartbeat, startReadingSession } from "../http/elearn";
+import { executeScormFinish, extractTicket } from "./reader";
 import type { Tracked } from "../course/types";
 
 export type ProgressStage = "open" | "tick" | "done" | "error";
@@ -187,6 +187,39 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     // Sleep before NEXT tick — server must see elapsed >= period
     const jitter = Math.floor((Math.random() * 2 - 1) * opts.jitterMs);
     await sleep(Math.max(1000, opts.intervalMs + jitter));
+  }
+
+  // Step 3: HTTP finish signal — mirrors actype=finish that the browser fires
+  // when the SCORM player calls LMSFinish.  The server uses this to mark
+  // isReadDones=1 once accumulated time is satisfied.  Try regardless of
+  // serverConfirmed since the poll might have missed the flip.
+  try {
+    const finishRes = await finishReadingSession(
+      session, ticket.pTicket, ticket.encCid, ticket.origin, ticket.actid, bt,
+    );
+    opts.onProgress?.(cid, "tick", {
+      httpFinish: { status: finishRes.status, body: finishRes.body.slice(0, 200) },
+    });
+  } catch (e) {
+    opts.onProgress?.(cid, "error", {
+      reason: "http_finish_failed",
+      msg: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  // Step 4: SCORM JS finish — open a fresh reader window, wait for the SCORM
+  // player to init, then fire LMSSetValue(lesson_status=completed)+LMSFinish.
+  // Only needed when the HTTP finish didn't already confirm completion.
+  if (!serverConfirmed) {
+    try {
+      const scormDone = await executeScormFinish(cid);
+      opts.onProgress?.(cid, "tick", { scormFinish: scormDone });
+    } catch (e) {
+      opts.onProgress?.(cid, "error", {
+        reason: "scorm_finish_failed",
+        msg: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   opts.onProgress?.(cid, "done", { pings, serverConfirmed });

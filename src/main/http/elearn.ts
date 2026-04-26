@@ -275,6 +275,39 @@ export async function startReadingSession(
 }
 
 /**
+ * Signal reading completion (mirrors the browser's actype=finish call that
+ * fires after the SCORM player calls LMSFinish).  The server uses this to
+ * flip isReadDones to 1 once accumulated reading time is satisfied.
+ */
+export async function finishReadingSession(
+  session: Session,
+  pTicket: string,
+  encCid: string,
+  origin: string = BASE,
+  actid?: string,
+  bt = "0",
+): Promise<{ ok: boolean; status: number; body: string }> {
+  const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
+  const body: Record<string, string> = {
+    action: "setReading",
+    type: "finish",
+    ticket: pTicket,
+    enCid: encCid,
+    period: "0",
+    bt,
+  };
+  if (actid) body.actid = actid;
+  console.log("[HB-FINISH-REQ]", JSON.stringify({ url: `${origin}/mooc/controllers/course_record.php?actype=finish`, body }));
+  const { status, text } = await elearnRequest(
+    session,
+    `${origin}/mooc/controllers/course_record.php?actype=finish`,
+    { method: "POST", body, referer: readerUrl, originHeader: origin },
+  );
+  console.log("[HB-FINISH-RES]", text.slice(0, 300));
+  return { ok: status >= 200 && status < 400, status, body: text };
+}
+
+/**
  * Single heartbeat (setReading/end).
  *
  * CRITICAL: `origin` must be the origin of the reading iframe (e.g.

@@ -199,6 +199,112 @@ export async function extractTicket(
   }
 }
 
+/**
+ * Open a hidden reader window for `cid`, wait for the SCORM player to
+ * initialise, then call LMSSetValue(lesson_status=completed) + LMSFinish()
+ * (SCORM 1.2) or the SCORM 2004 equivalents.
+ *
+ * Returns true if the API was found and the finish calls fired.  Returns
+ * false gracefully for video-only courses that have no SCORM API.
+ */
+export async function executeScormFinish(cid: string, timeoutMs = 45_000): Promise<boolean> {
+  const win = new BrowserWindow({
+    show: false,
+    width: 1280,
+    height: 800,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+
+  try {
+    await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
+    const buttonReady = await waitFor(win, "!!document.querySelector('button.btnAction')", 10_000);
+    if (!buttonReady) return false;
+
+    await win.webContents.executeJavaScript(
+      `window.confirm = () => true; window.alert = () => undefined; true;`, true,
+    );
+    await win.webContents.executeJavaScript(
+      `(() => { const b = document.querySelector('button.btnAction'); if (b) b.click(); return !!b; })()`, true,
+    );
+
+    // Wait for the SCORM reader frame to appear (same scan as extractTicket).
+    const deadline = Date.now() + timeoutMs;
+    let readerFound = false;
+    while (Date.now() < deadline) {
+      try {
+        await win.webContents.executeJavaScript(`
+          (() => {
+            const cbtn = document.getElementById('confirmBtn');
+            if (cbtn) cbtn.click();
+            document.querySelectorAll('button.bootbox-accept, .modal-footer .btn-primary').forEach(b => {
+              try { b.click(); } catch {}
+            });
+          })()`, true);
+      } catch { /* ignore */ }
+
+      const found: boolean = await win.webContents.executeJavaScript(`
+        (() => {
+          function scan(frame) {
+            try { if (frame.pTicket && frame.cid) return true; } catch {}
+            try { for (let i = 0; i < frame.frames.length; i++) { if (scan(frame.frames[i])) return true; } } catch {}
+            return false;
+          }
+          return scan(window);
+        })()`, true).catch(() => false);
+
+      if (found) { readerFound = true; break; }
+      await sleep(500);
+    }
+
+    if (!readerFound) return false;
+
+    // Give the SCORM player time to call LMSInitialize before we call LMSFinish.
+    await sleep(15_000);
+
+    const finished: boolean = await win.webContents.executeJavaScript(`
+      (() => {
+        function tryFinish(frame) {
+          try {
+            if (frame.API && typeof frame.API.LMSSetValue === 'function') {
+              frame.API.LMSSetValue('cmi.core.lesson_status', 'completed');
+              frame.API.LMSSetValue('cmi.core.score.raw', '100');
+              frame.API.LMSSetValue('cmi.core.score.min', '0');
+              frame.API.LMSSetValue('cmi.core.score.max', '100');
+              frame.API.LMSCommit('');
+              frame.API.LMSFinish('');
+              return true;
+            }
+            if (frame.API_1484_11 && typeof frame.API_1484_11.SetValue === 'function') {
+              frame.API_1484_11.SetValue('cmi.completion_status', 'completed');
+              frame.API_1484_11.SetValue('cmi.success_status', 'passed');
+              frame.API_1484_11.SetValue('cmi.score.scaled', '1');
+              frame.API_1484_11.Commit('');
+              frame.API_1484_11.Terminate('');
+              return true;
+            }
+          } catch {}
+          try {
+            for (let i = 0; i < frame.frames.length; i++) {
+              if (tryFinish(frame.frames[i])) return true;
+            }
+          } catch {}
+          return false;
+        }
+        return tryFinish(window);
+      })()`, true).catch(() => false);
+
+    if (finished) {
+      console.log("[SCORM-FINISH]", cid, "LMSFinish called");
+      await sleep(3_000);
+    }
+    return finished;
+  } catch {
+    return false;
+  } finally {
+    try { win.destroy(); } catch { /* ignore */ }
+  }
+}
+
 async function waitFor(win: BrowserWindow, expr: string, timeoutMs: number): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
