@@ -1,5 +1,6 @@
 import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu, screen, type Session } from "electron";
 import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
 import {
@@ -171,6 +172,7 @@ async function fetchProgressCached(session: Session): Promise<Map<string, PollDa
         isReadDones: c.isReadDones ?? 0,
         isExamDones: c.isExamDones ?? 0,
         isSurveyDones: c.isSurveyDones ?? 0,
+        isReadtimeValidCaption: c.isReadtimeValidCaption,
         passPercent: c.passPercent,
       },
     ]),
@@ -521,6 +523,19 @@ async function refreshCourses(): Promise<void> {
       `掃描完成：你目前真正的課程 ${real} 門（進行中未完成 ${inProgress}）` +
         `；機關推薦但你沒點過的 ${phantom} 門已略過`,
     );
+    // Diagnostic: print per-course server flags and write to temp file
+    const diagLines: string[] = [`=== 課程狀態診斷 ${new Date().toISOString()} ===`];
+    for (const t of tracked.filter((t) => t.course.isReadtimeValidCaption !== "未報名")) {
+      const r = t.course.isReadDones ?? 0;
+      const e = t.course.isExamDones ?? 0;
+      const s = t.course.isSurveyDones ?? 0;
+      const line = `📋 [閱讀:${r} 測驗:${e} 問卷:${s} phase:${t.phase}] ${t.course.caption}`;
+      log("info", `  ${line}`);
+      diagLines.push(line);
+    }
+    try {
+      writeFileSync("C:/Users/Kevin/AppData/Local/Temp/auto-elearn-diag.txt", diagLines.join("\n"), "utf8");
+    } catch { /* non-fatal */ }
   } catch (e) {
     log("error", `掃描失敗：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -741,19 +756,21 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   const tracked = await discover(session);
   const selected = new Set(cids);
 
-  // Courses already confirmed read by the server skip heartbeat entirely.
+  // Courses not in "reading" phase (classify returned done/exam/survey/rating) skip heartbeat.
   const skipRead = tracked.filter(
-    (t) => selected.has(t.course.cid) && t.course.isClassing && (t.course.isReadDones ?? 0) === 1,
+    (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase !== "reading" && t.phase !== "pending",
   );
   if (skipRead.length > 0) {
     log(
       "info",
-      `${skipRead.length} 門課 server 已確認閱讀完成（isReadDones=1），跳過心跳直接進入測驗：${skipRead.map((t) => t.course.caption).join("、")}`,
+      `${skipRead.length} 門課已過閱讀階段，跳過心跳：${skipRead.map((t) => t.course.caption).join("、")}`,
     );
   }
 
+  const completedHeartbeat = new Set<string>();
+
   const needReading = tracked.filter(
-    (t) => selected.has(t.course.cid) && t.course.isClassing && (t.course.isReadDones ?? 0) === 0 && t.phase === "reading",
+    (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
   );
 
   if (needReading.length === 0) {
@@ -789,14 +806,15 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         if (!card) return;
         if (data.isExamDones === 1) card.examDone = true;
         if (data.isSurveyDones === 1) card.surveyDone = true;
-        const readStatus = data.isReadDones === 1 ? "閱讀✓" : "閱讀⏳";
+        const captionDone = data.isReadtimeValidCaption === "已通過";
+        const readStatus = (data.isReadDones === 1 || captionDone) ? "閱讀✓" : "閱讀⏳";
         const examStatus = data.isExamDones === 1 ? "測驗✓" : "測驗○";
         const surveyStatus = data.isSurveyDones === 1 ? "問卷✓" : "問卷○";
         const pctStr = data.passPercent != null ? ` 整體${data.passPercent}%` : "";
-        log("info", `[${card.name}] 📡 server 進度:${pctStr} ${readStatus} ${examStatus} ${surveyStatus}`);
-        if (data.isReadDones === 1 && card.readSec < card.requiredSec) {
+        log("info", `[${card.name}] 📡 server 進度:${pctStr} ${readStatus} ${examStatus} ${surveyStatus} caption:${data.isReadtimeValidCaption ?? "?"}`);
+        if ((data.isReadDones === 1 || captionDone) && card.readSec < card.requiredSec) {
           card.readSec = card.requiredSec;
-          log("info", `[${card.name}] 📡 伺服器確認閱讀達標，提前結束心跳`);
+          log("info", `[${card.name}] 📡 伺服器確認閱讀達標（caption=${data.isReadtimeValidCaption}），提前結束心跳`);
         }
         pushState();
       },
@@ -835,6 +853,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           const pings = (extra as { pings?: number })?.pings ?? 0;
           const serverConfirmed = (extra as { serverConfirmed?: boolean })?.serverConfirmed ?? false;
           log("info", `閱讀結束：${card.name} (${pings} pings, ${serverConfirmed ? "伺服器確認達標" : "計時到期"})`);
+          completedHeartbeat.add(cid);
           card.phase = "exam";
           runningCids.delete(cid);
           if (focusedCid === cid) focusNextCourse();
@@ -868,18 +887,17 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     });
   }
 
-  // 3. Exam phase — for every selected course with exam not yet done, try to solve.
-  // Gate on isReadDones===1 (server-confirmed) instead of exam_exists: getSigningCourses
-  // often omits exam_exists or sets it only after reading is confirmed, so that field
-  // defaults to "0" and would silently skip all exams. Let solveExam handle courses
-  // that have no exam button gracefully (returns error, logged as warning).
+  // 3. Exam phase — for courses that just finished heartbeat OR skipped heartbeat (already past
+  // reading). isReadDones is always 0 from the server, so we gate on completedHeartbeat (local
+  // tracking) and caption !== "已通過" (fully done courses need no exam).
+  // solveExam handles "no exam button" gracefully, so false positives are OK.
   const afterReadingTracked = await discover(session);
   const needExam = afterReadingTracked.filter(
     (t) =>
       selected.has(t.course.cid) &&
       t.course.isClassing &&
-      (t.course.isReadDones ?? 0) === 1 &&
-      (t.course.isExamDones ?? 0) === 0,
+      t.course.isReadtimeValidCaption !== "已通過" &&
+      (completedHeartbeat.has(t.course.cid) || skipRead.some((s) => s.course.cid === t.course.cid)),
   );
   if (needExam.length > 0) {
     log("info", `${needExam.length} 門課進入測驗階段`);
@@ -911,13 +929,14 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     log("info", "沒有需要測驗的課程");
   }
 
-  // 4. Survey / rating phase.
+  // 4. Survey / rating phase — same gating as exam.
   const afterExamTracked = await discover(session);
   const needSurvey = afterExamTracked.filter(
     (t) =>
       selected.has(t.course.cid) &&
       t.course.isClassing &&
-      (t.course.isSurveyDones ?? 0) === 0,
+      t.course.isReadtimeValidCaption !== "已通過" &&
+      (completedHeartbeat.has(t.course.cid) || skipRead.some((s) => s.course.cid === t.course.cid)),
   );
   if (needSurvey.length > 0) {
     log("info", `${needSurvey.length} 門課進入問卷 / 評價階段`);

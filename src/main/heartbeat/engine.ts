@@ -9,6 +9,8 @@ export interface PollData {
   isReadDones: number;
   isExamDones: number;
   isSurveyDones: number;
+  /** Caption from server — "已通過" means reading is credited. More reliable than isReadDones. */
+  isReadtimeValidCaption?: string;
   passPercent?: number;
 }
 
@@ -174,7 +176,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
         const data = await opts.pollFn(cid);
         if (data) {
           opts.onPoll?.(cid, data);
-          if (data.isReadDones === 1) {
+          if (data.isReadDones === 1 || data.isReadtimeValidCaption === "已通過") {
             serverConfirmed = true;
             break;
           }
