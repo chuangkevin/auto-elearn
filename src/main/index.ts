@@ -56,7 +56,7 @@ function maskAccount(acc: string): string {
 }
 
 const HEARTBEAT_PARALLEL = 8;
-const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_INTERVAL_MS = 300_000;
 const HEARTBEAT_JITTER_MS = 1000;
 const ENROLL_DELAY_MS = 1000;
 

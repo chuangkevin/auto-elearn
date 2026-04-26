@@ -15,6 +15,8 @@ export interface TicketInfo {
    * an absolute URL.
    */
   origin: string;
+  /** SCORM activity ID (globalCurrentActivity) — required by setReading to credit time. */
+  actid?: string;
 }
 
 /**
@@ -107,6 +109,7 @@ export async function extractTicket(
                     pTicket: String(frame.pTicket),
                     cid: String(frame.cid),
                     href: String(frame.location.href),
+                    actid: typeof frame.globalCurrentActivity === 'string' ? frame.globalCurrentActivity : null,
                   };
                 }
               } catch {}
@@ -129,6 +132,7 @@ export async function extractTicket(
         } catch {
           /* fall through to default */
         }
+        const actid: string | undefined = typeof data.actid === "string" ? data.actid : undefined;
         // Leave the reader page open for ~20 seconds AFTER finding the ticket
         // so the SPOC's own JS finishes initialising the reading session on
         // the server. Video-based courses (好好用 AI 的 AI Academy / Meta,
@@ -162,7 +166,7 @@ export async function extractTicket(
           /* non-fatal — ticket already captured */
         }
         await sleep(20000);
-        return { pTicket: data.pTicket, encCid: data.cid, origin };
+        return { pTicket: data.pTicket, encCid: data.cid, origin, actid };
       }
       await sleep(500);
     }

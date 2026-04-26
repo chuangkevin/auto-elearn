@@ -1,5 +1,5 @@
 import type { Session } from "electron";
-import { enterReadingSession, heartbeat as sendHeartbeat, startReadingSession } from "../http/elearn";
+import { enterReadingSession, getServerTime, heartbeat as sendHeartbeat, startReadingSession } from "../http/elearn";
 import { extractTicket } from "./reader";
 import type { Tracked } from "../course/types";
 
@@ -91,10 +91,16 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   // Step 2: explicit actype=start POST — manifest.js fires this once (3s after
   // lesson click); without it the server has no open timer record and every
   // actype=end heartbeat returns "success" but credits 0 seconds.
+  // bt must be a real server timestamp (not "0") — fetch it before the POST.
   // Capture timediff from the response — it becomes the initial bt for the loop.
   let bt = "0";
   try {
-    const startRes = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin);
+    bt = await getServerTime(session, ticket.origin);
+  } catch { /* fallback "0" stays */ }
+  try {
+    const startRes = await startReadingSession(
+      session, ticket.pTicket, ticket.encCid, ticket.origin, ticket.actid, bt,
+    );
     bt = startRes.timediff;
     opts.onProgress?.(cid, "tick", {
       startSession: { status: startRes.status, ok: startRes.ok, body: startRes.body.slice(0, 200), timediff: bt },
@@ -121,7 +127,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
 
     try {
       const { ok, status, body, timediff } = await sendHeartbeat(
-        session, ticket.pTicket, ticket.encCid, ticket.origin, opts.intervalMs, bt,
+        session, ticket.pTicket, ticket.encCid, ticket.origin, opts.intervalMs, bt, ticket.actid,
       );
       if (ok) {
         bt = timediff;

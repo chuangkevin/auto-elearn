@@ -195,30 +195,69 @@ export async function enterReadingSession(
 }
 
 /**
+ * Fetch current server time from the SPOC learning path.
+ * Used as `bt` in the actype=start request (real browser does the same).
+ * Falls back to local UTC+8 if the request fails.
+ */
+export async function getServerTime(session: Session, origin: string): Promise<string> {
+  try {
+    const { text } = await elearnRequest(session, `${origin}/learn/path/getServerTime.php`, {
+      method: "GET",
+      referer: `${origin}/learn/`,
+    });
+    // JSON: {"server_time":"2026-04-26 14:10:18"} or {"serverTime":"..."}
+    try {
+      const j = JSON.parse(text) as Record<string, unknown>;
+      const t = j.server_time ?? j.serverTime ?? j.time;
+      if (typeof t === "string" && /\d{4}-\d{2}-\d{2}/.test(t)) return t;
+    } catch { /* not JSON */ }
+    // XML: <root server_time="2026-04-26 14:10:18"/>
+    const m = text.match(/server_time="([^"]+)"/);
+    if (m) return m[1];
+    // Plain text
+    const plain = text.trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(plain)) return plain;
+  } catch { /* fall through */ }
+  // Fallback: local time expressed as UTC+8 (Taiwan standard time)
+  const utc8 = new Date(Date.now() + 8 * 3_600_000);
+  return utc8.toISOString().replace("T", " ").slice(0, 19);
+}
+
+/**
  * Explicitly open a server-side reading session (mirrors what manifest.js does
  * 3 seconds after a lesson is clicked: `setReading('start', 0)`).
  * Returns the server's `timediff` value — use it as `bt` in the first heartbeat.
+ *
+ * `bt` must be a server timestamp (from `getServerTime()`), not "0" — the server
+ * uses this to open a timed reading record; passing "0" returns code:1 but credits
+ * zero time.
+ * `actid` is the SCORM activity ID (`globalCurrentActivity`) from pathtree.php;
+ * without it the server cannot link heartbeats to a lesson.
  */
 export async function startReadingSession(
   session: Session,
   pTicket: string,
   encCid: string,
   origin: string = BASE,
+  actid?: string,
+  bt?: string,
 ): Promise<{ ok: boolean; status: number; body: string; timediff: string }> {
   const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
+  const body: Record<string, string> = {
+    action: "setReading",
+    type: "start",
+    ticket: pTicket,
+    enCid: encCid,
+    period: "0",
+    bt: bt ?? "0",
+  };
+  if (actid) body.actid = actid;
   const { status, text } = await elearnRequest(
     session,
     `${origin}/mooc/controllers/course_record.php?actype=start`,
     {
       method: "POST",
-      body: {
-        action: "setReading",
-        type: "start",
-        ticket: pTicket,
-        enCid: encCid,
-        period: "0",
-        bt: "0",
-      },
+      body,
       referer: readerUrl,
       originHeader: origin,
     },
@@ -250,23 +289,26 @@ export async function heartbeat(
   pTicket: string,
   encCid: string,
   origin: string = BASE,
-  periodMs = 5000,
+  periodMs = 300_000,
   bt = "0",
+  actid?: string,
 ): Promise<{ ok: boolean; status: number; body: string; timediff: string }> {
   const readerUrl = `${origin}/mooc/index.php?ticket=${encodeURIComponent(pTicket)}&cid=${encodeURIComponent(encCid)}`;
+  const body: Record<string, string> = {
+    action: "setReading",
+    type: "end",
+    ticket: pTicket,
+    enCid: encCid,
+    period: String(periodMs),
+    bt,
+  };
+  if (actid) body.actid = actid;
   const { status, text } = await elearnRequest(
     session,
     `${origin}/mooc/controllers/course_record.php?actype=end`,
     {
       method: "POST",
-      body: {
-        action: "setReading",
-        type: "end",
-        ticket: pTicket,
-        enCid: encCid,
-        period: String(periodMs),
-        bt,
-      },
+      body,
       // Referer must look like the in-iframe reading page, otherwise the server
       // discards the tick silently (HTTP 200 but no time credited).
       referer: readerUrl,
