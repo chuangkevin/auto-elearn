@@ -23,8 +23,25 @@ export interface Course {
   portal_cid?: string;
 }
 
+/** Thrown when the elearn JSON endpoint hands us an HTML page instead — almost
+ *  always the eCPA login redirect because the session cookie was rejected.
+ *  Surfacing this distinct from "valid empty result" lets the UI say "session
+ *  過期" instead of the misleading "0 筆". */
+export class ElearnAuthError extends Error {
+  constructor(msg = "session 已失效，server 回傳登入頁") {
+    super(msg);
+    this.name = "ElearnAuthError";
+  }
+}
+
 /** JSON returned by course_ajax.php is a list of dicts, each dict keyed by `'<sid><cid>'` → course. */
 function flattenCourseList(body: string): Course[] {
+  // HTML response = login redirect (or upstream maintenance page). Don't
+  // silently mask it as "no results".
+  const head = body.trimStart().slice(0, 16).toLowerCase();
+  if (head.startsWith("<!doctype") || head.startsWith("<html")) {
+    throw new ElearnAuthError();
+  }
   let data: unknown;
   try {
     data = JSON.parse(body);
@@ -134,28 +151,85 @@ export async function primeExplorer(session: Session, categoryId: string): Promi
   });
 }
 
+export interface SearchFilters {
+  /** 加盟專區 id (school_from). "0" or "" = all. */
+  fromSchoolId?: string;
+  /** 認證時數下限 (hours). undefined = no lower bound. */
+  hoursMin?: number;
+  /** 認證時數上限 (hours). undefined = no upper bound. */
+  hoursMax?: number;
+}
+
 /** Search site-wide inside a category. Call primeExplorer() first. */
 export async function searchCourses(
   session: Session,
   categoryId: string,
   keyword = "",
   perpage = 30,
+  filters: SearchFilters = {},
 ): Promise<Course[]> {
+  const body: Record<string, string> = {
+    action: "getSearchCourses",
+    id: "new",
+    perpage: String(perpage),
+    categoryId,
+    fromSchoolId: filters.fromSchoolId && filters.fromSchoolId !== "0" ? filters.fromSchoolId : "",
+    keyword,
+    pathname: "/mooc/explorer.php",
+    mineEnglish: "N",
+  };
+  if (filters.hoursMin !== undefined && filters.hoursMin > 0) {
+    body.certification_hours_minimum = String(filters.hoursMin);
+  }
+  if (filters.hoursMax !== undefined && filters.hoursMax > 0) {
+    body.certification_hours_maximum = String(filters.hoursMax);
+  }
   const { text } = await elearnRequest(session, `${BASE}/mooc/controllers/course_ajax.php`, {
     method: "POST",
-    body: {
-      action: "getSearchCourses",
-      id: "new",
-      perpage: String(perpage),
-      categoryId,
-      fromSchoolId: "",
-      keyword,
-      pathname: "/mooc/explorer.php",
-      mineEnglish: "N",
-    },
+    body,
     referer: `${BASE}/mooc/explorer.php`,
   });
   return flattenCourseList(text);
+}
+
+/**
+ * Fetch the 次類別 list under a 主類別 id.
+ * The site responds either `data: { id: label, ... }` (current) or
+ * `result: [{ id, val }]` (legacy) — we accept both.
+ */
+export async function getCategoryChildren(
+  session: Session,
+  parentId: string,
+): Promise<Array<{ id: string; label: string }>> {
+  const { text } = await elearnRequest(session, `${BASE}/mooc/controllers/course_ajax.php`, {
+    method: "POST",
+    body: {
+      action: "getCourseGroupChildren",
+      gid: parentId,
+      levels: "2",
+    },
+    referer: `${BASE}/mooc/index.php`,
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const obj = parsed as { code?: number; data?: Record<string, string>; result?: Array<{ id: string; val: string }> };
+  if (obj.code !== 1) return [];
+  if (obj.data && typeof obj.data === "object") {
+    return Object.entries(obj.data).map(([id, label]) => ({
+      id,
+      // The server emits HTML entities (`&nbsp;&gt;&nbsp;`) for nested labels;
+      // collapse them so the UI shows readable "parent > child" text.
+      label: String(label).replace(/&nbsp;/g, " ").replace(/&gt;/g, ">").trim(),
+    }));
+  }
+  if (Array.isArray(obj.result)) {
+    return obj.result.map((r) => ({ id: String(r.id), label: String(r.val) }));
+  }
+  return [];
 }
 
 /** Enrol in a course. Returns true if server responded 2xx/3xx. */

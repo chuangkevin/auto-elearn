@@ -143,7 +143,24 @@ export const IPC = {
   GEMINI_KEY_SET: "gemini:key-set",
   /** renderer → main: open the Gemini key dialog */
   OPEN_GEMINI_DIALOG: "gemini:open-dialog",
+  /** renderer → main: list 次類別 under a 主類別 id */
+  CATEGORY_CHILDREN: "category:children",
 } as const;
+
+export interface SearchOptions {
+  /** keyword (course name) */
+  keyword?: string;
+  /** 主類別 id (lifetime_course_category_1st_level). Empty = all. */
+  mainCategoryId?: string;
+  /** 次類別 id (lifetime_course_category_2nd_level). Empty = all. */
+  subCategoryId?: string;
+  /** 加盟專區 id (school_from). Empty / "0" = all. */
+  fromSchoolId?: string;
+  /** Min cert hours. */
+  hoursMin?: number;
+  /** Max cert hours. */
+  hoursMax?: number;
+}
 
 export interface CredentialsStatus {
   saved: boolean;

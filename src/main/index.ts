@@ -12,6 +12,7 @@ import {
   type CredentialsStatus,
   type CredsPromptPayload,
   type ResumePrompt,
+  type SearchOptions,
   type ViewBounds,
 } from "../shared/ipc";
 import { createBus } from "./bus";
@@ -22,11 +23,15 @@ import { enrollMany } from "./course/enrollment";
 import { unenrollCourse } from "./course/unenroll";
 import type { Tracked } from "./course/types";
 import {
+  ElearnAuthError,
+  getCategoryChildren,
   getSigningCourses,
   primeExplorer,
   searchCourses,
   type Course,
+  type SearchFilters,
 } from "./http/elearn";
+import { fetchCourseDetail } from "./http/course-detail";
 import { runHeartbeatBatch, type PollData } from "./heartbeat/engine";
 import {
   clearCredentials,
@@ -56,7 +61,14 @@ function maskAccount(acc: string): string {
   return `${acc.slice(0, 1)}${"*".repeat(acc.length - 5)}${acc.slice(-4)}`;
 }
 
-const HEARTBEAT_PARALLEL = 8;
+// Hard cap purely to avoid spawning hundreds of hidden BrowserWindows during
+// the ticket-extraction phase (each extractTicket() opens its own window for
+// ~40 s, then closes). Effective parallelism = min(this, # selected courses).
+// Pure HTTP heartbeats afterwards are cheap; the constraint is the temporary
+// window count during extraction. With actid now properly extracted (each
+// heartbeat carries enCid + actid), server credits per-course independently
+// — there's no server-side concurrency conflict to worry about.
+const HEARTBEAT_PARALLEL_MAX = 50;
 const HEARTBEAT_INTERVAL_MS = 300_000;
 const HEARTBEAT_JITTER_MS = 1000;
 const ENROLL_DELAY_MS = 1000;
@@ -523,18 +535,23 @@ async function refreshCourses(): Promise<void> {
       `掃描完成：你目前真正的課程 ${real} 門（進行中未完成 ${inProgress}）` +
         `；機關推薦但你沒點過的 ${phantom} 門已略過`,
     );
-    // Diagnostic: print per-course server flags and write to temp file
+    // Diagnostic: print per-course server flags + detail-page snapshot
     const diagLines: string[] = [`=== 課程狀態診斷 ${new Date().toISOString()} ===`];
     for (const t of tracked.filter((t) => t.course.isReadtimeValidCaption !== "未報名")) {
       const r = t.course.isReadDones ?? 0;
       const e = t.course.isExamDones ?? 0;
       const s = t.course.isSurveyDones ?? 0;
-      const line = `📋 [閱讀:${r} 測驗:${e} 問卷:${s} phase:${t.phase}] ${t.course.caption}`;
+      const cap = t.course.isReadtimeValidCaption ?? "?";
+      const pp = t.course.passPercent ?? "-";
+      const d = t.detail
+        ? ` | detail: read=${t.detail.readSec ?? "?"}s exam=${t.detail.examScore ?? "?"} survey=${t.detail.surveyDone === true ? "已填" : t.detail.surveyDone === false ? "未填" : "?"} pass=${t.detail.passed === true ? "通過" : t.detail.passed === false ? "未通過" : "--"}`
+        : " | detail: (none)";
+      const line = `📋 [list 閱:${r} 測:${e} 問:${s} cap:${cap} p:${pp}% → phase:${t.phase}]${d} ${t.course.caption}`;
       log("info", `  ${line}`);
       diagLines.push(line);
     }
     try {
-      writeFileSync("C:/Users/Kevin/AppData/Local/Temp/auto-elearn-diag.txt", diagLines.join("\n"), "utf8");
+      writeFileSync(join(app.getPath("temp"), "auto-elearn-diag.txt"), diagLines.join("\n"), "utf8");
     } catch { /* non-fatal */ }
   } catch (e) {
     log("error", `掃描失敗：${e instanceof Error ? e.message : String(e)}`);
@@ -542,14 +559,20 @@ async function refreshCourses(): Promise<void> {
 }
 
 function trackedToCard(t: Tracked): CourseCard {
+  // Prefer authoritative detail-page state (閱讀時數 / 測驗 / 問卷) over the
+  // unreliable listing flags. Listing flags are kept only as fallback.
+  const examDone =
+    t.detail?.examScore != null ? true : (t.course.isExamDones ?? 0) === 1;
+  const surveyDone =
+    t.detail?.surveyDone ?? ((t.course.isSurveyDones ?? 0) === 1);
   return {
     cid: t.course.cid,
     name: t.course.caption,
     phase: t.phase === "reading_done" ? "reading" : (t.phase as CourseCard["phase"]),
     readSec: t.readSec,
     requiredSec: t.requiredSec,
-    examDone: (t.course.isExamDones ?? 0) === 1,
-    surveyDone: (t.course.isSurveyDones ?? 0) === 1,
+    examDone,
+    surveyDone,
     ratingDone: false,
     reflectionDone: false,
     lastPingAt: t.lastPingAt,
@@ -732,6 +755,36 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   persistRun("running");
   pushState();
 
+  // Up-front plan summary so the user sees what work this batch will actually do
+  // BEFORE we walk through phases that might log "沒有需要 X 的課程" early on.
+  // Without this, when most selected courses are past reading or already done,
+  // the user sees "0 筆 / 沒有 X" several times then the pipeline suddenly
+  // starts working — looks broken.
+  try {
+    const planTracked = await discover(session);
+    const planSel = new Set(cids);
+    const plan = planTracked.filter((t) => planSel.has(t.course.cid));
+    const enrolledCids = new Set(state.courses.map((c) => c.cid));
+    const needEnroll = cids.filter((c) => !enrolledCids.has(c)).length;
+    const needRead = plan.filter((t) => t.phase === "reading").length;
+    const needExamPlan = plan.filter(
+      (t) =>
+        t.course.isReadtimeValidCaption !== "已通過" &&
+        t.detail?.examScore == null &&
+        (t.course.isExamDones ?? 0) !== 1,
+    ).length;
+    const needSurveyPlan = plan.filter(
+      (t) => t.course.isReadtimeValidCaption !== "已通過" && t.detail?.surveyDone !== true,
+    ).length;
+    const alreadyDone = plan.filter((t) => t.course.isReadtimeValidCaption === "已通過").length;
+    log(
+      "info",
+      `📋 本批 ${cids.length} 門課計畫：報名 ${needEnroll} · 閱讀 ${needRead} · 測驗 ${needExamPlan} · 問卷 ${needSurveyPlan} · 心得 ${plan.length}（已通過 ${alreadyDone}）`,
+    );
+  } catch (e) {
+    log("warn", `預估失敗：${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // 1. Enrol any not-yet-enrolled cids
   const enrolled = new Set(state.courses.map((c) => c.cid));
   const toEnrol = cids.filter((c) => !enrolled.has(c));
@@ -768,6 +821,86 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   }
 
   const completedHeartbeat = new Set<string>();
+  // Per-course finish chains (測驗→問卷→心得) collected here so a fast course
+  // doesn't have to wait for the slowest one in the batch to finish heartbeat
+  // before progressing through its remaining phases.
+  const chainPromises: Promise<void>[] = [];
+
+  // Pure async chain that runs for ONE course once its heartbeat is done (or
+  // skipped because it was already past reading). Re-discovers the latest
+  // detail snapshot inside so the gating decisions match current server state.
+  const runFinishChain = async (cid: string, name: string): Promise<void> => {
+    if (abortSignal.aborted) return;
+    const card = state.courses.find((c) => c.cid === cid);
+    try {
+      // Fresh detail to drive exam/survey skip decisions with current server data
+      const fresh = await fetchCourseDetail(session, cid);
+      const examScored = fresh?.examScore != null;
+      const surveyDone = fresh?.surveyDone === true;
+      const passed = fresh?.passed === true;
+
+      // 1. 測驗
+      if (!passed && !examScored && !abortSignal.aborted) {
+        log("info", `開始測驗：${name}`);
+        const res = await solveExam(cid, session, {
+          onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+        });
+        if (res.ok) {
+          const scoreStr = res.score != null ? `${res.score}分` : "?";
+          const readStr = res.readExamScore != null ? ` 閱讀:${res.readExamScore}分` : "";
+          log(
+            "info",
+            `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
+          );
+          if (card && res.passed) card.examDone = true;
+        } else {
+          log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
+        }
+      }
+
+      // 2. 問卷
+      if (!passed && !surveyDone && !abortSignal.aborted) {
+        log("info", `問卷：${name}`);
+        const sr = await fillSurvey(cid, session, {
+          onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+        });
+        if (sr.ok) {
+          log("info", `問卷完成 ${name}：勾選 ${sr.filled} 題 + 繳交`);
+          if (card) card.surveyDone = true;
+        } else {
+          log("warn", `問卷失敗 ${name}：${sr.error ?? "unknown"}`);
+        }
+      }
+
+      // 3. 心得
+      if (!abortSignal.aborted) {
+        const rr = await writeReflection(cid, name, session, {
+          onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+        });
+        if (rr.ok) {
+          log("info", `心得完成 ${name}（${rr.source}）`);
+          if (card) card.reflectionDone = true;
+        } else if (rr.error && !rr.error.includes("略過")) {
+          log("warn", `心得失敗 ${name}：${rr.error}`);
+        }
+      }
+
+      // Mark the card as done so stats / UI reflect course completion the
+      // moment its chain wraps up, not at the very end of the whole batch.
+      if (card) {
+        card.phase = "done";
+        updateStats();
+        pushState();
+      }
+    } catch (e) {
+      log("warn", `[${name}] chain 失敗：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // Fire chains for skipRead courses immediately — they've nothing to wait for.
+  for (const t of skipRead) {
+    chainPromises.push(runFinishChain(t.course.cid, t.course.caption));
+  }
 
   const needReading = tracked.filter(
     (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
@@ -776,9 +909,10 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   if (needReading.length === 0) {
     log("info", "沒有需要閱讀的課程");
   } else {
+    const parallel = Math.min(needReading.length, HEARTBEAT_PARALLEL_MAX);
     log(
       "info",
-      `${needReading.length} 門課開始閱讀（並行 ${HEARTBEAT_PARALLEL}，每 ${
+      `${needReading.length} 門課開始閱讀（並行 ${parallel}，每 ${
         HEARTBEAT_INTERVAL_MS / 1000
       }s 心跳）`,
     );
@@ -787,7 +921,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     startSessionWatchdog(session);
 
     await runHeartbeatBatch(session, needReading, {
-      parallel: HEARTBEAT_PARALLEL,
+      parallel,
       intervalMs: HEARTBEAT_INTERVAL_MS,
       jitterMs: HEARTBEAT_JITTER_MS,
       graceSec: 120,
@@ -799,6 +933,30 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           return map.get(cid) ?? null;
         } catch {
           return null;
+        }
+      },
+      detailPollIntervalMs: 120_000,
+      detailPollFn: async (cid) => {
+        try {
+          const detail = await fetchCourseDetail(session, cid);
+          return detail ? { readSec: detail.readSec } : null;
+        } catch {
+          return null;
+        }
+      },
+      onDetailPoll: (cid, detail) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        if (detail.readSec != null) {
+          // Authoritative server reading time — overrides local elapsed
+          // estimate so the card matches /info/{cid} 閱讀時數 instead of
+          // showing only "since pipeline started".
+          const newReadSec = Math.min(card.requiredSec, detail.readSec);
+          if (newReadSec !== card.readSec) {
+            card.readSec = newReadSec;
+            log("info", `[${card.name}] 📡 server 閱讀時數 ${Math.round(newReadSec / 60)} 分鐘 / 需 ${Math.round(card.requiredSec / 60)} 分鐘`);
+            pushState();
+          }
         }
       },
       onPoll: (cid, data) => {
@@ -857,6 +1015,10 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           card.phase = "exam";
           runningCids.delete(cid);
           if (focusedCid === cid) focusNextCourse();
+          // Per-course chain — fire the moment heartbeat finishes for THIS
+          // course, regardless of whether other courses in the batch are still
+          // ticking. Fire-and-forget; runPipelineFor awaits all chains at the end.
+          chainPromises.push(runFinishChain(cid, card.name));
         } else if (stage === "error") {
           log("warn", `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`);
           runningCids.delete(cid);
@@ -887,112 +1049,13 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     });
   }
 
-  // 3. Exam phase — for courses that just finished heartbeat OR skipped heartbeat (already past
-  // reading). isReadDones is always 0 from the server, so we gate on completedHeartbeat (local
-  // tracking) and caption !== "已通過" (fully done courses need no exam).
-  // solveExam handles "no exam button" gracefully, so false positives are OK.
-  const afterReadingTracked = await discover(session);
-  const needExam = afterReadingTracked.filter(
-    (t) =>
-      selected.has(t.course.cid) &&
-      t.course.isClassing &&
-      t.course.isReadtimeValidCaption !== "已通過" &&
-      (t.course.isExamDones ?? 0) !== 1 &&
-      (completedHeartbeat.has(t.course.cid) || skipRead.some((s) => s.course.cid === t.course.cid)),
-  );
-  if (needExam.length > 0) {
-    log("info", `${needExam.length} 門課進入測驗階段`);
-    state.now.action = "exam";
-    pushState();
-    for (const t of needExam) {
-      if (abortSignal.aborted) break;
-      const card = state.courses.find((c) => c.cid === t.course.cid);
-      const name = card?.name ?? t.course.cid;
-      state.now.courseId = t.course.cid;
-      state.now.courseName = name;
-      state.now.detail = "解題中...";
-      pushState();
-      log("info", `開始測驗：${name}`);
-      const res = await solveExam(t.course.cid, session, {
-        onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-      });
-      if (res.ok) {
-        const scoreStr = res.score != null ? `${res.score}分` : "?";
-        const readStr = res.readExamScore != null ? ` 閱讀:${res.readExamScore}分` : "";
-        log(
-          "info",
-          `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
-        );
-        if (card && res.passed) card.examDone = true;
-      } else {
-        log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
-      }
-    }
-  } else {
-    log("info", "沒有需要測驗的課程");
-  }
-
-  // 4. Survey / rating phase — same gating as exam.
-  const afterExamTracked = await discover(session);
-  const needSurvey = afterExamTracked.filter(
-    (t) =>
-      selected.has(t.course.cid) &&
-      t.course.isClassing &&
-      t.course.isReadtimeValidCaption !== "已通過" &&
-      (completedHeartbeat.has(t.course.cid) || skipRead.some((s) => s.course.cid === t.course.cid)),
-  );
-  if (needSurvey.length > 0) {
-    log("info", `${needSurvey.length} 門課進入問卷 / 評價階段`);
-    state.now.action = "survey";
-    pushState();
-    for (const t of needSurvey) {
-      if (abortSignal.aborted) break;
-      const card = state.courses.find((c) => c.cid === t.course.cid);
-      const name = card?.name ?? t.course.cid;
-      state.now.courseId = t.course.cid;
-      state.now.courseName = name;
-      state.now.detail = "填問卷...";
-      pushState();
-      log("info", `問卷：${name}`);
-      const sr = await fillSurvey(t.course.cid, session, {
-        onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-      });
-      if (sr.ok) {
-        log("info", `問卷完成 ${name}：勾選 ${sr.filled} 題 + 繳交`);
-        if (card) card.surveyDone = true;
-      } else {
-        log("warn", `問卷失敗 ${name}：${sr.error ?? "unknown"}`);
-      }
-    }
-  } else {
-    log("info", "沒有需要填寫的問卷");
-  }
-
-  // 5. Reflection / 學習心得 — best effort.
-  const needReflection = afterExamTracked.filter(
-    (t) => selected.has(t.course.cid) && t.course.isClassing,
-  );
-  if (needReflection.length > 0) {
-    state.now.action = "reflection";
-    pushState();
-    for (const t of needReflection) {
-      if (abortSignal.aborted) break;
-      const card = state.courses.find((c) => c.cid === t.course.cid);
-      const name = card?.name ?? t.course.cid;
-      state.now.courseId = t.course.cid;
-      state.now.courseName = name;
-      state.now.detail = "寫心得...";
-      pushState();
-      const rr = await writeReflection(t.course.cid, name, session, {
-        onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-      });
-      if (rr.ok) {
-        log("info", `心得完成 ${name}（${rr.source}）`);
-        if (card) card.reflectionDone = true;
-      } else if (rr.error && !rr.error.includes("略過")) {
-        log("warn", `心得失敗 ${name}：${rr.error}`);
-      }
-    }
+  // Wait for all post-heartbeat chains (kicked off as each course's heartbeat
+  // finished — see runFinishChain below). This is what lets a fast course
+  // start its 測驗 / 問卷 / 心得 immediately while slower courses are still
+  // ticking through their 60 minutes of reading.
+  if (chainPromises.length > 0) {
+    log("info", `等候 ${chainPromises.length} 條 per-course chain 完成...`);
+    await Promise.allSettled(chainPromises);
   }
 
   stopSessionWatchdog();
@@ -1010,25 +1073,93 @@ async function runPipelineFor(cids: string[]): Promise<void> {
 }
 
 // ── Search helper ─────────────────────────────────────────────
-async function keywordSearch(keyword: string): Promise<CourseCandidate[]> {
+/**
+ * Normalise a free-text search keyword: strip ASCII + full-width whitespace,
+ * BOM, and zero-width chars so "性別 平等" / "性別　平等" / " 性別平等﻿"
+ * all behave the same.
+ */
+function normaliseKeyword(raw: string | undefined): string {
+  if (!raw) return "";
+  return raw.replace(/[\s　﻿​]+/g, " ").trim();
+}
+
+async function keywordSearch(opts: SearchOptions): Promise<CourseCandidate[]> {
   if (!elearnView) return [];
   const session = elearnView.webContents.session;
-  const trimmed = keyword.trim();
+  const trimmed = normaliseKeyword(opts.keyword);
   const allByCid = new Map<string, Course>();
   const mineCids = new Set(state.courses.map((c) => c.cid));
+  let authFailed = false;
 
-  for (const cat of KNOWN_CATEGORIES) {
-    if (abortSignal.aborted) break;
+  // Hour range sanitisation: reject negatives, swap if min > max, treat NaN as
+  // unset. The elearn server returns 0 results when the range is reversed
+  // — silently making this user-hostile.
+  let hoursMin = Number.isFinite(opts.hoursMin) && (opts.hoursMin as number) > 0 ? (opts.hoursMin as number) : undefined;
+  let hoursMax = Number.isFinite(opts.hoursMax) && (opts.hoursMax as number) > 0 ? (opts.hoursMax as number) : undefined;
+  if (hoursMin !== undefined && hoursMax !== undefined && hoursMin > hoursMax) {
+    [hoursMin, hoursMax] = [hoursMax, hoursMin];
+    log("info", `時數範圍 min/max 顛倒，已自動對調 → ${hoursMin} ~ ${hoursMax}`);
+  }
+
+  const filters: SearchFilters = {
+    fromSchoolId: opts.fromSchoolId,
+    hoursMin,
+    hoursMax,
+  };
+
+  const runSearch = async (categoryId: string, perpage: number, label: string) => {
     try {
-      await primeExplorer(session, cat);
-      const results = await searchCourses(session, cat, trimmed, 50);
-      for (const r of results) {
-        if (!allByCid.has(r.cid)) allByCid.set(r.cid, r);
-      }
+      if (categoryId) await primeExplorer(session, categoryId);
+      const results = await searchCourses(session, categoryId, trimmed, perpage, filters);
+      log(
+        "info",
+        `  ${label}: ${results.length} 筆 (isClassing=${results.filter((c) => c.isClassing).length})`,
+      );
+      for (const r of results) if (!allByCid.has(r.cid)) allByCid.set(r.cid, r);
     } catch (e) {
-      // Skip this category; search is best-effort
-      log("warn", `搜尋分類 ${cat} 失敗：${e instanceof Error ? e.message : String(e)}`);
+      if (e instanceof ElearnAuthError) {
+        authFailed = true;
+        log("error", `${label} 失敗：${e.message}（請重新登入或等待自動重登）`);
+      } else {
+        log("warn", `${label} 失敗：${e instanceof Error ? e.message : String(e)}`);
+      }
     }
+  };
+
+  // Determine categoryId from main/sub selection. Sub overrides main; main
+  // alone lets the server widen to all of its descendants.
+  const explicitCategory =
+    opts.subCategoryId && opts.subCategoryId.trim()
+      ? opts.subCategoryId.trim()
+      : opts.mainCategoryId && opts.mainCategoryId.trim()
+        ? opts.mainCategoryId.trim()
+        : "";
+
+  if (explicitCategory) {
+    await runSearch(explicitCategory, 100, `cat=${explicitCategory} kw="${trimmed}"`);
+    // Fallback: category-narrowed search returned nothing AND we have a keyword
+    // → try site-wide. Covers the common rot scenario where the course moved
+    // to a different category but still matches by name.
+    if (allByCid.size === 0 && trimmed && !authFailed) {
+      log("info", `  cat=${explicitCategory} 無結果，fallback 全站 kw="${trimmed}"`);
+      await runSearch("", 100, `fallback 全站 kw="${trimmed}"`);
+    }
+  } else {
+    // No category — site-wide first, then supplement with the legacy
+    // KNOWN_CATEGORIES sweep for categories the site-wide search may rank low.
+    await runSearch("", 100, `全站 kw="${trimmed}"`);
+    for (const cat of KNOWN_CATEGORIES) {
+      // Search must NOT honour the pipeline's abortSignal — that flag persists
+      // after a user clicks "返回選課" and would silently skip every search
+      // until the next pipeline starts.
+      if (authFailed) break; // stop hammering when session is gone
+      await runSearch(cat, 50, `cat=${cat} kw="${trimmed}"`);
+    }
+  }
+
+  log("info", `  併集 byCid: ${allByCid.size} 筆 (isClassing=${Array.from(allByCid.values()).filter((c) => c.isClassing).length})`);
+  if (authFailed) {
+    log("warn", "搜尋過程偵測到 session 失效。請等待自動重登後再試一次。");
   }
 
   return Array.from(allByCid.values())
@@ -1044,7 +1175,15 @@ async function keywordSearch(keyword: string): Promise<CourseCandidate[]> {
       isClassing: !!c.isClassing,
       already_enrolled: mineCids.has(c.cid),
     }))
-    .sort((a, b) => a.certification_hours - b.certification_hours);
+    // 0-hr courses are 組裝 / 精裝 packages without standalone reading content —
+    // the auto-pipeline can't heartbeat them. Push to the end so the real,
+    // shorter-first courses surface at the top of the results.
+    .sort((a, b) => {
+      const aZero = a.certification_hours <= 0;
+      const bZero = b.certification_hours <= 0;
+      if (aZero !== bZero) return aZero ? 1 : -1;
+      return a.certification_hours - b.certification_hours;
+    });
 }
 
 // ── IPC ────────────────────────────────────────────────────────
@@ -1135,14 +1274,35 @@ ipcMain.on(IPC.REFRESH_COURSES, () => {
   refreshCourses().catch(() => void 0);
 });
 
-ipcMain.handle(IPC.SEARCH_COURSES, async (_evt, keyword: string) => {
+ipcMain.handle(IPC.SEARCH_COURSES, async (_evt, payload: string | SearchOptions) => {
   try {
-    const results = await keywordSearch(keyword);
-    log("info", `搜尋「${keyword || "(全部)"}」: ${results.length} 筆`);
+    // Backwards-compat: old renderer code may still pass a bare keyword string.
+    const opts: SearchOptions = typeof payload === "string" ? { keyword: payload } : (payload ?? {});
+    const results = await keywordSearch(opts);
+    const human =
+      opts.keyword || opts.mainCategoryId || opts.subCategoryId || opts.fromSchoolId
+        ? `kw="${opts.keyword ?? ""}" cat=${opts.subCategoryId || opts.mainCategoryId || "-"} school=${opts.fromSchoolId || "-"}${
+            opts.hoursMin || opts.hoursMax ? ` hr=${opts.hoursMin ?? 0}~${opts.hoursMax ?? "∞"}` : ""
+          }`
+        : "(全部)";
+    log("info", `搜尋 ${human}: ${results.length} 筆`);
     return results;
   } catch (e) {
     log("error", `搜尋失敗：${e instanceof Error ? e.message : String(e)}`);
     return [] as CourseCandidate[];
+  }
+});
+
+ipcMain.handle(IPC.CATEGORY_CHILDREN, async (_evt, parentId: string) => {
+  if (!elearnView) return [];
+  if (!parentId || !parentId.trim()) return [];
+  try {
+    const session = elearnView.webContents.session;
+    const children = await getCategoryChildren(session, parentId.trim());
+    return children;
+  } catch (e) {
+    log("warn", `次類別取得失敗 (${parentId})：${e instanceof Error ? e.message : String(e)}`);
+    return [];
   }
 });
 
@@ -1171,27 +1331,38 @@ ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
   const byCid = new Map<string, Course>();
   const mineCids = new Set(state.courses.map((c) => c.cid));
 
+  // Search ignores abortSignal — that flag is for the pipeline only, and a
+  // stale-true value (set by 返回選課) would otherwise silently skip every
+  // search request until the next pipeline starts.
+  let codeAuthFailed = false;
   for (const g of groups) {
-    if (abortSignal.aborted) break;
+    if (codeAuthFailed) break;
     try {
       await primeExplorer(session, g.categoryId);
       // Broad sweep first (empty keyword returns whole category).
       const broad = await searchCourses(session, g.categoryId, "", 50);
+      log("info", `  cat=${g.categoryId} broad sweep: ${broad.length} 筆 (isClassing=${broad.filter((c) => c.isClassing).length})`);
       for (const r of broad) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
       // If the group narrows by specific keywords, also run those to pick up sub-topics
       // the broad sweep may have truncated at 50.
       for (const kw of g.keywords) {
-        if (abortSignal.aborted) break;
         const results = await searchCourses(session, g.categoryId, kw, 50);
+        log("info", `  cat=${g.categoryId} kw="${kw}": ${results.length} 筆`);
         for (const r of results) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
       }
     } catch (e) {
-      log(
-        "warn",
-        `${g.labels.join("/")} (cat=${g.categoryId}) 查詢失敗：${e instanceof Error ? e.message : String(e)}`,
-      );
+      if (e instanceof ElearnAuthError) {
+        codeAuthFailed = true;
+        log("error", `${g.labels.join("/")} (cat=${g.categoryId}) 查詢失敗：${e.message}`);
+      } else {
+        log(
+          "warn",
+          `${g.labels.join("/")} (cat=${g.categoryId}) 查詢失敗：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }
   }
+  log("info", `  併集 byCid: ${byCid.size} 筆 (isClassing=${Array.from(byCid.values()).filter((c) => c.isClassing).length})`);
 
   // Post-filter: a 專區 categoryId like AI_ZONE (540-546) spans multiple sub-topics
   // (基礎認知 / 生成式 / 公務應用 / 導入 / 產業應用). When the user passed specific
@@ -1203,28 +1374,65 @@ ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
   const allLabels = groups.flatMap((g) => g.labels);
   const anyGroupWantsEverything = groups.some((g) => g.keywords.length === 0);
 
-  const out: CourseCandidate[] = Array.from(byCid.values())
-    .filter((c) => c.isClassing)
-    .filter((c) => {
-      if (!anyKeywordRequested) return true; // all groups are broad — keep everything
-      if (anyGroupWantsEverything) return true; // mixed: at least one group has no kw, so keep all
-      const haystack = `${c.caption} ${c.category_full_path ?? ""} ${c.content ?? ""}`;
-      // Match by keyword first, then by label (label lets the user say "all 環境教育" with no filter)
-      return allKeywords.some((k) => haystack.includes(k)) || allLabels.some((l) => haystack.includes(l));
-    })
-    .map((c) => ({
-      cid: c.cid,
-      caption: c.caption,
-      certification_hours: c.certification_hours,
-      fromSchoolName: c.fromSchoolName,
-      studentTargetTypeCaption: c.studentTargetTypeCaption,
-      category_full_path: c.category_full_path,
-      classPeriod: c.classPeriod,
-      isClassing: !!c.isClassing,
-      already_enrolled: mineCids.has(c.cid),
-    }))
-    .sort((a, b) => a.certification_hours - b.certification_hours);
+  const applyPostFilter = (pool: Map<string, Course>): CourseCandidate[] =>
+    Array.from(pool.values())
+      .filter((c) => c.isClassing)
+      .filter((c) => {
+        if (!anyKeywordRequested) return true; // all groups are broad — keep everything
+        if (anyGroupWantsEverything) return true; // mixed: at least one group has no kw, so keep all
+        const haystack = `${c.caption} ${c.category_full_path ?? ""} ${c.content ?? ""}`;
+        // Match by keyword first, then by label (label lets the user say "all 環境教育" with no filter)
+        return allKeywords.some((k) => haystack.includes(k)) || allLabels.some((l) => haystack.includes(l));
+      })
+      .map<CourseCandidate>((c) => ({
+        cid: c.cid,
+        caption: c.caption,
+        certification_hours: c.certification_hours,
+        fromSchoolName: c.fromSchoolName,
+        studentTargetTypeCaption: c.studentTargetTypeCaption,
+        category_full_path: c.category_full_path,
+        classPeriod: c.classPeriod,
+        isClassing: !!c.isClassing,
+        already_enrolled: mineCids.has(c.cid),
+      }))
+      .sort((a, b) => {
+        const aZero = a.certification_hours <= 0;
+        const bZero = b.certification_hours <= 0;
+        if (aZero !== bZero) return aZero ? 1 : -1;
+        return a.certification_hours - b.certification_hours;
+      });
+
+  let out = applyPostFilter(byCid);
   log("info", `代碼搜尋共 ${out.length} 筆`);
+
+  // Fallback: if the category-scoped sweep + post-filter produced nothing,
+  // retry as a plain site-wide keyword search. The agency code → categoryId
+  // mapping rots (courses get moved between categories on the elearn side),
+  // so a keyword like "職場霸凌" may live outside the originally-mapped
+  // 人權教育 category. The site-wide search box itself can still find them.
+  if (out.length === 0 && anyKeywordRequested && !codeAuthFailed) {
+    const fallbackTerms = Array.from(new Set([...allKeywords, ...allLabels])).filter(Boolean);
+    for (const term of fallbackTerms) {
+      try {
+        const results = await searchCourses(session, "", term, 100);
+        log("info", `  fallback 全站 kw="${term}": ${results.length} 筆`);
+        for (const r of results) if (!byCid.has(r.cid)) byCid.set(r.cid, r);
+      } catch (e) {
+        if (e instanceof ElearnAuthError) {
+          codeAuthFailed = true;
+          log("error", `fallback "${term}" 失敗：${e.message}`);
+          break;
+        }
+        log("warn", `fallback "${term}" 失敗：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    out = applyPostFilter(byCid);
+    log("info", `代碼搜尋(fallback)共 ${out.length} 筆`);
+  }
+  if (codeAuthFailed) {
+    log("warn", "搜尋過程偵測到 session 失效。請等待自動重登後再試一次。");
+  }
+
   return out;
 });
 

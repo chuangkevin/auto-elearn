@@ -7,6 +7,7 @@ import {
   type CredsPromptPayload,
   type CredentialsStatus,
   type ResumePrompt,
+  type SearchOptions,
   type StealthState,
   type ViewBounds,
 } from "../shared/ipc";
@@ -25,8 +26,10 @@ const api = {
   abort: () => ipcRenderer.send(IPC.ACTION_ABORT),
   backToSelect: () => ipcRenderer.send(IPC.ACTION_BACK),
   refreshCourses: () => ipcRenderer.send(IPC.REFRESH_COURSES),
-  searchCourses: (keyword: string): Promise<CourseCandidate[]> =>
-    ipcRenderer.invoke(IPC.SEARCH_COURSES, keyword),
+  searchCourses: (opts: SearchOptions | string): Promise<CourseCandidate[]> =>
+    ipcRenderer.invoke(IPC.SEARCH_COURSES, opts),
+  getCategoryChildren: (parentId: string): Promise<Array<{ id: string; label: string }>> =>
+    ipcRenderer.invoke(IPC.CATEGORY_CHILDREN, parentId),
   searchByCodes: (codes: string[]): Promise<CourseCandidate[]> =>
     ipcRenderer.invoke(IPC.SEARCH_BY_CODES, codes),
   startPipeline: (cids: string[]) => ipcRenderer.send(IPC.PIPELINE_START, cids),

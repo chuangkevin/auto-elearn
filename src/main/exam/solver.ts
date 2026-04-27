@@ -249,7 +249,7 @@ async function runExamLoop(
 
   for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
     // Re-enter LC for fresh state on each attempt
-    const ok = await enterLC(win, cid);
+    const ok = await enterLC(win, cid, onProgress);
     if (!ok) {
       onProgress(`enterLC 失敗 (attempt ${attempt})`);
       break;
@@ -313,7 +313,7 @@ export async function solveExam(
 
   try {
     // Initial LC entry to discover sysbar items
-    const ok = await enterLC(win, cid);
+    const ok = await enterLC(win, cid, onProgress);
     if (!ok) {
       result.error = "無法進入學習中心";
       return result;

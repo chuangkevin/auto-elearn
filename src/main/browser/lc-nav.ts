@@ -1,4 +1,5 @@
 import { BrowserWindow } from "electron";
+import { acquireElearnWindowSlot, releaseElearnWindowSlot } from "../heartbeat/reader";
 
 /** ms-level sleep */
 export function wait(ms: number): Promise<void> {
@@ -35,7 +36,30 @@ export function suppressDialogs(win: BrowserWindow): void {
  *
  * Returns true when the LC frameset (≥2 frames) is ready.
  */
-export async function enterLC(win: BrowserWindow, cid: string): Promise<boolean> {
+export async function enterLC(
+  win: BrowserWindow,
+  cid: string,
+  onLog?: (msg: string) => void,
+): Promise<boolean> {
+  // Throttle to the global elearn-window slot. Same semaphore as ticket
+  // extraction; both flows hit /info/{cid} → 上課去 → LC frameset, and
+  // elearn's 多重視窗 guard treats them identically. Without throttling,
+  // 6+ parallel chains' enterLC calls all race and most get redirected to
+  // /mooc/warning.php with empty sysbar / missing togo button.
+  await acquireElearnWindowSlot();
+  try {
+    return await _enterLCImpl(win, cid, onLog);
+  } finally {
+    releaseElearnWindowSlot();
+  }
+}
+
+async function _enterLCImpl(
+  win: BrowserWindow,
+  cid: string,
+  onLog?: (msg: string) => void,
+): Promise<boolean> {
+  const log = onLog ?? (() => void 0);
   let capturedLcUrl: string | null = null;
 
   // Must set handler BEFORE navigating so any window.open is caught
@@ -44,37 +68,92 @@ export async function enterLC(win: BrowserWindow, cid: string): Promise<boolean>
     return { action: "deny" };
   });
 
+  log(`enterLC: loading /info/${cid}`);
   await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
-  await wait(2000);
+  await wait(2500);
+  log(`enterLC: post-load url=${win.webContents.getURL()}`);
 
   // Click launch button
-  await execJs(
+  const clickResult = await execJs<{ found: boolean; tag?: string; text?: string }>(
     win,
     `(() => {
       let b = document.querySelector('button.btnAction');
-      if (!b) b = Array.from(document.querySelectorAll('button,a'))
-        .find(el => /上課去|繼續學習|開始學習/.test(el.textContent || ''));
-      if (b) { b.click(); return true; }
-      return false;
+      let via = 'btnAction';
+      if (!b) {
+        via = 'text-match';
+        b = Array.from(document.querySelectorAll('button,a'))
+          .find(el => /上課去|繼續學習|開始學習/.test(el.textContent || ''));
+      }
+      if (b) {
+        const tag = b.tagName + (via === 'btnAction' ? '.btnAction' : '');
+        const text = (b.textContent || '').trim().slice(0, 30);
+        b.click();
+        return { found: true, tag, text };
+      }
+      return { found: false };
     })()`,
   );
+  if (!clickResult || !clickResult.found) {
+    log("enterLC: 找不到上課去按鈕");
+    return false;
+  }
+  log(`enterLC: clicked ${clickResult.tag} "${clickResult.text}"`);
 
-  await wait(4500);
+  await wait(5000);
 
-  // Case A: same-tab navigation
   const url = win.webContents.getURL();
-  if (url.includes(".elearn.hrd.gov.tw/mooc") || url.includes("center.elearn.hrd.gov.tw")) {
+  const frameCount = (await execJs<number>(win, `window.frames.length`)) ?? 0;
+  log(`enterLC: post-click url=${url} frames=${frameCount} popup=${capturedLcUrl ?? "-"}`);
+
+  // The LC frameset can live on several hosts:
+  //   • center.elearn.hrd.gov.tw/mooc/...   (central platform)
+  //   • mohw.elearn.hrd.gov.tw/learn/...    (衛福部)
+  //   • moe.elearn.hrd.gov.tw/learn/...     (教育部)
+  //   • moi.elearn.hrd.gov.tw/learn/...     (內政部)
+  //   • <agency>.elearn.hrd.gov.tw/learn/...
+  // Per-agency LCs share the elearn.hrd.gov.tw base domain and a multi-frame
+  // SCORM layout. Detect by host suffix + frame count rather than hard-coded
+  // path prefixes.
+  const isLcFrameset = (u: string, frames: number): boolean => {
+    if (!u.includes("elearn.hrd.gov.tw")) return false;
+    if (frames >= 2) return true;
+    return u.includes("/mooc/") || u.includes("/learn/") || u.includes("center.elearn.hrd.gov.tw");
+  };
+
+  // Case A: same-tab navigation already landed on an LC frameset
+  if (isLcFrameset(url, frameCount)) {
     await wait(1000);
     return true;
   }
 
   // Case B: popup was captured — load into same win
   if (capturedLcUrl) {
+    log(`enterLC: loading popup ${capturedLcUrl}`);
     await win.loadURL(capturedLcUrl);
     await wait(3500);
     return true;
   }
 
+  // Case C: same-tab nav still hasn't happened. Poll for up to 10 more seconds.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    await wait(1000);
+    if (capturedLcUrl) {
+      log(`enterLC: late popup ${capturedLcUrl}`);
+      await win.loadURL(capturedLcUrl);
+      await wait(3500);
+      return true;
+    }
+    const u = win.webContents.getURL();
+    const f = (await execJs<number>(win, `window.frames.length`)) ?? 0;
+    if (isLcFrameset(u, f)) {
+      log(`enterLC: late same-tab nav ${u} frames=${f}`);
+      await wait(1000);
+      return true;
+    }
+  }
+
+  log("enterLC: 等到 timeout 都沒有導到 LC frameset");
   return false;
 }
 

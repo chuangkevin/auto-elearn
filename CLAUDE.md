@@ -60,6 +60,7 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - Complex tasks must carry workflow checkpoints in the task list, and major task boundaries must trigger a fresh rule check. Rule home: `skills/execution-style/SKILL.md` and `skills/completion-checklist/SKILL.md`.
 - Any requirement that should govern future implementation must be written into the formal rule sources (this file or a skill), not left only in chat context. Rule home: `skills/execution-style/SKILL.md`.
 - Any non-trivial feature request should first go through an exploration/confirmation step and be captured in OpenSpec before implementation.
+- **Feature 完成必須出 Release**：當一輪功能/修復告一段落（pipeline 可端到端跑過、或修好一個有版號意義的問題），必須執行 `Release 流程` 完整 7 步：bump version → commit + push → `git tag v{版本號}` → `git push --tags` → 確認 GitHub Actions 通過 → 確認 Release 頁面有 zip 檔。**不可只 bump `package.json` 卻不打 tag**——沒有 tag 就沒有 Release，使用者拿不到新版。Rule home: 本檔 `Release 流程` 區塊。
 
 ## Domain Knowledge — e等公務園 (elearn.hrd.gov.tw)
 
@@ -84,6 +85,42 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - 使用 Electron session 的 `session.fetch()` 發心跳請求，自動帶 cookie，**不要用 undici**
 - undici 是獨立 HTTP client，不共享 Electron session cookie jar
 
+### setReading 必帶 actid，否則 server 不記時數
+- HB-END body 沒帶 `actid` → server 收 `code:1 success` 但 **不會更新 /info/{cid} 閱讀時數欄位**
+- actid 來自 SCORM iframe 的 `<a onclick>` link：兩種變體
+  - `goToActivity('I_SCO_x_x')` (older / center)
+  - `launchActivity(this, 'I_SCO_x_x', 'null')` (newer / per-agency)
+- 排除 env-check `I_SCO_99999999_*`
+- **多 lesson 共用 SCORM 樹**（人權搜查客系列）→ 用 caption fuzzy 比對選對的 lesson
+- **整顆 tree 都是 `tree*` ID** 的 player（如 mohw 聯合國人權）→ 偏好深度更深的（`tree1_X_X` 比 `tree0_X` 真實，後者多半是「課程首頁/新手上路/課程資訊」導覽容器）
+
+### SCORM session 必須真的點到 lesson 才會 active
+- 抓到 actid 不夠，要**真實 click 那個 `<a>` 元素**讓 player 自己 launchActivity()
+- 沒 click → server 端 reading session 卡在 env-check → 心跳全部丟掉
+- 共用 helper: `pickBestActid()` + click-by-onclick-match in `extractTicket`
+
+### 多重視窗保護 → ELEARN_WINDOW_CONCURRENCY
+- elearn 有 `/mooc/warning.php`「禁止多重視窗瀏覽課程」server 端檢查
+- ≥3 個 hidden BrowserWindow 同時打 `/info/{cid}` → 上課去 → 後續會被 redirect 到 warning.php，sysbar 變空、找不到 togo
+- 全域 semaphore `ELEARN_WINDOW_CONCURRENCY = 2` 涵蓋：
+  - `extractTicket` (heartbeat 啟動)
+  - `enterLC` (測驗 / 問卷 / 心得)
+- HTTP 心跳階段不受此 slot 影響（仍 50 並行）
+
+### user-data SQLite 必須 chmod
+- `db.ts` 從 `resources/mixed.db` (packaged 唯讀) `copyFileSync` 到 user data → 繼承唯讀 → INSERT 炸 `attempt to write a readonly database`
+- 修法：複製後 `chmodSync(dbPath, 0o644)`
+
+### Per-course chain pipeline
+- 每門課 heartbeat 完成立刻 fire 自己的 exam→survey→reflection chain，不等其他課
+- `chainPromises` 收集所有 chain promise，pipeline 最後 `Promise.allSettled` 等全部完成
+- skipRead 課（已過閱讀）的 chain 在 pipeline 啟動時立即 fire
+
+### Detail-page poll 同步 server 真實閱讀時數
+- 每 2 分鐘 (`detailPollIntervalMs`) 抓 `/info/{cid}` 用 cheerio 解 `.majorstatus` 區塊
+- 取出 `閱讀時數 / 測驗 / 問卷 / 通過狀態`
+- 覆蓋 local card.readSec → UI 跟 server 一致
+
 ### 答題流程（三層優先順序）
 1. `learned_answers` 本地學習庫（最高優先）
 2. `resources/mixed.db` 題庫（98,569 題，dice similarity >= 0.6 命中）
@@ -102,13 +139,22 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 
 ## Release 流程
 
+**觸發時機（強制）**：每當一輪功能/修復告一段落、`package.json` 有 bump 版號的意圖，就必須走完下列 7 步。**只 bump 版號不打 tag = 未完成的 release**，等同沒做。
+
 1. 確認所有功能正常
 2. 更新 `package.json` 版本號
 3. commit + push
 4. 打 tag：`git tag v{版本號}`
 5. push tag：`git push --tags`
-6. GitHub Actions 自動 build → zip → 發布到 Release
-7. 確認 Release 頁面有 zip 檔
+6. GitHub Actions 自動 build → zip → 發布到 Release（workflow: `.github/workflows/release.yml`，trigger: `push tags v*`）
+7. 確認 Release 頁面有 zip 檔（`auto-elearn-{版本}-win-portable.zip`）
+
+**檢查清單（每次 release 前自查）**：
+- [ ] `package.json` `version` 與打算打的 tag 對齊（`v{version}`）
+- [ ] 所有 commit 已推到 `origin/main`
+- [ ] tag 已推（`git push --tags` 或 `git push origin v{version}`）
+- [ ] GitHub Actions 該 tag 的 run 為綠色
+- [ ] Release 頁面 zip 檔可下載且解壓出 `.exe`
 
 ### Release 格式
 

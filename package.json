@@ -1,6 +1,6 @@
 {
   "name": "auto-elearn",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "e 等公務園自動刷課 Windows 桌面應用",
   "main": "./out/main/index.js",
@@ -29,7 +29,9 @@
       {
         "from": "resources/",
         "to": "resources/",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
@@ -37,7 +39,9 @@
       "target": [
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -49,6 +53,7 @@
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^3.0.0",
     "better-sqlite3": "^11.5.0",
+    "cheerio": "^1.2.0",
     "fast-fuzzy": "^1.12.0",
     "p-limit": "^6.1.0",
     "undici": "^6.20.0",

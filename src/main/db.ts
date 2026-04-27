@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { existsSync, copyFileSync, mkdirSync } from "node:fs";
+import { existsSync, copyFileSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 
@@ -45,11 +45,28 @@ export function getDb(): Database.Database {
       : join(__dirname, "../../resources/mixed.db");
     if (existsSync(seed)) {
       copyFileSync(seed, dbPath);
+      // copyFileSync inherits the source's permission bits — packaged
+      // resources are commonly read-only, which makes every learned_answers
+      // INSERT throw "attempt to write a readonly database". Force the
+      // destination to user-writable so the runtime DB is actually mutable.
+      try {
+        chmodSync(dbPath, 0o644);
+      } catch {
+        /* non-fatal: chmod isn't strictly required if the seed was already writable */
+      }
       // eslint-disable-next-line no-console
       console.log(`[db] seeded from ${seed}`);
     } else {
       // eslint-disable-next-line no-console
       console.warn(`[db] seed not found at ${seed}; starting empty`);
+    }
+  } else {
+    // Existing DB might already be readonly from an earlier broken seed;
+    // self-heal so this version's writes work without manual intervention.
+    try {
+      chmodSync(dbPath, 0o644);
+    } catch {
+      /* non-fatal */
     }
   }
 

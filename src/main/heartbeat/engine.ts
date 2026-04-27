@@ -30,6 +30,15 @@ export interface HeartbeatOptions {
   onPoll?: (cid: string, data: PollData) => void;
   /** How often to call pollFn (ms). Default 30 000. */
   pollIntervalMs?: number;
+  /** Fetch /info/{cid} detail page (real reading time from server) for the
+   *  course. Called every detailPollIntervalMs to keep the local card in sync
+   *  with what's actually on the elearn page. */
+  detailPollFn?: (cid: string) => Promise<{ readSec: number | null } | null>;
+  /** Called when detailPollFn returns; lets caller update card.readSec from
+   *  the authoritative server number (not just local elapsed). */
+  onDetailPoll?: (cid: string, data: { readSec: number | null }) => void;
+  /** How often to fetch detail page (ms). Default 120 000 (2 min). */
+  detailPollIntervalMs?: number;
   /** Abort signal (checked between ticks). */
   signal?: { aborted: boolean };
 }
@@ -66,8 +75,19 @@ export async function runHeartbeatBatch(
 }
 
 async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions): Promise<void> {
-  const { cid } = t.course;
-  const ticket = await extractTicket(cid);
+  const { cid, caption } = t.course;
+  // Retry ticket extraction up to 3 times. The 多重視窗 guard on elearn
+  // sometimes shunts a course to warning.php even with the global semaphore;
+  // a short backoff lets the previous slot's window fully tear down before
+  // we try again. Pass caption so the actid picker can fuzzy-match against
+  // the SCORM tree's lesson text — courses sharing one player (e.g. 人權搜
+  // 查客 series) need this to grab THEIR lesson rather than a sibling's.
+  let ticket: Awaited<ReturnType<typeof extractTicket>> = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    ticket = await extractTicket(cid, 30_000, caption);
+    if (ticket) break;
+    if (attempt < 3) await sleep(5000 + Math.random() * 3000);
+  }
   if (!ticket) {
     opts.onProgress?.(cid, "error", { reason: "no_ticket" });
     return;
@@ -121,7 +141,9 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   let failures = 0;
   let serverConfirmed = false;
   let lastPollAt = Date.now();
+  let lastDetailPollAt = Date.now();
   const pollInterval = opts.pollIntervalMs ?? 30_000;
+  const detailPollInterval = opts.detailPollIntervalMs ?? 120_000;
 
   // CRITICAL: the server validates elapsed >= period before crediting reading time.
   // Sleep one full interval BEFORE the first heartbeat so the server sees the
@@ -136,6 +158,13 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     if (elapsedSec >= maxSec) break;
 
     try {
+      // bt anchors at the original setReading(start) timestamp; we keep it
+      // fixed (server-driven via response.timediff) so each end's
+      // elapsed = (server_now - bt) >= period and server credits the period.
+      // Re-issuing setReading(start) here (a previous attempt) would reset
+      // bt to "now", making every subsequent end fail the elapsed >= period
+      // check and crediting 0 seconds — server returns success but data
+      // never advances. Don't do that.
       const { ok, status, body, timediff } = await sendHeartbeat(
         session, ticket.pTicket, ticket.encCid, ticket.origin, opts.intervalMs, bt, ticket.actid,
       );
@@ -183,6 +212,19 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
         }
       } catch {
         // poll errors are non-fatal; continue heartbeat
+      }
+    }
+
+    // Detail-page poll — pulls authoritative 閱讀時數 (real server credit) so
+    // the local UI matches what the user sees on /info/{cid}. Slower cadence
+    // than the listing poll because each call is a full page fetch + parse.
+    if (opts.detailPollFn && Date.now() - lastDetailPollAt >= detailPollInterval) {
+      lastDetailPollAt = Date.now();
+      try {
+        const detail = await opts.detailPollFn(cid);
+        if (detail) opts.onDetailPoll?.(cid, detail);
+      } catch {
+        // non-fatal — local card just stays at last known value
       }
     }
 

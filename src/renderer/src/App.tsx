@@ -8,9 +8,11 @@ import type {
   CredentialsStatus,
   CredsPromptPayload,
   ResumePrompt,
+  SearchOptions,
   StealthState,
   ViewBounds,
 } from "@shared/ipc";
+import { AFFILIATED_SCHOOLS, MAIN_CATEGORIES } from "@shared/elearn-catalog";
 
 declare global {
   interface Window {
@@ -24,8 +26,9 @@ declare global {
       abort: () => void;
       backToSelect: () => void;
       refreshCourses: () => void;
-      searchCourses: (keyword: string) => Promise<CourseCandidate[]>;
+      searchCourses: (opts: SearchOptions | string) => Promise<CourseCandidate[]>;
       searchByCodes: (codes: string[]) => Promise<CourseCandidate[]>;
+      getCategoryChildren: (parentId: string) => Promise<Array<{ id: string; label: string }>>;
       startPipeline: (cids: string[]) => void;
       unenrollCourse: (cid: string) => Promise<{ ok: boolean; error?: string }>;
       getCredsStatus: () => Promise<CredentialsStatus>;
@@ -898,6 +901,11 @@ function AwaitingLogin({ state }: { state: AppState }) {
   );
 }
 
+// Mirrors HEARTBEAT_PARALLEL_MAX in src/main/index.ts. Surfaced in the footer
+// so users see "your N selected courses will run X in parallel, rest queued"
+// up-front instead of discovering the cap after starting.
+const HEARTBEAT_PARALLEL_MAX = 50;
+
 // ── Selecting ────────────────────────────────────────────────
 type SearchMode = "keyword" | "codes";
 
@@ -910,8 +918,41 @@ function Selecting({ state }: { state: AppState }) {
   const [hasSearched, setHasSearched] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toUnenroll, setToUnenroll] = useState<Set<string>>(new Set());
-  const [onlyAnyone, setOnlyAnyone] = useState(true);
-  const [hideEnrolled, setHideEnrolled] = useState(true);
+  // Defaults: show everything. Filters are opt-in. Enrolled rows already get
+  // a "已報名" badge inline so the user can see status at a glance — silently
+  // hiding them was the cause of the "search returns nothing" confusion.
+  const [onlyAnyone, setOnlyAnyone] = useState(false);
+  const [hideEnrolled, setHideEnrolled] = useState(false);
+  // Site-style filter dropdowns (mirror elearn front-page widget)
+  const [mainCategoryId, setMainCategoryId] = useState("");
+  const [subCategoryId, setSubCategoryId] = useState("");
+  const [subCategoryOptions, setSubCategoryOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [fromSchoolId, setFromSchoolId] = useState("");
+  const [hoursMin, setHoursMin] = useState("");
+  const [hoursMax, setHoursMax] = useState("");
+
+  // Cascade: when 主類別 changes, fetch its 次類別 list and clear the current
+  // 次類別 selection. Empty 主類別 = "all" → clear sub options too.
+  useEffect(() => {
+    if (!mainCategoryId) {
+      setSubCategoryOptions([]);
+      setSubCategoryId("");
+      return;
+    }
+    setSubCategoryId("");
+    let cancelled = false;
+    window.api
+      .getCategoryChildren(mainCategoryId)
+      .then((opts) => {
+        if (!cancelled) setSubCategoryOptions(opts);
+      })
+      .catch(() => {
+        if (!cancelled) setSubCategoryOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mainCategoryId]);
   // Batch-apply progress UI
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -993,7 +1034,16 @@ function Selecting({ state }: { state: AppState }) {
           setResults(res);
         }
       } else {
-        const res = await window.api.searchCourses(keyword.trim());
+        const minH = hoursMin.trim() === "" ? undefined : Number(hoursMin);
+        const maxH = hoursMax.trim() === "" ? undefined : Number(hoursMax);
+        const res = await window.api.searchCourses({
+          keyword: keyword.trim(),
+          mainCategoryId: mainCategoryId || undefined,
+          subCategoryId: subCategoryId || undefined,
+          fromSchoolId: fromSchoolId || undefined,
+          hoursMin: Number.isFinite(minH as number) ? (minH as number) : undefined,
+          hoursMax: Number.isFinite(maxH as number) ? (maxH as number) : undefined,
+        });
         setResults(res);
       }
     } finally {
@@ -1204,6 +1254,69 @@ function Selecting({ state }: { state: AppState }) {
             支援逗號、空白、破折號範圍（如：540, 541-546）
           </div>
         )}
+        {mode === "keyword" && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2 text-xs">
+            <select
+              className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
+              value={mainCategoryId}
+              onChange={(e) => setMainCategoryId(e.target.value)}
+              title="主類別"
+            >
+              <option value="">全部主類別</option>
+              {MAIN_CATEGORIES.map((c) => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+            <select
+              className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-50"
+              value={subCategoryId}
+              onChange={(e) => setSubCategoryId(e.target.value)}
+              disabled={!mainCategoryId || subCategoryOptions.length === 0}
+              title="次類別"
+            >
+              <option value="">全部次類別</option>
+              {subCategoryOptions.map((c) => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+            <select
+              className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
+              value={fromSchoolId}
+              onChange={(e) => setFromSchoolId(e.target.value)}
+              title="加盟專區"
+            >
+              <option value="">所有加盟專區</option>
+              {AFFILIATED_SCHOOLS.map((s) => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                step="0.5"
+                min="0"
+                max="999"
+                className="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
+                placeholder="最少 hr"
+                value={hoursMin}
+                onChange={(e) => setHoursMin(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && doSearch()}
+              />
+              <span className="text-slate-400">~</span>
+              <input
+                type="number"
+                step="0.5"
+                min="0"
+                max="999"
+                className="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
+                placeholder="最多 hr"
+                value={hoursMax}
+                onChange={(e) => setHoursMax(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && doSearch()}
+              />
+            </div>
+          </div>
+        )}
         <div className="flex items-center gap-4 text-xs text-slate-300 mb-2">
           <label className="flex items-center gap-1 cursor-pointer">
             <input
@@ -1245,6 +1358,32 @@ function Selecting({ state }: { state: AppState }) {
               : " 換個關鍵字試試。"}
           </p>
         )}
+        {results.length > 0 && visibleResults.length === 0 && !searching && (
+          <div className="text-amber-300 text-sm flex items-center gap-3 flex-wrap">
+            <span>
+              搜到 {results.length} 筆，但全部被「{[
+                hideEnrolled ? "隱藏已報名" : null,
+                onlyAnyone ? "只顯示任何人可報名" : null,
+              ]
+                .filter(Boolean)
+                .join("」+「")}」過濾掉了。
+            </span>
+            <button
+              className="px-2 py-0.5 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-100"
+              onClick={() => {
+                setHideEnrolled(false);
+                setOnlyAnyone(false);
+              }}
+            >
+              關閉所有過濾，顯示全部 {results.length} 筆
+            </button>
+          </div>
+        )}
+        {results.length > 0 && visibleResults.length > 0 && visibleResults.length < results.length && !searching && (
+          <p className="text-xs text-slate-400">
+            可見 {visibleResults.length} / 共 {results.length} 筆（{results.length - visibleResults.length} 筆被前端篩選隱藏）
+          </p>
+        )}
         <div className="space-y-1 max-h-72 overflow-auto bg-slate-900/40 rounded p-2">
           {visibleResults.map((r) => (
             <CourseRow
@@ -1278,6 +1417,13 @@ function Selecting({ state }: { state: AppState }) {
             {" "}· 共{" "}
             <span className="font-bold text-emerald-400">{selectedTotalHours.toFixed(1)}</span>{" "}
             小時
+            {" "}· 並行{" "}
+            <span className="font-bold text-emerald-400">{Math.min(selected.size, HEARTBEAT_PARALLEL_MAX)}</span>
+            {selected.size > HEARTBEAT_PARALLEL_MAX && (
+              <span className="text-amber-400">
+                {" "}（已達上限 {HEARTBEAT_PARALLEL_MAX}，超出的會排隊輪流跑）
+              </span>
+            )}
           </span>
           {toUnenroll.size > 0 && (
             <span className="text-rose-400">

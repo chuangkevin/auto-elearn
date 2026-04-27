@@ -62,7 +62,7 @@ export async function writeReflection(
   const result: ReflectionResult = { ok: false, source, text };
 
   try {
-    const lcOk = await enterLC(win, cid);
+    const lcOk = await enterLC(win, cid, log);
     if (!lcOk) {
       result.error = "無法進入學習中心";
       return result;
