@@ -504,37 +504,22 @@ async function runOneAttempt(
     }
   }
 
-  // Learn from the result page — this is the key correction loop. If
-  // elearn shows correct answers post-submission we save them to
-  // learned_answers (writable, higher priority than read-only mixed.db),
-  // so the NEXT attempt picks the corrected answer.
-  //
-  // Validation: extractResultAnswers cross-checks each candidate against
-  // the questions we just asked + their options, so a permissive page
-  // parser hitting unrelated "正確" decoration text doesn't pollute
-  // learned_answers.
-  let learned = 0;
-  let learnedFromResult: ResultEntry[] = [];
+  // The result-page parser was the source of repeated learned_answers
+  // pollution: even with cross-validation it kept picking the user's
+  // submitted answer (or unrelated decoration text) as the "正解",
+  // overwriting correct history-solve entries on cid 10046346.
+  // Since elearn's view_result.php only reliably shows the user's
+  // submission + score (the actual correct answer is gated behind
+  // "公布答案" which locks retests), there's no upstream truth to
+  // extract — the parser was guessing. Removed entirely. The first
+  // result-page HTML is still dumped once per process so future debug
+  // sessions have the artefact, but nothing is saved to DB or fed back
+  // into bfStates.
   if (score !== null) {
-    // Always dump the first result page once per process so we can verify
-    // the parser format off-line — independent of whether parsing
-    // succeeded. (Earlier code only dumped on parse failure, which never
-    // fired when the parser was over-matching garbage.)
     await dumpResultHtml(win, cid);
-
-    learnedFromResult = await extractResultAnswers(win, questions);
-    for (const { question, correct } of learnedFromResult) {
-      saveLearnedAnswer({ question, answer: correct, source: "result-page", confidence: 1.0, courseId: cid });
-    }
-    learned = learnedFromResult.length;
-    if (learned > 0) {
-      onProgress(`[${label}] 從成績頁學到 ${learned} 題正解（已驗證對應題目+選項）`);
-    } else if (score < opts.passingScore) {
-      onProgress(`[${label}] 成績頁無可信正解；繼續暴力搜索`);
-    }
   }
 
-  return { score, questions, learned, learnedFromResult, picksByIdx };
+  return { score, questions, learned: 0, learnedFromResult: [], picksByIdx };
 }
 
 // ─── Exam loop (retry until 100 or max attempts) ──────────────

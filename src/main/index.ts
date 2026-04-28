@@ -594,8 +594,12 @@ async function refreshCourses(): Promise<void> {
       `掃描完成：你目前真正的課程 ${real} 門（進行中未完成 ${inProgress}）` +
         `；機關推薦但你沒點過的 ${phantom} 門已略過`,
     );
-    // Diagnostic: print per-course server flags + detail-page snapshot
+    // Diagnostic: print per-course server flags + detail-page snapshot.
+    // The UI log only shows in-progress / not-yet-passed rows (otherwise
+    // 47 已通過 lines drown out anything useful). The full diag still
+    // gets written to temp/auto-elearn-diag.txt for offline forensics.
     const diagLines: string[] = [`=== 課程狀態診斷 ${new Date().toISOString()} ===`];
+    let donePassed = 0;
     for (const t of tracked.filter((t) => t.course.isReadtimeValidCaption !== "未報名")) {
       const r = t.course.isReadDones ?? 0;
       const e = t.course.isExamDones ?? 0;
@@ -606,9 +610,14 @@ async function refreshCourses(): Promise<void> {
         ? ` | detail: read=${t.detail.readSec ?? "?"}s exam=${t.detail.examScore ?? "?"} survey=${t.detail.surveyDone === true ? "已填" : t.detail.surveyDone === false ? "未填" : "?"} pass=${t.detail.passed === true ? "通過" : t.detail.passed === false ? "未通過" : "--"}`
         : " | detail: (none)";
       const line = `📋 [list 閱:${r} 測:${e} 問:${s} cap:${cap} p:${pp}% → phase:${t.phase}]${d} ${t.course.caption}`;
-      log("info", `  ${line}`);
       diagLines.push(line);
+      if (cap === "已通過") {
+        donePassed++;
+        continue;
+      }
+      log("info", `  ${line}`);
     }
+    if (donePassed > 0) log("info", `  ✓ 已通過 ${donePassed} 門（不在日誌列出，完整紀錄寫到 temp/auto-elearn-diag.txt）`);
     try {
       writeFileSync(join(app.getPath("temp"), "auto-elearn-diag.txt"), diagLines.join("\n"), "utf8");
     } catch { /* non-fatal */ }
@@ -914,6 +923,22 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       // the user explicitly wants 80 as the safe minimum across the board.
       // Use whichever is HIGHER between the page-declared threshold and 80.
       if (!passed && !abortSignal.aborted) {
+        // History-based pre-solve: if the course already has past attempt
+        // records on /learn/exam/view_result.php, mathematically derive the
+        // answer key BEFORE submitting any new exam attempt. learned_answers
+        // gets populated with the locked Qs, so the very first attempt
+        // typically scores 80–100. Cheap (~5–25s for fetches) and zero
+        // exam attempts consumed. Skips silently when there's no eid
+        // (course has never been attempted).
+        try {
+          const { solveExamFromHistory } = await import("./exam/history-solver");
+          const r = await solveExamFromHistory(session, cid, (msg) => log("info", `  [${name}] ${msg}`));
+          if (r.ok) log("info", `📚 [${name}] 從歷次紀錄學到 ${r.learned} 題（已存 learned_answers）`);
+          else log("info", `  [${name}] 跳過 history-solve：${r.reason ?? "n/a"}`);
+        } catch (e) {
+          log("warn", `  [${name}] history-solve 例外：${(e as Error)?.message ?? e}`);
+        }
+
         const declared = fresh?.passingScore ?? 60;
         const threshold = Math.max(declared, 80);
         log("info", `開始測驗：${name}（門檻 ${threshold} 分${declared !== threshold ? `；課程要求 ${declared} 但全域下限 80` : ""}）`);
