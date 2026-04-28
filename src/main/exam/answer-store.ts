@@ -72,8 +72,12 @@ export function normalizeQuestion(s: string): string {
     .replace(/　/g, "") // 全形空格
     .replace(/[?？]/g, "")
     .replace(/[，]/g, "")
-    // strip "配分：[10.00]" / "配分:[75]" from the head (full-width or ascii colon)
-    .replace(/^配分[:：]?\[\d+(?:\.\d+)?\]/, "")
+    // strip elearn's question-row chrome: optional "單選/複選/多選" qualifier
+    // followed by "配分：[10.00]" / "配分:[75]" (full-width or ascii colon).
+    // Real exam pages render "單選配分：[10.00]"; view_result.php renders
+    // just "配分：[10.00]" — the optional [單複多選]{0,4} prefix covers
+    // every variant we've seen.
+    .replace(/^[單複多選]{0,4}配分[:：]?\[\d+(?:\.\d+)?\]/, "")
     // strip leading question numbering: "1." / "12." / "Q3." / "第3題"
     .replace(/^[第Q]?\d{1,3}[.、題)]?/, "")
     .trim();
