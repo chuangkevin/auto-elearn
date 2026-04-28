@@ -144,6 +144,19 @@ export interface SaveAnswerOpts {
   confidence?: number;
 }
 
+/** Wipe all entries from a specific source+course pair. Used by
+ *  history-solve to clear last run's tentative guesses before saving the
+ *  new (more confident) consensus picks. */
+export function clearLearnedFromSourceForCourse(source: string, courseId: string): void {
+  try {
+    getDb()
+      .prepare(`DELETE FROM learned_answers WHERE source = ? AND course_id = ?`)
+      .run(source, courseId);
+  } catch {
+    /* non-fatal */
+  }
+}
+
 /** Persist a newly learned Q&A pair to the writable DB. */
 export function saveLearnedAnswer(opts: SaveAnswerOpts): void {
   try {

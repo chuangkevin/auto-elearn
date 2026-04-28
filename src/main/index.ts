@@ -327,6 +327,62 @@ function createWindow() {
       await dismissNuisancePopups(elearnView!.webContents);
       await refreshCourses();
 
+      // Optional one-shot debug scraper (LC frame walker, slower).
+      const scrapeCid = process.env.AUTO_ELEARN_SCRAPE_CID;
+      if (scrapeCid && elearnView) {
+        log("info", `🔬 偵測歷次紀錄 (cid=${scrapeCid})；不會送出任何測驗`);
+        const { scrapeHistory } = await import("./debug/history-scraper");
+        scrapeHistory(elearnView.webContents.session, scrapeCid, (m) => log("info", m))
+          .then(() => log("info", "🔬 偵測完畢"))
+          .catch((e) => log("warn", `🔬 失敗: ${e?.message ?? e}`));
+      }
+
+      // Recover correct-answer keys from past view_result.php pages without
+      // submitting any new attempts. Trigger via env var:
+      //   $env:AUTO_ELEARN_SOLVE_HISTORY_CID="10046346"  → single course
+      //   $env:AUTO_ELEARN_SOLVE_HISTORY_CID="ALL"       → every course with
+      //     past attempts (filter: state.courses where caption == "尚未通過"
+      //     OR phase ∉ {pending, done}). Sequential to avoid /mooc/warning.php.
+      const solveCid = process.env.AUTO_ELEARN_SOLVE_HISTORY_CID;
+      if (solveCid && elearnView) {
+        const { solveExamFromHistory } = await import("./exam/history-solver");
+        const session = elearnView.webContents.session;
+        const runFor = async (targetCid: string, idx: number, total: number): Promise<void> => {
+          log("info", `🧮 [${idx}/${total}] 從歷次紀錄反推正解 (cid=${targetCid})`);
+          try {
+            const r = await solveExamFromHistory(session, targetCid, (m) => log("info", m));
+            if (r.ok) log("info", `🧮 [${idx}/${total}] 完成：寫入 ${r.learned} 題`);
+            else log("warn", `🧮 [${idx}/${total}] 失敗：${r.reason ?? "unknown"}`);
+          } catch (e) {
+            log("warn", `🧮 [${idx}/${total}] 例外：${(e as Error)?.message ?? e}`);
+          }
+        };
+        if (solveCid.toUpperCase() === "ALL") {
+          // Pick courses likely to have submitted attempts: caption "尚未通過"
+          // / "已通過" both indicate the user has interacted; "未報名" /
+          // "未開課" are skipped. We process them sequentially so the
+          // hidden BrowserWindow churn never breaches the elearn 多重視窗
+          // protection.
+          // Skip pending (not enrolled) and done (already passed) — neither
+          // has past-attempt data worth solving from. Anything in
+          // {enrolled, reading, exam, survey, verifying} is fair game.
+          const targets = state.courses
+            .filter((c) => c.phase !== "pending" && c.phase !== "done")
+            .map((c) => c.cid);
+          log("info", `🧮 ALL 模式：將處理 ${targets.length} 門課`);
+          (async () => {
+            let i = 0;
+            for (const tcid of targets) {
+              i++;
+              await runFor(tcid, i, targets.length);
+            }
+            log("info", `🧮 ALL 全部完成`);
+          })();
+        } else {
+          runFor(solveCid, 1, 1);
+        }
+      }
+
       // If we sniffed creds during this login session AND they aren't yet saved,
       // ask the user whether to remember them.
       if (pendingSniffed && !hasSavedCredentials()) {
