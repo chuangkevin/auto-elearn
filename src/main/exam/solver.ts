@@ -218,12 +218,15 @@ interface ResultEntry {
 
 let dumpedResultOnce = false;
 
-async function extractResultAnswers(win: BrowserWindow): Promise<ResultEntry[]> {
+async function extractResultAnswers(
+  win: BrowserWindow,
+  askedQuestions: ExtractedQuestion[],
+): Promise<ResultEntry[]> {
   // Give the result page a moment to fully render (some courses do an extra
   // AJAX call to fetch correct answers after the score appears).
   await wait(800);
 
-  const out = await execJs<ResultEntry[]>(
+  const raw = await execJs<ResultEntry[]>(
     win,
     `(() => {
       const norm = (s) => (s || '').replace(/\\s+/g,' ').trim();
@@ -235,21 +238,16 @@ async function extractResultAnswers(win: BrowserWindow): Promise<ResultEntry[]> 
       for (const row of allRows) {
         const rowText = norm(row.textContent || '');
         if (!rowText || rowText.length > 600) continue;
-        // Must mention 正確/正解 to qualify
         if (!/正(確|解)\\s*答?案?/.test(rowText)) continue;
 
-        // Extract correct-answer payload
         const m = rowText.match(/正(?:確|解)\\s*答?案?\\s*[：:＝=]?\\s*([^。\\n]{1,200}?)(?=您的答案|你的答案|您選|答對|答錯|$)/);
         if (!m) continue;
         const correct = stripPrefix(m[1]);
         if (!correct) continue;
 
-        // Question text = row text minus everything from "正確" onward
         const beforeIdx = rowText.search(/正(確|解)\\s*答?案?/);
         let qPart = rowText.slice(0, beforeIdx);
-        // also strip "您的答案" portions if present
         qPart = qPart.replace(/您的答案[^。]*/g, '').replace(/你的答案[^。]*/g, '');
-        // Strip leading question numbering like "1." / "Q1." / "第1題"
         qPart = qPart.replace(/^[第Q]?\\s*\\d+\\s*[.、題)]?\\s*/, '').trim();
         if (qPart.length < 4) continue;
         out.push({ question: qPart.slice(0, 250), correct: correct.slice(0, 250) });
@@ -257,14 +255,12 @@ async function extractResultAnswers(win: BrowserWindow): Promise<ResultEntry[]> 
       if (out.length > 0) return out;
 
       // Strategy B: option list with a class flag indicating correctness
-      // (e.g. <li class="correct">, <span class="rightAns">, etc.)
       const flagged = Array.from(
         document.querySelectorAll('[class*="correct"],[class*="right"],[class*="answer-ok"],[class*="ans-ok"]')
       );
       for (const el of flagged) {
         const optText = stripPrefix(el.textContent || '');
         if (!optText) continue;
-        // Find the enclosing question row
         const row = el.closest('tr,li.q,div.q,div.question,div[class*="quiz"]') || el.parentElement;
         if (!row) continue;
         const clone = row.cloneNode(true);
@@ -276,7 +272,89 @@ async function extractResultAnswers(win: BrowserWindow): Promise<ResultEntry[]> 
       return out;
     })()`,
   );
-  return out ?? [];
+  if (!raw || raw.length === 0) return [];
+
+  // Validation pass — the page-side parser is permissive (any "正確" hit
+  // counts), which means it can lock onto unrelated decoration text and
+  // pollute learned_answers with garbage. Each candidate is only kept if
+  // both (a) the extracted question text fuzzy-matches one of the actual
+  // questions we just asked, AND (b) the extracted "correct" text matches
+  // one of that question's options.
+  const valid: ResultEntry[] = [];
+  for (const cand of raw) {
+    const candQNorm = candNormForMatch(cand.question);
+    if (!candQNorm) continue;
+
+    let bestMatch: { q: ExtractedQuestion; sim: number } | null = null;
+    for (const q of askedQuestions) {
+      const qn = candNormForMatch(q.text);
+      const sim = candDice(qn, candQNorm);
+      if (!bestMatch || sim > bestMatch.sim) bestMatch = { q, sim };
+    }
+    if (!bestMatch || bestMatch.sim < 0.55) continue;
+
+    // Confirm the extracted "correct" is actually one of this question's options
+    const matched = matchOptionText(cand.correct, bestMatch.q.options);
+    if (matched === null) continue;
+
+    valid.push({ question: bestMatch.q.text, correct: bestMatch.q.options[matched] });
+  }
+  return valid;
+}
+
+function candNormForMatch(s: string): string {
+  return (s || "")
+    .replace(/[\s　]+/g, "")
+    .replace(/[?？，,。.：:！!（）()\[\]【】《》「」『』]/g, "")
+    .replace(/^單選配分.*?\d+\.\s*/, "") // strip "單選配分：[10.00] 1." form-metadata prefix
+    .toLowerCase();
+}
+
+function candDice(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const grams = (s: string) => {
+    const m = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i++) {
+      const g = s.slice(i, i + 2);
+      m.set(g, (m.get(g) ?? 0) + 1);
+    }
+    return m;
+  };
+  const A = grams(a);
+  const B = grams(b);
+  let overlap = 0;
+  for (const [g, cA] of A) {
+    const cB = B.get(g);
+    if (cB) overlap += Math.min(cA, cB);
+  }
+  const sa = Array.from(A.values()).reduce((x, y) => x + y, 0);
+  const sb = Array.from(B.values()).reduce((x, y) => x + y, 0);
+  if (sa + sb === 0) return 0;
+  return (2 * overlap) / (sa + sb);
+}
+
+function matchOptionText(target: string, options: string[]): number | null {
+  const norm = (s: string) => candNormForMatch(s);
+  const t = norm(target);
+  if (!t) return null;
+  for (let i = 0; i < options.length; i++) {
+    if (norm(options[i]) === t) return i;
+  }
+  for (let i = 0; i < options.length; i++) {
+    const o = norm(options[i]);
+    if (o.includes(t) || t.includes(o)) return i;
+  }
+  let best = -1;
+  let bestSim = 0;
+  for (let i = 0; i < options.length; i++) {
+    const sim = candDice(norm(options[i]), t);
+    if (sim > bestSim) {
+      best = i;
+      bestSim = sim;
+    }
+  }
+  return bestSim >= 0.7 ? best : null;
 }
 
 async function dumpResultHtml(win: BrowserWindow, cid: string): Promise<void> {
@@ -426,18 +504,28 @@ async function runOneAttempt(
   // elearn shows correct answers post-submission we save them to
   // learned_answers (writable, higher priority than read-only mixed.db),
   // so the NEXT attempt picks the corrected answer.
+  //
+  // Validation: extractResultAnswers cross-checks each candidate against
+  // the questions we just asked + their options, so a permissive page
+  // parser hitting unrelated "正確" decoration text doesn't pollute
+  // learned_answers.
   let learned = 0;
   if (score !== null) {
-    const correctAnswers = await extractResultAnswers(win);
+    // Always dump the first result page once per process so we can verify
+    // the parser format off-line — independent of whether parsing
+    // succeeded. (Earlier code only dumped on parse failure, which never
+    // fired when the parser was over-matching garbage.)
+    await dumpResultHtml(win, cid);
+
+    const correctAnswers = await extractResultAnswers(win, questions);
     for (const { question, correct } of correctAnswers) {
       saveLearnedAnswer({ question, answer: correct, source: "result-page", confidence: 1.0, courseId: cid });
     }
     learned = correctAnswers.length;
     if (learned > 0) {
-      onProgress(`[${label}] 從成績頁學到 ${learned} 題正解，下一輪會改答`);
+      onProgress(`[${label}] 從成績頁學到 ${learned} 題正解（已驗證對應題目+選項）`);
     } else if (score < opts.passingScore) {
-      onProgress(`[${label}] 成績頁無正解資訊；HTML 已 dump 到 temp 供分析`);
-      await dumpResultHtml(win, cid);
+      onProgress(`[${label}] 成績頁無可信正解；繼續暴力搜索`);
     }
   }
 
@@ -597,17 +685,6 @@ async function runExamLoop(
 
     // Initialize / update brute-force state from this attempt's results.
     if (score !== null) {
-      // If we just learned new correct answers from the result page, blow
-      // away brute-force state so the next attempt re-runs through
-      // findBestAnswer (which now sees the freshly-saved learned_answers
-      // entries). bfStates will re-seed from that better baseline below.
-      if (learned > 0 && bfStates) {
-        onProgress(`[${label}] 結果頁有教正解，重置暴力狀態讓下輪 learned_answers 接手`);
-        bfStates = null;
-        bfQueue = [];
-        bfQueueIdx = 0;
-      }
-
       if (!bfStates) {
         // First scoring attempt — seed state from each question's pick.
         bfStates = new Map();
