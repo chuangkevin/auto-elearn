@@ -52,9 +52,18 @@ function openDb(): Database.Database {
 }
 
 /**
- * Normalize question text so we can match through whitespace / punctuation variance.
- * Matches the normalization the original decompile uses:
- *   strip spaces, ideographic space, Q-marks, full-width comma.
+ * Normalize question text so we can match through whitespace / punctuation
+ * AND elearn-injected chrome (per-question 配分 prefix, leading numbering).
+ *
+ * Why both: extractQuestions on the exam page reads a row that contains
+ * `<td>配分：[10.00]</td><td>1. <p>下列...</p></td>` so its textContent is
+ *   "配分：[10.00] 1. 下列..."
+ * but extractResultAnswers / history-solver's parser only takes the third
+ * `<td>` so it stores
+ *   "1. 下列..."
+ * Without stripping these prefixes here, save/lookup keys diverge and
+ * learned_answers entries written by history-solve are silently invisible
+ * at exam time.
  */
 export function normalizeQuestion(s: string): string {
   if (!s) return "";
@@ -63,8 +72,10 @@ export function normalizeQuestion(s: string): string {
     .replace(/　/g, "") // 全形空格
     .replace(/[?？]/g, "")
     .replace(/[，]/g, "")
-    // the DB itself was normalized the same way by the LIKE clause in the original tool,
-    // so mirror it here to maximize hit rate
+    // strip "配分：[10.00]" / "配分:[75]" from the head (full-width or ascii colon)
+    .replace(/^配分[:：]?\[\d+(?:\.\d+)?\]/, "")
+    // strip leading question numbering: "1." / "12." / "Q3." / "第3題"
+    .replace(/^[第Q]?\d{1,3}[.、題)]?/, "")
     .trim();
 }
 

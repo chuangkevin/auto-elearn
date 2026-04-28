@@ -787,19 +787,21 @@ async function runExamLoop(
       break;
     }
 
-    // Brute-force budget guard: once every Q in the queue has had every
-    // option tested (or terminated early), there is nothing more for the
-    // probe to learn from. Quitting saves the remaining MAX_EXAM_ATTEMPTS
-    // budget instead of re-running the same locked combo over and over.
+    // Brute-force budget guard: once we've walked through every Q in the
+    // queue (each Q either found a better option via ↑, was confirmed
+    // correct via ↓ early-exit, or exhausted its options via repeated =),
+    // there is nothing more to probe — keeping the loop alive only burns
+    // exam attempts that submit the same locked combo over and over.
+    //
+    // EARLIER BUG: the guard required `totalUntested === 0`, but the ↓
+    // branch advances the queue WITHOUT testing every option (since
+    // baseline was right, the other 2-3 alternates aren't worth probing).
+    // That left totalUntested > 0 forever and the loop would spin
+    // submitting the same answers indefinitely — exactly the symptom the
+    // user just hit on cid 10046346 attempts #14-#24.
     if (bfStates && bfQueueIdx >= bfQueue.length) {
-      const totalUntested = Array.from(bfStates.values()).reduce(
-        (sum, st) => sum + (st.options.length - st.tested.size),
-        0,
-      );
-      if (totalUntested === 0) {
-        onProgress(`[${label}] 暴力搜索結束：${best ?? 0} 分（已試完每題每選項）`);
-        break;
-      }
+      onProgress(`[${label}] 暴力搜索結束：${best ?? 0} 分（已走完佇列）`);
+      break;
     }
 
     // Decide retry strategy for next round:
