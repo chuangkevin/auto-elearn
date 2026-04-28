@@ -288,6 +288,7 @@ async function runExamLoop(
   label: string,
   bySource: Record<AnswerSource, number>,
   onProgress: (msg: string) => void,
+  passingScore = 60,
 ): Promise<number | null> {
   let best: number | null = null;
 
@@ -298,7 +299,7 @@ async function runExamLoop(
   // through the full MAX_EXAM_ATTEMPTS budget unless we already passed.
   let consecutiveSetupFailures = 0;
   for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
-    if (best !== null && best >= 60) break; // good enough to pass
+    if (best !== null && best >= passingScore) break; // good enough to pass
 
     const ok = await enterLC(win, cid, onProgress);
     if (!ok) {
@@ -360,7 +361,14 @@ async function runExamLoop(
 export async function solveExam(
   cid: string,
   session: Session,
-  opts: { onProgress?: (msg: string) => void; timeoutMs?: number } = {},
+  opts: {
+    onProgress?: (msg: string) => void;
+    timeoutMs?: number;
+    /** Per-course passing threshold (parsed from /info 課程須知). Solver
+     *  stops retrying once a score >= passingScore is achieved. Default 60
+     *  is the lowest elearn tier; 公務人員10小時 is 75 and a few are 80. */
+    passingScore?: number;
+  } = {},
 ): Promise<SolveResult> {
   const onProgress = opts.onProgress ?? (() => void 0);
   const result: SolveResult = {
@@ -405,9 +413,11 @@ export async function solveExam(
       return result;
     }
 
+    const passingScore = opts.passingScore ?? 60;
+
     // ── Main exam ──
     if (hasMainExam) {
-      onProgress("=== 測驗 ===");
+      onProgress(`=== 測驗（通過門檻：${passingScore} 分）===`);
       const score = await runExamLoop(
         win,
         cid,
@@ -415,16 +425,17 @@ export async function solveExam(
         "測驗",
         result.bySource,
         onProgress,
+        passingScore,
       );
       result.score = score ?? undefined;
       result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random;
-      result.passed = (score ?? 0) >= 60;
+      result.passed = (score ?? 0) >= passingScore;
       result.ok = true;
     }
 
     // ── Reading exam (閱讀測驗) ──
     if (hasReadExam) {
-      onProgress("=== 閱讀測驗 ===");
+      onProgress(`=== 閱讀測驗（通過門檻：${passingScore} 分）===`);
       const rScore = await runExamLoop(
         win,
         cid,
@@ -432,12 +443,13 @@ export async function solveExam(
         "閱讀測驗",
         result.bySource,
         onProgress,
+        passingScore,
       );
       result.readExamScore = rScore ?? undefined;
       if (!hasMainExam) {
         result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random;
         result.score = rScore ?? undefined;
-        result.passed = (rScore ?? 0) >= 60;
+        result.passed = (rScore ?? 0) >= passingScore;
         result.ok = true;
       }
     }

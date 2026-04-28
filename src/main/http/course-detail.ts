@@ -16,6 +16,10 @@ export interface CourseDetail {
   surveyDone: boolean | null;
   /** true if 通過狀態 = 通過; false for explicit 未通過; null for "--" / blank. */
   passed: boolean | null;
+  /** Passing score required by THIS course — parsed from 課程須知
+   *  ("課程測驗：60分(含)以上" / "75分(含)以上" / "80 分"). Falls back to
+   *  60 if the page omits it. Used by solver to know when to stop retrying. */
+  passingScore: number;
   /** raw label-value pairs (debug/forensic). */
   raw: Record<string, string>;
 }
@@ -123,11 +127,25 @@ export async function fetchCourseDetail(
   const $ = cheerio.load(res.text);
   const raw = extractStatusPairs($);
 
+  // 課程須知 area lists the passing requirements like:
+  //   <li><span>課程測驗：60分(含)以上</span></li>
+  //   <li><span>課程測驗：75分(含)以上</span></li>
+  //   <li><span>課程測驗：80分以上</span></li>
+  // Default to 60 if the page omits it (matches elearn's lowest tier).
+  let passingScore = 60;
+  const bodyText = $.text();
+  const m = bodyText.match(/課程測驗\s*[:：]\s*(\d{1,3})\s*分/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 100) passingScore = n;
+  }
+
   const detail: CourseDetail = {
     readSec: raw["閱讀時數"] ? parseHmsToSec(raw["閱讀時數"]) : null,
     examScore: raw["測驗"] !== undefined ? parseExamScore(raw["測驗"]) : null,
     surveyDone: raw["問卷"] !== undefined ? parseSurveyDone(raw["問卷"]) : null,
     passed: raw["通過狀態"] !== undefined ? parsePassed(raw["通過狀態"]) : null,
+    passingScore,
     raw,
   };
   // If absolutely nothing matched, treat as parse failure so caller can fall

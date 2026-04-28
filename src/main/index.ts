@@ -850,9 +850,10 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       //    silently ignored courses showing "測驗 0 分" (= attempted, failed,
       //    needs retake to pass).
       if (!passed && !abortSignal.aborted) {
-        log("info", `開始測驗：${name}`);
+        log("info", `開始測驗：${name}（門檻 ${fresh?.passingScore ?? 60} 分）`);
         const res = await solveExam(cid, session, {
           onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+          passingScore: fresh?.passingScore ?? 60,
         });
         if (res.ok) {
           const scoreStr = res.score != null ? `${res.score}分` : "?";
@@ -907,12 +908,28 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         }
       }
 
-      // Mark the card as done so stats / UI reflect course completion the
-      // moment its chain wraps up, not at the very end of the whole batch.
-      if (card) {
-        card.phase = "done";
-        updateStats();
-        pushState();
+      // Only mark phase=done when SERVER confirms 通過狀態 == 通過. That
+      // can lag behind our chain's last step by a few seconds while elearn
+      // finalises the credit. Poll detail up to 30 s before declaring done.
+      if (card && card.phase !== "done") {
+        for (let i = 0; i < 6; i++) {
+          if (abortSignal.aborted) break;
+          await new Promise((r) => setTimeout(r, 5000));
+          const final = await fetchCourseDetail(session, cid).catch(() => null);
+          if (final?.passed === true) {
+            card.phase = "done";
+            updateStats();
+            pushState();
+            log("info", `[${name}] ✅ server 已確認通過`);
+            break;
+          }
+        }
+        if (card.phase !== "done") {
+          log(
+            "info",
+            `[${name}] 心得已交但 server 通過狀態尚未刷新；不標記為完成。再等等 server 應會自動更新`,
+          );
+        }
       }
     } catch (e) {
       log("warn", `[${name}] chain 失敗：${e instanceof Error ? e.message : String(e)}`);
