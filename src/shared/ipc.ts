@@ -9,7 +9,7 @@ export type AppStatus =
   | "await_login"
   | "selecting"     // user browsing + ticking courses, before enrollment
   | "enrolling"    // POSTing /enploy/<cid> for each selected course
-  | "running"       // heartbeat / exam / survey / rating / reflection pipeline
+  | "running"       // heartbeat / exam / survey pipeline
   | "paused"
   | "done"
   | "aborted";
@@ -19,28 +19,29 @@ export type ActionKind =
   | "enroll"
   | "heartbeat"
   | "exam"
-  | "survey"
-  | "rating"
-  | "reflection";
+  | "survey";
 
 export interface CourseCard {
   cid: string;
   name: string;
+  /**
+   * "verifying" = all three phases are credited in the /info detail snapshot
+   * but server's 通過狀態 is still "--"; we're polling for the official flip.
+   * "done" = server has confirmed 通過. Only "done" should fire the celebratory
+   * UI; "verifying" keeps the spinner up so the UI doesn't lie.
+   */
   phase:
     | "pending"
     | "enrolled"
     | "reading"
     | "exam"
     | "survey"
-    | "rating"
-    | "reflection"
+    | "verifying"
     | "done";
   readSec: number;
   requiredSec: number;
   examDone: boolean;
   surveyDone: boolean;
-  ratingDone: boolean;
-  reflectionDone: boolean;
   lastPingAt?: number;
 }
 

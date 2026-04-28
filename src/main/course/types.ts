@@ -5,11 +5,10 @@ export type CoursePhase =
   | "pending"        // not enrolled yet
   | "enrolled"       // enrolled, reading not started
   | "reading"        // heartbeat in progress
-  | "reading_done"   // reading complete, exam/survey/rating pending
+  | "reading_done"   // reading complete, exam/survey pending
   | "exam"
   | "survey"
-  | "rating"
-  | "reflection"
+  | "verifying"      // all three phases credited; waiting for 通過狀態 flip
   | "done";
 
 export interface Tracked {
@@ -68,7 +67,9 @@ export function classify(c: Course, detail?: CourseDetail | null): CoursePhase {
     const examPresent = hasExam || detail.examScore !== null;
     if (examPresent && !examActuallyPassed) return "exam";
     if (!surveyDone) return "survey";
-    return "rating";
+    // All three phases credited in the snapshot, but officiallyPassed was
+    // false above — server hasn't flipped 通過狀態 yet, keep "verifying".
+    return "verifying";
   }
 
   // No detail snapshot — best-effort from listing only. Per CLAUDE.md,
@@ -80,7 +81,7 @@ export function classify(c: Course, detail?: CourseDetail | null): CoursePhase {
   if (!pastReading) return "reading";
   if (hasExam && !examDone) return "exam";
   if (!surveyDone) return "survey";
-  return "rating";
+  return "verifying";
 }
 
 export function requiredSecondsFor(c: Course): number {

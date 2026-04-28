@@ -67,7 +67,7 @@ function pickBestActid(
  * Global concurrency cap for ANY hidden BrowserWindow that hits elearn's
  * `/info/{cid}` → 上課去 → SCORM-frameset flow. Covers BOTH:
  *   • extractTicket (heartbeat startup)
- *   • enterLC      (exam / survey / reflection phases)
+ *   • enterLC      (exam / survey phases)
  *
  * elearn has a server-side "禁止多重視窗瀏覽" check — if too many hidden
  * windows hit the LC enter flow concurrently, later windows are redirected

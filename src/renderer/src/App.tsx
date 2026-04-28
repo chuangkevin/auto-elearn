@@ -970,8 +970,7 @@ function Selecting({ state }: { state: AppState }) {
     "reading",
     "exam",
     "survey",
-    "rating",
-    "reflection",
+    "verifying",
   ]);
   const pending = useMemo(
     () => state.courses.filter((c) => IN_PROGRESS_PHASES.has(c.phase)),
@@ -1672,10 +1671,8 @@ function phaseLabel(p: string): string {
       return "待測驗";
     case "survey":
       return "待問卷";
-    case "rating":
-      return "待評分";
-    case "reflection":
-      return "待心得";
+    case "verifying":
+      return "等待 server 確認通過";
     case "done":
       return "已完成";
     default:
@@ -1776,18 +1773,19 @@ function Monitor({ state }: { state: AppState }) {
         <div className="space-y-1 max-h-48 overflow-auto bg-slate-900/40 rounded p-2">
           {running.map((c) => {
             const pct = c.requiredSec > 0 ? Math.min(100, Math.round((c.readSec / c.requiredSec) * 100)) : 0;
-            // Per-course stepper mirroring elearn's "✓ 閱讀時數 / 2 測驗 / 3 問卷"
-            // strip. Lets the user see at a glance which phase each course is
-            // currently in, instead of just a single phase label that mixes
-            // "is this 5%-into-reading or 5%-into-finishing" together.
-            const readingDone = c.readSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
+            // Per-course stepper mirroring elearn's official strip:
+            //   "✓ 閱讀時數 / 2 測驗 / 3 問卷"
+            // Three steps only — no "心得", because elearn's flow doesn't have
+            // one. The course passes once 問卷 is filled; we add a separate
+            // "等待 server 確認通過" badge for the brief window between
+            // 問卷-submitted and 通過狀態-flipped.
+            const readingDone = c.readSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "verifying" || c.phase === "done";
             // ✓ only when server actually credits the phase (c.examDone =
             // detail.examScore >= passFloor; c.surveyDone = detail.surveyDone===true).
             // No phase-based fallback — phase can race ahead of /info poll and
             // user explicitly required UI must not lie.
             const examDoneFlag = c.examDone || c.phase === "done";
             const surveyDoneFlag = c.surveyDone || c.phase === "done";
-            const reflectionDoneFlag = c.reflectionDone || c.phase === "done";
             const stepActive = (done: boolean, isCurrent: boolean) =>
               done
                 ? "bg-emerald-600 text-white"
@@ -1800,9 +1798,8 @@ function Monitor({ state }: { state: AppState }) {
               ? "exam"
               : !surveyDoneFlag
               ? "survey"
-              : !reflectionDoneFlag
-              ? "reflection"
               : "done";
+            const verifying = c.phase === "verifying";
             return (
               <div
                 key={c.cid}
@@ -1823,7 +1820,7 @@ function Monitor({ state }: { state: AppState }) {
                     {pct}% · {Math.floor(c.readSec / 60)}/{Math.floor(c.requiredSec / 60)} 分
                   </span>
                 </div>
-                {/* Phase stepper: ✓ 閱讀 / ② 測驗 / ③ 問卷 / ④ 心得 */}
+                {/* Phase stepper: ✓ 閱讀 / ② 測驗 / ③ 問卷 (matches elearn) */}
                 <div className="flex items-center gap-1 mt-1 text-[10px]">
                   <span className={`px-1.5 py-0.5 rounded ${stepActive(readingDone, currentPhase === "reading")}`}>
                     {readingDone ? "✓" : "①"} 閱讀
@@ -1836,10 +1833,11 @@ function Monitor({ state }: { state: AppState }) {
                   <span className={`px-1.5 py-0.5 rounded ${stepActive(surveyDoneFlag, currentPhase === "survey")}`}>
                     {surveyDoneFlag ? "✓" : "③"} 問卷
                   </span>
-                  <span className="text-slate-600">›</span>
-                  <span className={`px-1.5 py-0.5 rounded ${stepActive(reflectionDoneFlag, currentPhase === "reflection")}`}>
-                    {reflectionDoneFlag ? "✓" : "④"} 心得
-                  </span>
+                  {verifying && (
+                    <span className="ml-2 px-1.5 py-0.5 rounded bg-sky-700/40 text-sky-200 animate-pulse">
+                      等待 server 確認通過…
+                    </span>
+                  )}
                 </div>
               </div>
             );

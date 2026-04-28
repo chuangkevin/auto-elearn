@@ -47,7 +47,6 @@ import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
 import { fillSurvey } from "./survey/filler";
-import { writeReflection } from "./reflection/writer";
 import {
   currentState as stealthCurrentState,
   lock as stealthLock,
@@ -584,8 +583,6 @@ function trackedToCard(t: Tracked): CourseCard {
     requiredSec: t.requiredSec,
     examDone,
     surveyDone,
-    ratingDone: false,
-    reflectionDone: false,
     lastPingAt: t.lastPingAt,
   };
 }
@@ -790,7 +787,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     const alreadyDone = plan.filter((t) => t.course.isReadtimeValidCaption === "已通過").length;
     log(
       "info",
-      `📋 本批 ${cids.length} 門課計畫：報名 ${needEnroll} · 閱讀 ${needRead} · 測驗 ${needExamPlan} · 問卷 ${needSurveyPlan} · 心得 ${plan.length}（已通過 ${alreadyDone}）`,
+      `📋 本批 ${cids.length} 門課計畫：報名 ${needEnroll} · 閱讀 ${needRead} · 測驗 ${needExamPlan} · 問卷 ${needSurveyPlan}（已通過 ${alreadyDone}）`,
     );
   } catch (e) {
     log("warn", `預估失敗：${e instanceof Error ? e.message : String(e)}`);
@@ -832,7 +829,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   }
 
   const completedHeartbeat = new Set<string>();
-  // Per-course finish chains (測驗→問卷→心得) collected here so a fast course
+  // Per-course finish chains (測驗→問卷) collected here so a fast course
   // doesn't have to wait for the slowest one in the batch to finish heartbeat
   // before progressing through its remaining phases.
   const chainPromises: Promise<void>[] = [];
@@ -895,35 +892,21 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         }
       }
 
-      // 3. 心得
-      if (!abortSignal.aborted) {
-        // Re-check the detail page — exam+survey may have just flipped the
-        // course to 已通過 on server, in which case /info/{cid} 上課去 stops
-        // navigating to the LC and the reflection click would time out at
-        // frames=0. Don't bother trying.
-        const refreshed = await fetchCourseDetail(session, cid);
-        if (refreshed?.passed === true) {
-          log("info", `${name}：課程已通過，跳過心得`);
-          if (card) {
-            card.reflectionDone = true;
-            card.phase = "done";
-          }
-        } else {
-          const rr = await writeReflection(cid, name, session, {
-            onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-          });
-          if (rr.ok) {
-            log("info", `心得完成 ${name}（${rr.source}）`);
-            if (card) card.reflectionDone = true;
-          } else if (rr.error && !rr.error.includes("略過")) {
-            log("warn", `心得失敗 ${name}：${rr.error}`);
-          }
-        }
+      // No more "心得" step — elearn's actual flow is reading/exam/survey only.
+      // The old reflection writer always failed for courses without a 心得
+      // dropdown and the user complained: course passes once 問卷 is filled,
+      // making the step pure noise.
+
+      // Mark card as "verifying" so UI shows a "等待 server 確認通過..." badge
+      // instead of the prematurely-green "done" state.
+      if (card && card.phase !== "done") {
+        card.phase = "verifying";
+        pushState();
       }
 
       // Only mark phase=done when SERVER confirms 通過狀態 == 通過. That
-      // can lag behind our chain's last step by a few seconds while elearn
-      // finalises the credit. Poll detail up to 30 s before declaring done.
+      // can lag behind 問卷 submission by a few seconds while elearn
+      // finalises the credit. Poll detail up to 30 s before giving up.
       if (card && card.phase !== "done") {
         for (let i = 0; i < 6; i++) {
           if (abortSignal.aborted) break;
@@ -940,7 +923,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         if (card.phase !== "done") {
           log(
             "info",
-            `[${name}] 心得已交但 server 通過狀態尚未刷新；不標記為完成。再等等 server 應會自動更新`,
+            `[${name}] 問卷已交但 server 通過狀態尚未刷新；保持「等待通過確認」狀態，server 應會自動更新`,
           );
         }
       }
