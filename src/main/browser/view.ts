@@ -159,6 +159,20 @@ export function attachElearnView(win: BrowserWindow, url: string): BrowserView {
   win.setBrowserView(view);
   view.webContents.loadURL(url);
 
+  // Suppress JS alert / confirm / prompt on every frame load. Without this,
+  // some elearn course pages call alert("Error while parsing the document.")
+  // when their SCORM/XML manifest fails to parse, which pops a modal that
+  // freezes our automation. Re-applies on every frame load so iframes
+  // navigated later inherit it.
+  view.webContents.on("did-frame-finish-load", () => {
+    view.webContents
+      .executeJavaScript(
+        `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`,
+        true,
+      )
+      .catch(() => void 0);
+  });
+
   // Re-run popup dismiss on every navigation (site shows popup_learn_record modal on dashboard entry)
   view.webContents.on("did-finish-load", () => {
     dismissNuisancePopups(view.webContents).catch(() => void 0);

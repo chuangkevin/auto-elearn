@@ -41,7 +41,13 @@ function openDb(): Database.Database {
   if (db) return db;
   const file = locateDb();
   db = new Database(file, { readonly: true, fileMustExist: true });
-  db.pragma("journal_mode = WAL");
+  // `journal_mode = WAL` writes to the DB file header — fatal on a readonly
+  // open. Earlier code called this unconditionally; the resulting throw
+  // bubbled all the way up through lookupByLike → matcher → solver and
+  // landed in result.error as "attempt to write a readonly database",
+  // killing exams that would otherwise have worked. WAL is irrelevant for
+  // a readonly connection anyway, so just skip it (or wrap if for some
+  // reason we want to attempt it on writable DBs in the future).
   return db;
 }
 
