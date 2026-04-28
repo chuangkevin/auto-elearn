@@ -1,4 +1,6 @@
-import { BrowserWindow, type Session } from "electron";
+import { BrowserWindow, app, type Session } from "electron";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { findBestAnswer, type AnswerSource } from "./matcher";
 import { saveLearnedAnswer } from "./answer-store";
 import {
@@ -9,6 +11,7 @@ import {
   getSysbarLinks,
   clickSysbarLink,
 } from "../browser/lc-nav";
+import { hasGeminiKey } from "../llm/gemini";
 
 export interface SolveResult {
   ok: boolean;
@@ -183,6 +186,97 @@ async function submitAndParseScore(win: BrowserWindow): Promise<number | null> {
   return null;
 }
 
+// ─── Result-page parser ───────────────────────────────────────
+//
+// After 送出答案, elearn shows a graded review page. Different SPOC
+// subdomains lay it out differently — so we try multiple patterns and
+// also dump raw HTML on first miss so we can iterate.
+//
+// Returns one entry per question for which we could identify the correct
+// answer text (NOT necessarily the user's selected answer — we want the
+// truth so saveLearnedAnswer overrides mixed.db's wrong cache).
+
+interface ResultEntry {
+  question: string;
+  correct: string;
+}
+
+let dumpedResultOnce = false;
+
+async function extractResultAnswers(win: BrowserWindow): Promise<ResultEntry[]> {
+  // Give the result page a moment to fully render (some courses do an extra
+  // AJAX call to fetch correct answers after the score appears).
+  await wait(800);
+
+  const out = await execJs<ResultEntry[]>(
+    win,
+    `(() => {
+      const norm = (s) => (s || '').replace(/\\s+/g,' ').trim();
+      const stripPrefix = (s) => norm(s).replace(/^[\\s\\(\\)\\[\\]【】（）．\\.A-Da-d①②③④0-9、，：:]+/, '');
+      const out = [];
+
+      // Strategy A: rows that contain explicit "正確答案：X" / "正解：X" markers.
+      const allRows = Array.from(document.querySelectorAll('tr,div,li,p'));
+      for (const row of allRows) {
+        const rowText = norm(row.textContent || '');
+        if (!rowText || rowText.length > 600) continue;
+        // Must mention 正確/正解 to qualify
+        if (!/正(確|解)\\s*答?案?/.test(rowText)) continue;
+
+        // Extract correct-answer payload
+        const m = rowText.match(/正(?:確|解)\\s*答?案?\\s*[：:＝=]?\\s*([^。\\n]{1,200}?)(?=您的答案|你的答案|您選|答對|答錯|$)/);
+        if (!m) continue;
+        const correct = stripPrefix(m[1]);
+        if (!correct) continue;
+
+        // Question text = row text minus everything from "正確" onward
+        const beforeIdx = rowText.search(/正(確|解)\\s*答?案?/);
+        let qPart = rowText.slice(0, beforeIdx);
+        // also strip "您的答案" portions if present
+        qPart = qPart.replace(/您的答案[^。]*/g, '').replace(/你的答案[^。]*/g, '');
+        // Strip leading question numbering like "1." / "Q1." / "第1題"
+        qPart = qPart.replace(/^[第Q]?\\s*\\d+\\s*[.、題)]?\\s*/, '').trim();
+        if (qPart.length < 4) continue;
+        out.push({ question: qPart.slice(0, 250), correct: correct.slice(0, 250) });
+      }
+      if (out.length > 0) return out;
+
+      // Strategy B: option list with a class flag indicating correctness
+      // (e.g. <li class="correct">, <span class="rightAns">, etc.)
+      const flagged = Array.from(
+        document.querySelectorAll('[class*="correct"],[class*="right"],[class*="answer-ok"],[class*="ans-ok"]')
+      );
+      for (const el of flagged) {
+        const optText = stripPrefix(el.textContent || '');
+        if (!optText) continue;
+        // Find the enclosing question row
+        const row = el.closest('tr,li.q,div.q,div.question,div[class*="quiz"]') || el.parentElement;
+        if (!row) continue;
+        const clone = row.cloneNode(true);
+        clone.querySelectorAll('input,script,style,ol,ul').forEach(n => n.remove());
+        const qText = norm(clone.textContent).slice(0, 250);
+        if (qText.length < 4) continue;
+        out.push({ question: qText, correct: optText });
+      }
+      return out;
+    })()`,
+  );
+  return out ?? [];
+}
+
+async function dumpResultHtml(win: BrowserWindow, cid: string): Promise<void> {
+  if (dumpedResultOnce) return;
+  dumpedResultOnce = true;
+  try {
+    const html = await execJs<string>(win, `document.documentElement.outerHTML`);
+    if (!html) return;
+    const file = join(app.getPath("temp"), `auto-elearn-result-${cid}.html`);
+    writeFileSync(file, html, "utf8");
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // ─── Get exam URL from s_main togo button ────────────────────
 
 async function getExamUrl(win: BrowserWindow): Promise<string | null> {
@@ -232,11 +326,13 @@ async function getExamUrl(win: BrowserWindow): Promise<string | null> {
 
 async function runOneAttempt(
   win: BrowserWindow,
+  cid: string,
   examUrl: string,
   label: string,
   bySource: Record<AnswerSource, number>,
   onProgress: (msg: string) => void,
-): Promise<{ score: number | null; questions: ExtractedQuestion[] }> {
+  opts: { skipMixedDb: boolean; passingScore: number },
+): Promise<{ score: number | null; questions: ExtractedQuestion[]; learned: number }> {
   await win.loadURL(examUrl);
   await wait(2000);
 
@@ -246,14 +342,18 @@ async function runOneAttempt(
   const questions = await extractQuestions(win);
   if (questions.length === 0) {
     onProgress(`[${label}] 無法取得題目`);
-    return { score: null, questions: [] };
+    return { score: null, questions: [], learned: 0 };
   }
-  onProgress(`[${label}] ${questions.length} 題`);
+  onProgress(
+    `[${label}] ${questions.length} 題${opts.skipMixedDb ? "（跳過 mixed.db，強制 LLM/learned）" : ""}`,
+  );
 
   const llmAnswered: Array<{ question: string; answer: string }> = [];
 
   for (const q of questions) {
-    const { source, pickedIdx, confidence } = await findBestAnswer(q.text, q.options);
+    const { source, pickedIdx, confidence } = await findBestAnswer(q.text, q.options, {
+      skipMixedDb: opts.skipMixedDb,
+    });
     bySource[source]++;
 
     const value = q.values[pickedIdx] ?? String(pickedIdx + 1);
@@ -269,14 +369,35 @@ async function runOneAttempt(
   const score = await submitAndParseScore(win);
   onProgress(`[${label}] 分數：${score ?? "?"}`);
 
-  // Persist LLM answers if exam passed
+  // Persist LLM answers if exam passed (kept the old 60 floor here — it's
+  // about whether the LLM choice was reliable enough to remember, not the
+  // course's pass threshold).
   if (score !== null && score >= 60) {
     for (const { question, answer } of llmAnswered) {
-      saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.9 });
+      saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.9, courseId: cid });
     }
   }
 
-  return { score, questions };
+  // Learn from the result page — this is the key correction loop. If
+  // elearn shows correct answers post-submission we save them to
+  // learned_answers (writable, higher priority than read-only mixed.db),
+  // so the NEXT attempt picks the corrected answer.
+  let learned = 0;
+  if (score !== null) {
+    const correctAnswers = await extractResultAnswers(win);
+    for (const { question, correct } of correctAnswers) {
+      saveLearnedAnswer({ question, answer: correct, source: "result-page", confidence: 1.0, courseId: cid });
+    }
+    learned = correctAnswers.length;
+    if (learned > 0) {
+      onProgress(`[${label}] 從成績頁學到 ${learned} 題正解，下一輪會改答`);
+    } else if (score < opts.passingScore) {
+      onProgress(`[${label}] 成績頁無正解資訊；HTML 已 dump 到 temp 供分析`);
+      await dumpResultHtml(win, cid);
+    }
+  }
+
+  return { score, questions, learned };
 }
 
 // ─── Exam loop (retry until 100 or max attempts) ──────────────
@@ -298,6 +419,12 @@ async function runExamLoop(
   // give up after one bad attempt and report 0 score forever. Now we burn
   // through the full MAX_EXAM_ATTEMPTS budget unless we already passed.
   let consecutiveSetupFailures = 0;
+  // skipMixedDb is flipped to true after a failed attempt that learned 0 from
+  // the result page — that means mixed.db is the dead-end (cached wrong
+  // answers) and we should try LLM/learned_answers only on the next round.
+  // Returns to false once we've learned at least 1 result-page answer (since
+  // learned_answers will now override mixed.db's wrong rows naturally).
+  let skipMixedDb = false;
   for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
     if (best !== null && best >= passingScore) break; // good enough to pass
 
@@ -340,7 +467,15 @@ async function runExamLoop(
     // Reaching here means setup succeeded; reset the failure counter.
     consecutiveSetupFailures = 0;
 
-    const { score } = await runOneAttempt(win, examUrl, `${label} #${attempt}`, bySource, onProgress);
+    const { score, learned } = await runOneAttempt(
+      win,
+      cid,
+      examUrl,
+      `${label} #${attempt}`,
+      bySource,
+      onProgress,
+      { skipMixedDb, passingScore },
+    );
 
     if (score !== null && (best === null || score > best)) best = score;
 
@@ -348,6 +483,26 @@ async function runExamLoop(
       onProgress(`🎯 100 分！`);
       break;
     }
+
+    // Decide retry strategy for next round:
+    //   • Got new correct answers from the result page → keep using mixed.db
+    //     (learned_answers now wins for the corrected ones).
+    //   • Score below passing AND we learned 0 → mixed.db is the dead-end,
+    //     force LLM/learned-only on next attempt (assuming Gemini is
+    //     configured; otherwise no-op since LLM falls through to random).
+    if (score !== null && score < passingScore) {
+      if (learned === 0 && hasGeminiKey()) {
+        if (!skipMixedDb) {
+          onProgress(`[${label}] 切換策略：下次重考改走 LLM`);
+        }
+        skipMixedDb = true;
+      } else if (learned > 0) {
+        // We got fresh truth — go back to normal lookup so newly learned
+        // answers can rescue mostly-right attempts.
+        skipMixedDb = false;
+      }
+    }
+
     if (attempt < MAX_EXAM_ATTEMPTS) {
       onProgress(`第 ${attempt} 次得 ${score ?? "?"}，重考...`);
     }

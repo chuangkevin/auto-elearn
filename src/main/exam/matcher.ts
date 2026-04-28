@@ -80,10 +80,17 @@ export function matchAgainstDb(questionText: string): MatchResult | null {
 /**
  * Three-layer async answer lookup: learned_answers → questions DB → Gemini LLM.
  * Returns the best answer with source label and 0-based option index.
+ *
+ * `skipMixedDb` skips the read-only 98K bank and goes straight to LLM. The
+ * solver flips this on after a retry where mixed.db gave a confidence-1.0
+ * wrong answer — staying with the same DB pick would just spin the loop
+ * forever. learned_answers is still consulted because it may contain the
+ * correct answer we just scraped from the previous attempt's result page.
  */
 export async function findBestAnswer(
   questionText: string,
   options: string[],
+  opts: { skipMixedDb?: boolean } = {},
 ): Promise<{ source: AnswerSource; pickedIdx: number; confidence: number }> {
   // Layer 1: learned_answers (highest priority — we observed this correct before)
   const learned = lookupLearnedAnswer(questionText);
@@ -91,14 +98,16 @@ export async function findBestAnswer(
     return { source: "db", pickedIdx: pickOptionIndex(learned.correct, options), confidence: 1.0 };
   }
 
-  // Layer 2: 98K question bank (exact then fuzzy)
-  const dbMatch = matchAgainstDb(questionText);
-  if (dbMatch) {
-    return {
-      source: dbMatch.source,
-      pickedIdx: pickOptionIndex(dbMatch.correctText, options),
-      confidence: dbMatch.confidence,
-    };
+  // Layer 2: 98K question bank (exact then fuzzy) — skipped on forced-LLM retries
+  if (!opts.skipMixedDb) {
+    const dbMatch = matchAgainstDb(questionText);
+    if (dbMatch) {
+      return {
+        source: dbMatch.source,
+        pickedIdx: pickOptionIndex(dbMatch.correctText, options),
+        confidence: dbMatch.confidence,
+      };
+    }
   }
 
   // Layer 3: Gemini LLM fallback
