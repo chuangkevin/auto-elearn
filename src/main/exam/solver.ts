@@ -684,7 +684,14 @@ async function runExamLoop(
     if (score !== null && (best === null || score > best)) best = score;
 
     // Initialize / update brute-force state from this attempt's results.
+    // The decision uses `best` (overall best across all attempts) as the
+    // reference, NOT a per-Q stored score — once one Q's flip lifts the
+    // ceiling, every subsequent Q's probe must compare to the new ceiling
+    // or we'd misclassify "still right" Qs as ambiguous "=".
     if (score !== null) {
+      const priorBest = best ?? score;
+      if (score > priorBest) best = score;
+
       if (!bfStates) {
         // First scoring attempt — seed state from each question's pick.
         bfStates = new Map();
@@ -703,12 +710,11 @@ async function runExamLoop(
           bfQueue.push(key);
         }
       } else if (probingKey !== null && probingOption !== null) {
-        // We just probed one Q. Compare new score vs that Q's prior best.
         const st = bfStates.get(probingKey);
         if (st) {
           st.tested.add(probingOption);
-          if (score > st.bestScore) {
-            // Better — lock the new option in.
+          if (score > priorBest) {
+            // Strictly better than overall best — flipped option is correct.
             st.bestOption = probingOption;
             st.bestScore = score;
             saveLearnedAnswer({
@@ -719,25 +725,24 @@ async function runExamLoop(
               courseId: cid,
             });
             onProgress(
-              `[${label}] ↑ 「${st.questionText.slice(0, 24)}…」 改 opt[${probingOption}] 提分 ${st.bestScore - score + score}→${score}（已存 learned_answers）`,
+              `[${label}] ↑ 「${st.questionText.slice(0, 24)}…」 改 opt[${probingOption}] 提分 ${priorBest}→${score}（已存 learned_answers）`,
             );
-            // If the prior best for OTHER Qs was achieved at the now-stale
-            // bestScore, that's fine — we only compare per-Q, and other Qs'
-            // own probes still measure against their own bestScore.
-            bfQueueIdx++; // move to next Q after a successful flip
-          } else if (score < st.bestScore) {
-            // Original (current best) was right — stop probing this Q.
+            best = score;
+            bfQueueIdx++;
+          } else if (score < priorBest) {
+            // Lower than current ceiling — Q was right at its current
+            // bestOption; flipping to probingOption broke it.
             onProgress(
-              `[${label}] ↓ 「${st.questionText.slice(0, 24)}…」 opt[${probingOption}] 反而降分 (${score} < ${st.bestScore})；原答對，停試此題`,
+              `[${label}] ↓ 「${st.questionText.slice(0, 24)}…」 opt[${probingOption}] 反而降分 (${score} < ${priorBest})；原答對，停試此題`,
             );
             bfQueueIdx++;
           } else {
-            // Same score — option is wrong but so is the original probably.
-            // Try the next untested option for this Q on next iteration.
+            // Same as ceiling — both options wrong (single-answer MC: at
+            // most one is right). Try the next untested option for this Q.
             onProgress(
               `[${label}] = 「${st.questionText.slice(0, 24)}…」 opt[${probingOption}] 同分 (${score})；繼續試下個選項`,
             );
-            // do NOT advance bfQueueIdx — same Q gets next option next round
+            // do NOT advance bfQueueIdx — same Q, next option next round
           }
         }
       }
@@ -746,6 +751,21 @@ async function runExamLoop(
     if (best === 100) {
       onProgress(`🎯 100 分！`);
       break;
+    }
+
+    // Brute-force budget guard: once every Q in the queue has had every
+    // option tested (or terminated early), there is nothing more for the
+    // probe to learn from. Quitting saves the remaining MAX_EXAM_ATTEMPTS
+    // budget instead of re-running the same locked combo over and over.
+    if (bfStates && bfQueueIdx >= bfQueue.length) {
+      const totalUntested = Array.from(bfStates.values()).reduce(
+        (sum, st) => sum + (st.options.length - st.tested.size),
+        0,
+      );
+      if (totalUntested === 0) {
+        onProgress(`[${label}] 暴力搜索結束：${best ?? 0} 分（已試完每題每選項）`);
+        break;
+      }
     }
 
     // Decide retry strategy for next round:
