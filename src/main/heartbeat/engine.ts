@@ -94,8 +94,14 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   }
   // Fire "open" AFTER we have the ticket so the log can name the host we're
   // about to hit. Cross-course comparison of hosts is how we tell which
-  // SPOC providers silently drop our heartbeats.
-  opts.onProgress?.(cid, "open", { origin: ticket.origin });
+  // SPOC providers silently drop our heartbeats. Pass actid + encCid so
+  // the UI can show "actid: I_SCO_..." per course — collisions across cids
+  // (= shared SCORM tree) are immediately visible.
+  opts.onProgress?.(cid, "open", {
+    origin: ticket.origin,
+    actid: ticket.actid,
+    encCid: ticket.encCid,
+  });
 
   // Step 1: re-load the reader page (sets server session state for this ticket)
   try {

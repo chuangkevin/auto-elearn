@@ -1096,8 +1096,13 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         const card = state.courses.find((c) => c.cid === cid);
         if (!card) return;
         if (stage === "open") {
-          const origin = (extra as { origin?: string })?.origin;
-          log("info", `開始閱讀：${card.name}${origin ? ` (心跳 host: ${origin})` : ""}`);
+          const e0 = extra as { origin?: string; actid?: string; encCid?: string };
+          const tail =
+            (e0.origin ? ` (心跳 host: ${e0.origin}` : "") +
+            (e0.encCid ? `, enCid: ${e0.encCid}` : "") +
+            (e0.actid ? `, actid: ${e0.actid.slice(0, 40)}` : "") +
+            (e0.origin ? ")" : "");
+          log("info", `開始閱讀：${card.name}${tail}`);
           runningCids.add(cid);
           if (!focusedCid) {
             focusedCid = cid;

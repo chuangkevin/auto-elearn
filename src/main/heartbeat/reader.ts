@@ -16,20 +16,34 @@ function pickBestActid(
   if (candidates.length === 0) return null;
   if (candidates.length === 1) return candidates[0].actid;
 
-  // With a caption, score each candidate's text against the caption.
-  // fast-fuzzy `fuzzy()` returns 0-1 (dice/damerau hybrid); handles Chinese
-  // well. Strip ornamental marks first so "《人權搜查客》萬秀帶你..." vs
-  // "萬秀帶你翻轉「老」議題..." matches strongly on the shared substring.
+  // With a caption, ALWAYS pick the highest-scoring candidate. The earlier
+  // floor=0.4 + lead>=0.05 thresholds caused shared-SCORM SPOCs (where two
+  // cids share one tree) to fall through to the format-pref fallback, which
+  // returns the FIRST I_SCO for both cids — exactly the sinica 10047013/
+  // 10047031 collision. Fuzzy + substring-containment together is a strong
+  // enough signal that the high-score winner is reliably correct, and a
+  // wrong pick is never worse than the fallback's "always-the-same" miss.
   if (caption && caption.trim()) {
-    const cleanCap = caption.replace(/[《》「」『』 \-—_:：（）()ft\.]/gi, "").toLowerCase();
+    const clean = (s: string) =>
+      s.replace(/[《》「」『』 \-—_:：（）()ft\.，、。!?]/gi, "").toLowerCase();
+    const cleanCap = clean(caption);
     const scored = candidates.map((c) => {
-      const cleanText = c.text.replace(/[《》「」『』 \-—_:：（）()ft\.]/gi, "").toLowerCase();
-      const score = cleanText && cleanCap ? fuzzy(cleanCap, cleanText) : 0;
-      return { ...c, score };
+      const cleanText = clean(c.text);
+      const fuzzyScore = cleanText && cleanCap ? fuzzy(cleanCap, cleanText) : 0;
+      // Substring containment is a much stronger signal than fuzzy alone:
+      // for shared trees the lesson text often IS the course title verbatim.
+      // Add a flat boost so a contained candidate always outranks a merely
+      // fuzzy-similar sibling.
+      const contains =
+        cleanText && cleanCap && (cleanText.includes(cleanCap) || cleanCap.includes(cleanText))
+          ? 0.5
+          : 0;
+      return { ...c, score: fuzzyScore + contains };
     });
     scored.sort((a, b) => b.score - a.score);
-    // Take winner if it's at least moderately similar AND clearly leads.
-    if (scored[0].score >= 0.4 && (scored.length === 1 || scored[0].score - scored[1].score >= 0.05)) {
+    // Take the leader as long as the second-best isn't tied. Ties fall
+    // through to format-pref (extremely rare with the substring boost).
+    if (scored[0].score > 0 && scored[0].score > scored[1].score) {
       return scored[0].actid;
     }
   }
