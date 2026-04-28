@@ -99,13 +99,11 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - 沒 click → server 端 reading session 卡在 env-check → 心跳全部丟掉
 - 共用 helper: `pickBestActid()` + click-by-onclick-match in `extractTicket`
 
-### 多重視窗保護 → ELEARN_WINDOW_CONCURRENCY
+### 多重視窗保護 → ELEARN_WINDOW_CONCURRENCY = 1（v0.4.18）
 - elearn 有 `/mooc/warning.php`「禁止多重視窗瀏覽課程」server 端檢查
-- ≥3 個 hidden BrowserWindow 同時打 `/info/{cid}` → 上課去 → 後續會被 redirect 到 warning.php，sysbar 變空、找不到 togo
-- 全域 semaphore `ELEARN_WINDOW_CONCURRENCY = 2` 涵蓋：
-  - `extractTicket` (heartbeat 啟動)
-  - `enterLC` (測驗 / 問卷 / 心得)
-- HTTP 心跳階段不受此 slot 影響（仍 50 並行）
+- 2 個 hidden BrowserWindow 同時打 `/info/{cid}` → 上課去 也會撞到 server-side LC session cookie（同一 SPOC 的兩個 cid 第二次 nav 會蓋掉第一次的 SCORM 上下文，兩 window 都 scrape 同一個 actid）
+- 全域 semaphore `ELEARN_WINDOW_CONCURRENCY = 1` 嚴格序列化 `extractTicket` + `enterLC`
+- 純 HTTP 心跳階段不受此 slot 影響（仍 50 並行）—— 序列化只 cost 5-10s/門啟動延遲
 
 ### user-data SQLite 必須 chmod
 - `db.ts` 從 `resources/mixed.db` (packaged 唯讀) `copyFileSync` 到 user data → 繼承唯讀 → INSERT 炸 `attempt to write a readonly database`
@@ -121,21 +119,51 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - 取出 `閱讀時數 / 測驗 / 問卷 / 通過狀態`
 - 覆蓋 local card.readSec → UI 跟 server 一致
 
-### 答題流程（三層優先順序）
-1. `learned_answers` 本地學習庫（最高優先）
-2. `resources/mixed.db` 題庫（98,569 題，dice similarity >= 0.6 命中）
-3. Gemini LLM fallback（`gemini-2.5-flash`，key 從 AppData/.../config.json）
+### 答題正解的取得（four-layer，從 v0.4.13 起重排）
+**Layer 0 — `history-solver`（最強，零測驗成本）**
+- chain 啟動時先呼叫 `solveExamFromHistory(session, cid)`：
+  - enterLC 設 server session → fetch `/learn/exam/exam_list.php` 抓 `viewResult({eid})` 最新 eid
+  - dropdown 列出全部歷次 attempt → 對每個 eid `frame.fetch /learn/exam/view_result.php?{eid}`
+  - cheerio 解析每次的 (per-Q user pick + 該次分數)
+  - 4^Q 暴力枚舉（10 題 → 1M 組合，sub-second）找出能解釋所有 attempt 分數的答案組合
+  - 取「全部 perfect-match key 都同意」的題鎖定，模糊題跳過
+  - `clearAllLearnedForCourse(cid)` 清掉舊污染後寫入 `learned_answers` (source=history-solve)
+- 沒歷史紀錄時 silent no-op（"no eid found"），不 cost 任何測驗
 
-### 測驗重考
-- 目標分數：100 分
-- 最多重試次數：`MAX_EXAM_ATTEMPTS = 10`（`solver.ts`）
-- 每次重試都重新進入 LC（re-enter）
+**Layer 1 — `learned_answers` SQLite (`source=history-solve > brute > llm > result-page`)**
+- `lookupLearnedAnswer` ORDER BY: source CASE → captured_at DESC → confidence DESC
+- `normalizeQuestion` 必須 strip:
+  - `^[單複多選]{0,4}配分[:：]?\[\d+(?:\.\d+)?\]` (exam page 才有的「**單選**配分:[10.00]」前綴)
+  - `^[第Q]?\d{1,3}[.、題)]?` (題號 "1." / "Q3.")
+  - 空白 / `?` / `？` / `，` / `　`
+- 沒做這 strip → `view_result.php` 抓的「1. 下列...」對不到 exam-page 的「單選配分：[10.00] 1. 下列...」LIKE pattern → 整套白做（v0.4.14 教訓）
+
+**Layer 2 — `resources/mixed.db` 98K 題庫（read-only）**
+- 命中時 confidence = dice similarity，常見 0.6-0.85
+- 答案常常是錯的（題庫過時 / 別課的答案）—— 靠 Layer 1 覆蓋
+
+**Layer 3 — Gemini LLM**（`gemini-2.5-flash`，要 `thinkingBudget=0`，否則 token 全被 thinking 吃光回空字串）
+
+**Fallback brute-force probe（無 LLM 也能用，純靠 elearn 分數回饋）**
+- 在 `runExamLoop` 內單題 score-delta search:每次重考改一題到下個未試選項，固定其他題在當前最佳。
+  - 分數 ↑ → 該題新答案對，存 learned_answers (source=brute) 並前進到下一題
+  - 分數 ↓ → 原答案對，鎖定，前進
+  - 分數 = → 兩個都錯，試該題下個選項
+- 早期終止 guard:`bfQueueIdx >= bfQueue.length` 就 break,不再要求每題每選項都試完（v0.4.14 教訓:tested set 永遠不會滿，無早期終止會無限送題）
+- `MAX_EXAM_ATTEMPTS = 30`（容納 worst case：10 Q × 平均 ~2 alt 探測 + buffer）
+
+### 結果頁正解 parser 永遠不要重啟（v0.4.17 教訓）
+- `view_result.php` 不顯示真正的正解 —— 「公布答案」按鈕點下去會打 `set_see_question_result.php?{eid}` 永久鎖重考，不能點
+- 任何試圖從成績頁文字 regex 抓「正解」的 parser 都會抓到使用者選的答案 / 不相關 UI 文字 → 灌進 learned_answers 變成假正解
+- 已在 v0.4.17 移除 saveLearnedAnswer for source=result-page；只保留第一次的 HTML dump 給 debug
 
 ### 問卷入口
 - sysbar「問卷」→ s_main 找 `.process-btn.pay.active` 點擊 → 攔截 window.open → 填 radio value='1' → 送出
 
-### 心得入口
-- sysbar「心得」→ s_main 直接有 `textarea`（無 popup）→ Gemini 生成 120-180 字 → 送出
+### 沒有「心得」階段（v0.4.7 起）
+- elearn 官方流程只有「閱讀時數 / 測驗 / 問卷」三步
+- 早期版本 chain 跑 `心得` 步驟對沒 textarea 的課常態 timeout 噴 `心得失敗`，純粹噪音
+- v0.4.7 砍掉 reflection 整個模組；UI stepper 對齊 elearn 三步 + 「等待 server 確認通過…」 sky badge for verifying phase
 
 ## Release 流程
 
