@@ -51,16 +51,12 @@ export async function writeReflection(
   }
   log(`心得來源：${source}`);
 
+  // No disableDialogs — see reader.ts; window.confirm must return true.
   const win = new BrowserWindow({
     show: false,
     width: 1280,
     height: 900,
-    webPreferences: {
-      session,
-      contextIsolation: true,
-      nodeIntegration: false,
-      disableDialogs: true,
-    },
+    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
   });
   suppressDialogs(win);
 
