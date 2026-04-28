@@ -2,7 +2,7 @@ import { BrowserWindow, app, type Session } from "electron";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { findBestAnswer, type AnswerSource } from "./matcher";
-import { saveLearnedAnswer } from "./answer-store";
+import { saveLearnedAnswer, normalizeQuestion } from "./answer-store";
 import {
   wait,
   execJs,
@@ -34,7 +34,22 @@ interface ExtractedQuestion {
   isMultiple: boolean;
 }
 
-const MAX_EXAM_ATTEMPTS = 10;
+// Headroom for the brute-force probe: each below-passing attempt without
+// result-page truth needs ~1 retry per question to lock in the right option.
+// 10-Q exam: 1 baseline + 10 probes (or fewer if we hit passing earlier).
+const MAX_EXAM_ATTEMPTS = 30;
+
+/** Per-question brute-force state, persisted across runExamLoop iterations. */
+interface QProbeState {
+  questionText: string;
+  options: string[];
+  /** Option idx currently believed to be the best (initial = baseline pick). */
+  bestOption: number;
+  /** Highest score observed when this Q used bestOption. */
+  bestScore: number;
+  /** Options already tried for this Q (so we don't repeat). */
+  tested: Set<number>;
+}
 
 // ─── Question extraction ──────────────────────────────────────
 
@@ -324,6 +339,14 @@ async function getExamUrl(win: BrowserWindow): Promise<string | null> {
 
 // ─── Run one exam attempt at examUrl ─────────────────────────
 
+interface AttemptResult {
+  score: number | null;
+  questions: ExtractedQuestion[];
+  learned: number;
+  /** Option idx that was actually selected for each question, by question index. */
+  picksByIdx: number[];
+}
+
 async function runOneAttempt(
   win: BrowserWindow,
   cid: string,
@@ -331,8 +354,13 @@ async function runOneAttempt(
   label: string,
   bySource: Record<AnswerSource, number>,
   onProgress: (msg: string) => void,
-  opts: { skipMixedDb: boolean; passingScore: number },
-): Promise<{ score: number | null; questions: ExtractedQuestion[]; learned: number }> {
+  opts: {
+    skipMixedDb: boolean;
+    passingScore: number;
+    /** key = normalised question text → forced option idx (skips matcher). */
+    forcedAnswers?: Map<string, number>;
+  },
+): Promise<AttemptResult> {
   await win.loadURL(examUrl);
   await wait(2000);
 
@@ -342,19 +370,35 @@ async function runOneAttempt(
   const questions = await extractQuestions(win);
   if (questions.length === 0) {
     onProgress(`[${label}] 無法取得題目`);
-    return { score: null, questions: [], learned: 0 };
+    return { score: null, questions: [], learned: 0, picksByIdx: [] };
   }
   onProgress(
-    `[${label}] ${questions.length} 題${opts.skipMixedDb ? "（跳過 mixed.db，強制 LLM/learned）" : ""}`,
+    `[${label}] ${questions.length} 題${opts.skipMixedDb ? "（跳過 mixed.db，強制 LLM/learned）" : ""}${opts.forcedAnswers && opts.forcedAnswers.size > 0 ? `（暴力覆蓋 ${opts.forcedAnswers.size} 題）` : ""}`,
   );
 
   const llmAnswered: Array<{ question: string; answer: string }> = [];
+  const picksByIdx: number[] = new Array(questions.length).fill(0);
 
   for (const q of questions) {
-    const { source, pickedIdx, confidence } = await findBestAnswer(q.text, q.options, {
-      skipMixedDb: opts.skipMixedDb,
-    });
+    let pickedIdx: number;
+    let source: AnswerSource;
+    let confidence: number;
+
+    const forcedKey = normalizeQuestion(q.text);
+    const forcedIdx = opts.forcedAnswers?.get(forcedKey);
+    if (typeof forcedIdx === "number" && forcedIdx >= 0 && forcedIdx < q.options.length) {
+      pickedIdx = forcedIdx;
+      source = "random"; // brute-force probe — bookkept under "random" for stats
+      confidence = 0;
+    } else {
+      const r = await findBestAnswer(q.text, q.options, { skipMixedDb: opts.skipMixedDb });
+      pickedIdx = r.pickedIdx;
+      source = r.source;
+      confidence = r.confidence;
+    }
+
     bySource[source]++;
+    picksByIdx[q.index] = pickedIdx;
 
     const value = q.values[pickedIdx] ?? String(pickedIdx + 1);
     onProgress(`  Q${q.index + 1} [${source} ${confidence.toFixed(2)}] → ${q.options[pickedIdx]?.slice(0, 30) ?? value}`);
@@ -397,7 +441,7 @@ async function runOneAttempt(
     }
   }
 
-  return { score, questions, learned };
+  return { score, questions, learned, picksByIdx };
 }
 
 // ─── Exam loop (retry until 100 or max attempts) ──────────────
@@ -425,6 +469,28 @@ async function runExamLoop(
   // Returns to false once we've learned at least 1 result-page answer (since
   // learned_answers will now override mixed.db's wrong rows naturally).
   let skipMixedDb = false;
+
+  // Brute-force probe state. Initialized after the first scoring attempt.
+  // Each entry tracks one question across retries — which option indices have
+  // been tried, the highest score observed for each, and the current best.
+  // We probe ONE question per retry by flipping its answer to a still-untried
+  // option while every other question stays at its current best — the score
+  // delta tells us whether the flipped option is better, equal, or worse than
+  // the current best for that question. No LLM, no result-page parsing
+  // required. Activated only when the result page yields no truth and the
+  // user is below passing.
+  let bfStates: Map<string, QProbeState> | null = null;
+  // Pointer into bfStates iteration; populated lazily.
+  let bfQueue: string[] = [];
+  let bfQueueIdx = 0;
+
+  const buildForcedAnswers = (): Map<string, number> => {
+    const out = new Map<string, number>();
+    if (!bfStates) return out;
+    for (const [k, st] of bfStates) out.set(k, st.bestOption);
+    return out;
+  };
+
   for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
     if (best !== null && best >= passingScore) break; // good enough to pass
 
@@ -467,17 +533,138 @@ async function runExamLoop(
     // Reaching here means setup succeeded; reset the failure counter.
     consecutiveSetupFailures = 0;
 
-    const { score, learned } = await runOneAttempt(
+    // Decide which Q (if any) to probe in brute-force mode this iteration.
+    // Brute force is the LAST RESORT: only engage when (a) we have a baseline
+    // (bfStates seeded), (b) skipMixedDb is off so we don't fight LLM mode,
+    // and (c) we've actually fallen below passing already. attempt 1 always
+    // runs normal lookups so we have a baseline to seed from.
+    const bfActive = bfStates !== null && !skipMixedDb && best !== null && best < passingScore;
+    let probingKey: string | null = null;
+    let probingOption: number | null = null;
+    if (bfActive && bfStates) {
+      while (bfQueueIdx < bfQueue.length) {
+        const k = bfQueue[bfQueueIdx];
+        const st = bfStates.get(k);
+        if (!st) {
+          bfQueueIdx++;
+          continue;
+        }
+        let next: number | null = null;
+        for (let i = 0; i < st.options.length; i++) {
+          if (!st.tested.has(i)) {
+            next = i;
+            break;
+          }
+        }
+        if (next === null) {
+          bfQueueIdx++; // exhausted this Q's options; move on
+          continue;
+        }
+        probingKey = k;
+        probingOption = next;
+        break;
+      }
+    }
+
+    // Build the forcedAnswers map for this attempt:
+    //   - all Qs in bfStates → use their bestOption
+    //   - the probing Q (if any) → override with probingOption
+    let forcedAnswers: Map<string, number> | undefined;
+    if (bfActive) {
+      forcedAnswers = buildForcedAnswers();
+      if (probingKey !== null && probingOption !== null) {
+        forcedAnswers.set(probingKey, probingOption);
+        const st = bfStates!.get(probingKey)!;
+        onProgress(
+          `[${label}] 暴力探測 「${st.questionText.slice(0, 30)}…」 改試 opt[${probingOption}] 「${(st.options[probingOption] ?? "").slice(0, 30)}」`,
+        );
+      } else if (forcedAnswers.size > 0 && bfQueueIdx >= bfQueue.length) {
+        onProgress(`[${label}] 暴力搜索已試完所有題目；保持當前最佳組合`);
+      }
+    }
+
+    const { score, learned, questions, picksByIdx } = await runOneAttempt(
       win,
       cid,
       examUrl,
       `${label} #${attempt}`,
       bySource,
       onProgress,
-      { skipMixedDb, passingScore },
+      { skipMixedDb, passingScore, forcedAnswers },
     );
 
     if (score !== null && (best === null || score > best)) best = score;
+
+    // Initialize / update brute-force state from this attempt's results.
+    if (score !== null) {
+      // If we just learned new correct answers from the result page, blow
+      // away brute-force state so the next attempt re-runs through
+      // findBestAnswer (which now sees the freshly-saved learned_answers
+      // entries). bfStates will re-seed from that better baseline below.
+      if (learned > 0 && bfStates) {
+        onProgress(`[${label}] 結果頁有教正解，重置暴力狀態讓下輪 learned_answers 接手`);
+        bfStates = null;
+        bfQueue = [];
+        bfQueueIdx = 0;
+      }
+
+      if (!bfStates) {
+        // First scoring attempt — seed state from each question's pick.
+        bfStates = new Map();
+        bfQueue = [];
+        for (const q of questions) {
+          const key = normalizeQuestion(q.text);
+          if (!key) continue;
+          const optIdx = picksByIdx[q.index] ?? 0;
+          bfStates.set(key, {
+            questionText: q.text,
+            options: q.options.slice(),
+            bestOption: optIdx,
+            bestScore: score,
+            tested: new Set([optIdx]),
+          });
+          bfQueue.push(key);
+        }
+      } else if (probingKey !== null && probingOption !== null) {
+        // We just probed one Q. Compare new score vs that Q's prior best.
+        const st = bfStates.get(probingKey);
+        if (st) {
+          st.tested.add(probingOption);
+          if (score > st.bestScore) {
+            // Better — lock the new option in.
+            st.bestOption = probingOption;
+            st.bestScore = score;
+            saveLearnedAnswer({
+              question: st.questionText,
+              answer: st.options[probingOption] ?? "",
+              source: "brute",
+              confidence: 0.95,
+              courseId: cid,
+            });
+            onProgress(
+              `[${label}] ↑ 「${st.questionText.slice(0, 24)}…」 改 opt[${probingOption}] 提分 ${st.bestScore - score + score}→${score}（已存 learned_answers）`,
+            );
+            // If the prior best for OTHER Qs was achieved at the now-stale
+            // bestScore, that's fine — we only compare per-Q, and other Qs'
+            // own probes still measure against their own bestScore.
+            bfQueueIdx++; // move to next Q after a successful flip
+          } else if (score < st.bestScore) {
+            // Original (current best) was right — stop probing this Q.
+            onProgress(
+              `[${label}] ↓ 「${st.questionText.slice(0, 24)}…」 opt[${probingOption}] 反而降分 (${score} < ${st.bestScore})；原答對，停試此題`,
+            );
+            bfQueueIdx++;
+          } else {
+            // Same score — option is wrong but so is the original probably.
+            // Try the next untested option for this Q on next iteration.
+            onProgress(
+              `[${label}] = 「${st.questionText.slice(0, 24)}…」 opt[${probingOption}] 同分 (${score})；繼續試下個選項`,
+            );
+            // do NOT advance bfQueueIdx — same Q gets next option next round
+          }
+        }
+      }
+    }
 
     if (best === 100) {
       onProgress(`🎯 100 分！`);
