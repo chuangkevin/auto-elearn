@@ -134,10 +134,28 @@ export function lookupLearnedAnswer(raw: string): DbRow | null {
     const norm = normalizeQuestion(raw);
     if (!norm) return null;
     const NORM_EXPR = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(question,' ',''),'　',''),'?',''),'？',''),'，','')`;
+    // Source priority — newer + more reliable sources win when multiple
+    // rows match the same question. history-solve (mathematically derived
+    // from N past attempts' scores) > brute (single score-delta probe) >
+    // llm > result-page (the v0.4.10 parser was buggy and saved the
+    // user's submitted answer as "正解"; its rows linger in old DBs).
+    // Then by captured_at so a re-run of history-solve overrides earlier
+    // entries from the same source.
     const row = d
       .prepare(
         `SELECT question, answer AS correct FROM learned_answers
-         WHERE ${NORM_EXPR} LIKE ? ORDER BY confidence DESC LIMIT 1`,
+         WHERE ${NORM_EXPR} LIKE ?
+         ORDER BY
+           CASE source
+             WHEN 'history-solve' THEN 0
+             WHEN 'brute'         THEN 1
+             WHEN 'llm'           THEN 2
+             WHEN 'result-page'   THEN 3
+             ELSE 4
+           END ASC,
+           captured_at DESC,
+           confidence DESC
+         LIMIT 1`,
       )
       .get(`%${norm}%`) as { question: string; correct: string } | undefined;
     if (!row) return null;
@@ -163,6 +181,20 @@ export function clearLearnedFromSourceForCourse(source: string, courseId: string
     getDb()
       .prepare(`DELETE FROM learned_answers WHERE source = ? AND course_id = ?`)
       .run(source, courseId);
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Wipe all entries for a course regardless of source. Used by
+ *  history-solve when it's about to overwrite with the most authoritative
+ *  data (mathematically derived from past attempts), so leftover buggy
+ *  rows from earlier parser versions can't ghost-block the new picks. */
+export function clearAllLearnedForCourse(courseId: string): void {
+  try {
+    getDb()
+      .prepare(`DELETE FROM learned_answers WHERE course_id = ?`)
+      .run(courseId);
   } catch {
     /* non-fatal */
   }

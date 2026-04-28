@@ -1,6 +1,6 @@
 import { BrowserWindow, type Session } from "electron";
 import * as cheerio from "cheerio";
-import { saveLearnedAnswer, clearLearnedFromSourceForCourse } from "./answer-store";
+import { saveLearnedAnswer, clearAllLearnedForCourse } from "./answer-store";
 import { enterLC, suppressDialogs, execJs } from "../browser/lc-nav";
 
 /**
@@ -386,10 +386,12 @@ export async function solveExamFromHistory(
   const result = solve(first.questions, attempts, log);
   if (!result) { cleanup(); return { ok: false, learned: 0, reason: "歷史紀錄無法推斷正解" }; }
 
-  // Wipe any prior history-solve guesses for this course so the previous
-  // run's pre-consensus picks don't pollute future lookups. Brute-force /
-  // result-page entries (other sources) are left untouched.
-  clearLearnedFromSourceForCourse("history-solve", cid);
+  // Wipe ALL prior learned_answers for this course. history-solve is the
+  // most authoritative source (constraint-satisfaction across N attempts),
+  // so older entries from the v0.4.10 buggy result-page parser or
+  // pre-fix brute force are not worth keeping — they cause lookup
+  // conflicts where the older row wins under same-confidence ORDER BY.
+  clearAllLearnedForCourse(cid);
 
   // Only persist the LOCKED Qs (those where every perfect-match key
   // agrees). Ambiguous Qs are left out so learned_answers stays trustworthy
