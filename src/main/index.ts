@@ -565,8 +565,15 @@ async function refreshCourses(): Promise<void> {
 function trackedToCard(t: Tracked): CourseCard {
   // Prefer authoritative detail-page state (閱讀時數 / 測驗 / 問卷) over the
   // unreliable listing flags. Listing flags are kept only as fallback.
+  // examDone follows the global 80-point floor — a "60 分" course is NOT
+  // marked as exam-done, otherwise the UI stepper falsely shows ✓ 測驗
+  // and the chain considers the course finished even though server's
+  // 通過狀態 is still "--".
+  const passFloor = Math.max(t.detail?.passingScore ?? 60, 80);
   const examDone =
-    t.detail?.examScore != null ? true : (t.course.isExamDones ?? 0) === 1;
+    t.detail?.examScore != null
+      ? t.detail.examScore >= passFloor
+      : (t.course.isExamDones ?? 0) === 1;
   const surveyDone =
     t.detail?.surveyDone ?? ((t.course.isSurveyDones ?? 0) === 1);
   return {
