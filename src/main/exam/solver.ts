@@ -49,6 +49,7 @@ async function extractQuestions(win: BrowserWindow): Promise<ExtractedQuestion[]
       `(() => {
         const rows = Array.from(document.querySelectorAll('tr.bg03,tr.bg04'));
         if (!rows.length) return null;
+        const norm = (s) => (s || '').trim().replace(/\\s+/g,' ').slice(0,200);
         const out = [];
         rows.forEach((row, index) => {
           const inputs = Array.from(row.querySelectorAll('input[type=radio],input[type=checkbox]'));
@@ -56,24 +57,37 @@ async function extractQuestions(win: BrowserWindow): Promise<ExtractedQuestion[]
 
           // Strip option list from clone to get pure question text
           const clone = row.cloneNode(true);
-          clone.querySelectorAll('ol,ul').forEach(el => el.remove());
-          const text = (clone.textContent || '').trim().replace(/\\s+/g,' ').slice(0,300);
+          clone.querySelectorAll('ol,ul,input,script,style').forEach(el => el.remove());
+          const text = norm(clone.textContent).slice(0,400);
 
-          // Options: prefer <li> text, fallback to label/parent
-          const options = [];
-          const values = [];
-          row.querySelectorAll('li').forEach(li => {
-            const c = li.cloneNode(true);
-            c.querySelectorAll('input').forEach(el => el.remove());
-            options.push((c.textContent||'').trim().replace(/\\s+/g,' ').slice(0,150));
+          // Options: each input has its own surrounding text. Walk up ONE
+          // level at a time looking for a container that yields non-empty
+          // text after we strip out the input itself. Fixes cases where
+          // <li> exists but is empty, or where options sit in <td>/<span>
+          // siblings of the radio.
+          const values = inputs.map(i => i.value);
+          const options = inputs.map(inp => {
+            // Try ancestors in order of specificity
+            const candidates = [
+              inp.closest('li'),
+              inp.closest('label'),
+              inp.parentElement,
+              inp.parentElement?.parentElement,
+            ].filter(Boolean);
+            for (const cand of candidates) {
+              const c = cand.cloneNode(true);
+              c.querySelectorAll('input').forEach(el => el.remove());
+              const t = norm(c.textContent);
+              if (t) return t;
+            }
+            // Last resort: trailing text node directly after the input
+            try {
+              let n = inp.nextSibling;
+              while (n && n.nodeType !== 3 /* TEXT_NODE */ && n.nodeType !== 1) n = n.nextSibling;
+              if (n) return norm(n.textContent || (n.nodeType === 1 ? n.textContent : ''));
+            } catch (e) {}
+            return '';
           });
-          inputs.forEach(inp => values.push(inp.value));
-          if (!options.length) {
-            inputs.forEach(inp => {
-              const p = inp.closest('label') || inp.parentElement;
-              options.push(((p ? p.textContent : '')||'').trim().replace(/\\s+/g,' ').slice(0,150));
-            });
-          }
 
           out.push({
             index,
@@ -116,27 +130,57 @@ async function submitAndParseScore(win: BrowserWindow): Promise<number | null> {
   const clicked = await execJs<boolean>(
     win,
     `(() => {
-      const btn = document.querySelector("input[type='submit'][value*='送出答案']")
-               || document.querySelector("input[type='submit'][value*='繳卷']")
-               || document.querySelector("input[type='submit'][value*='送出']");
-      if (btn) { btn.click(); return true; }
+      // Cover every Chinese phrasing elearn uses for the submit button so
+      // the exam actually gets graded — missing one variant leaves us
+      // staring at the question page reading "0" forever.
+      const sels = [
+        "input[type='submit'][value*='送出答案']",
+        "input[type='submit'][value*='繳卷']",
+        "input[type='submit'][value*='繳交']",
+        "input[type='submit'][value*='送出']",
+        "input[type='submit'][value*='交卷']",
+        "input[type='button'][value*='送出']",
+        "button[onclick*='submit']",
+      ];
+      for (const s of sels) {
+        const btn = document.querySelector(s);
+        if (btn) { btn.click(); return true; }
+      }
       return null;
     })()`,
   );
   if (!clicked) return null;
-  await wait(4000);
 
-  return execJs<number>(
-    win,
-    `(() => {
-      const t = document.body ? document.body.innerText : '';
-      const m = t.match(/總分\\s*[=＝]\\s*(\\d+)/);
-      if (m) return parseInt(m[1]);
-      // Fallback: look for standalone score pattern
-      const m2 = t.match(/(\\d+)\\s*分/);
-      return m2 ? parseInt(m2[1]) : null;
-    })()`,
-  );
+  // Poll for score up to 12 s — submit triggers a navigation/AJAX update
+  // and 4 s isn't always enough on slow SPOC subdomains.
+  for (let i = 0; i < 12; i++) {
+    await wait(1000);
+    const score = await execJs<number>(
+      win,
+      `(() => {
+        const t = document.body ? document.body.innerText : '';
+        // Patterns observed in the wild — try most-specific first.
+        const patterns = [
+          /總分\\s*[=＝:：]\\s*(\\d+)/,
+          /得分\\s*[=＝:：]\\s*(\\d+)/,
+          /成績\\s*[=＝:：]\\s*(\\d+)/,
+          /您的分數\\s*[=＝:：]?\\s*(\\d+)/,
+          /分數\\s*[=＝:：]\\s*(\\d+)/,
+          /\\b(\\d{1,3})\\s*分(?:\\s|$|，|。|！)/,
+        ];
+        for (const re of patterns) {
+          const m = t.match(re);
+          if (m) {
+            const n = parseInt(m[1], 10);
+            if (n >= 0 && n <= 100) return n;
+          }
+        }
+        return null;
+      })()`,
+    );
+    if (typeof score === "number") return score;
+  }
+  return null;
 }
 
 // ─── Get exam URL from s_main togo button ────────────────────
@@ -247,31 +291,53 @@ async function runExamLoop(
 ): Promise<number | null> {
   let best: number | null = null;
 
+  // Brute-force the exam: each navigation hiccup gets a retry rather than
+  // aborting the whole loop. Some elearn pages return an empty sysbar / no
+  // togo on the first hit but populate it on a refresh; previously we'd
+  // give up after one bad attempt and report 0 score forever. Now we burn
+  // through the full MAX_EXAM_ATTEMPTS budget unless we already passed.
+  let consecutiveSetupFailures = 0;
   for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
-    // Re-enter LC for fresh state on each attempt
+    if (best !== null && best >= 60) break; // good enough to pass
+
     const ok = await enterLC(win, cid, onProgress);
     if (!ok) {
-      onProgress(`enterLC 失敗 (attempt ${attempt})`);
-      break;
+      onProgress(`enterLC 失敗 (attempt ${attempt})；${attempt < MAX_EXAM_ATTEMPTS ? "稍候重試" : "放棄"}`);
+      consecutiveSetupFailures++;
+      if (consecutiveSetupFailures >= 3) break; // 3 連續 setup fail 才真的放棄
+      await wait(3000);
+      continue;
     }
 
     const links = await getSysbarLinks(win);
     if (!links.some((l) => new RegExp(menuPattern).test(l))) {
-      onProgress(`找不到「${menuPattern}」選單（links: ${links.join("|")}）`);
-      break;
+      onProgress(`找不到「${menuPattern}」選單 (attempt ${attempt})；${attempt < MAX_EXAM_ATTEMPTS ? "稍候重試" : "放棄"}`);
+      consecutiveSetupFailures++;
+      if (consecutiveSetupFailures >= 3) break;
+      await wait(3000);
+      continue;
     }
 
     const clicked = await clickSysbarLink(win, menuPattern);
     if (!clicked) {
-      onProgress(`clickSysbarLink 失敗`);
-      break;
+      onProgress(`clickSysbarLink 失敗 (attempt ${attempt})`);
+      consecutiveSetupFailures++;
+      if (consecutiveSetupFailures >= 3) break;
+      await wait(3000);
+      continue;
     }
 
     const examUrl = await getExamUrl(win);
     if (!examUrl) {
-      onProgress(`找不到 togo 按鈕`);
-      break;
+      onProgress(`找不到 togo 按鈕 (attempt ${attempt})；${attempt < MAX_EXAM_ATTEMPTS ? "可能 sysbar 還沒載入完，稍候重試" : "放棄"}`);
+      consecutiveSetupFailures++;
+      if (consecutiveSetupFailures >= 3) break;
+      await wait(5000);
+      continue;
     }
+
+    // Reaching here means setup succeeded; reset the failure counter.
+    consecutiveSetupFailures = 0;
 
     const { score } = await runOneAttempt(win, examUrl, `${label} #${attempt}`, bySource, onProgress);
 
@@ -307,7 +373,12 @@ export async function solveExam(
     show: false,
     width: 1280,
     height: 900,
-    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      disableDialogs: true,
+    },
   });
   suppressDialogs(win);
 

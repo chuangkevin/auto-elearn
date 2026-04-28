@@ -17,7 +17,7 @@ import {
 } from "../shared/ipc";
 import { createBus } from "./bus";
 import { attachElearnView, autoLoginInView, detectLogin, dismissNuisancePopups } from "./browser/view";
-import { loadConfig, saveConfig } from "./llm/gemini";
+import { loadConfig, saveConfig, setGeminiLogger } from "./llm/gemini";
 import { discover } from "./course/discovery";
 import { enrollMany } from "./course/enrollment";
 import { unenrollCourse } from "./course/unenroll";
@@ -169,6 +169,10 @@ function log(level: "info" | "warn" | "error", msg: string) {
   // eslint-disable-next-line no-console
   console.log(`[${level}] ${msg}`);
 }
+
+// Pipe Gemini failures to the visible UI log so the user actually sees WHY
+// the LLM fallback didn't help (bad key, quota exceeded, network, etc).
+setGeminiLogger((msg) => log("warn", `[gemini] ${msg}`));
 
 // ── Server-progress poll cache (shared across parallel driveCourse calls) ──
 let _pollCache: { ts: number; map: Map<string, PollData> } | null = null;
@@ -833,14 +837,19 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     if (abortSignal.aborted) return;
     const card = state.courses.find((c) => c.cid === cid);
     try {
-      // Fresh detail to drive exam/survey skip decisions with current server data
+      // Fresh detail to drive survey skip decisions with current server data.
+      // Note: we DON'T use detail.examScore as a "skip exam" signal — a score
+      // of 0 just means "you got 0 last time you tried", not "exam done".
+      // Anything below 通過 should still re-attempt; solver handles "no togo
+      // button" gracefully if the page genuinely has no exam.
       const fresh = await fetchCourseDetail(session, cid);
-      const examScored = fresh?.examScore != null;
       const surveyDone = fresh?.surveyDone === true;
       const passed = fresh?.passed === true;
 
-      // 1. 測驗
-      if (!passed && !examScored && !abortSignal.aborted) {
+      // 1. 測驗 — re-run unless 通過狀態 == 通過. Skipping on examScore != null
+      //    silently ignored courses showing "測驗 0 分" (= attempted, failed,
+      //    needs retake to pass).
+      if (!passed && !abortSignal.aborted) {
         log("info", `開始測驗：${name}`);
         const res = await solveExam(cid, session, {
           onProgress: (msg) => log("info", `  [${name}] ${msg}`),

@@ -154,24 +154,33 @@ export function attachElearnView(win: BrowserWindow, url: string): BrowserView {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Chromium-level kill switch for JS alert/confirm/prompt — much
+      // earlier than any frame-created / dom-ready hook because it
+      // intercepts at the renderer process level. SCORM player's
+      // alert("更新完畢") / alert("Error while parsing the document.")
+      // never reaches the user.
+      disableDialogs: true,
     },
   });
   win.setBrowserView(view);
   view.webContents.loadURL(url);
 
-  // Suppress JS alert / confirm / prompt on every frame load. Without this,
-  // some elearn course pages call alert("Error while parsing the document.")
-  // when their SCORM/XML manifest fails to parse, which pops a modal that
-  // freezes our automation. Re-applies on every frame load so iframes
-  // navigated later inherit it.
-  view.webContents.on("did-frame-finish-load", () => {
-    view.webContents
-      .executeJavaScript(
-        `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`,
-        true,
-      )
-      .catch(() => void 0);
+  // Suppress JS alert / confirm / prompt at the earliest possible point on
+  // every frame. elearn fires alert("Error while parsing the document.")
+  // and alert("更新完畢") synchronously as SCORM scripts execute — must
+  // override window.alert BEFORE those scripts run, otherwise the native
+  // Electron dialog pops up titled "auto-elearn".
+  // `frame-created` is the earliest per-frame hook and covers iframes too.
+  const SUPPRESS = `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`;
+  const injectInto = (target: { executeJavaScript: (s: string) => Promise<unknown> }) => {
+    target.executeJavaScript(SUPPRESS).catch(() => void 0);
+  };
+  view.webContents.on("frame-created", (_event, details) => {
+    if (details.frame) injectInto(details.frame);
   });
+  view.webContents.on("dom-ready", () => injectInto(view.webContents));
+  view.webContents.on("did-frame-finish-load", () => injectInto(view.webContents));
+  view.webContents.on("will-prevent-unload", (e) => e.preventDefault());
 
   // Re-run popup dismiss on every navigation (site shows popup_learn_record modal on dashboard entry)
   view.webContents.on("did-finish-load", () => {

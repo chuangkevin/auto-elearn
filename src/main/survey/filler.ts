@@ -28,7 +28,12 @@ export async function fillSurvey(
     show: false,
     width: 1280,
     height: 900,
-    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      disableDialogs: true,
+    },
   });
   suppressDialogs(win);
 

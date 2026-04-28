@@ -158,8 +158,14 @@ async function _extractTicketImpl(
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Chromium-level alert/confirm/prompt suppression — earlier than any
+      // JS hook. SCORM scripts pop "更新完畢" / "Error while parsing the
+      // document" synchronously during page load; without this they appear
+      // as a native dialog (modal to parent app, even though show:false).
+      disableDialogs: true,
     },
   });
+  win.webContents.on("will-prevent-unload", (e) => e.preventDefault());
 
   try {
     await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);

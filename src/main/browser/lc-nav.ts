@@ -15,16 +15,24 @@ export async function execJs<T>(win: BrowserWindow, code: string): Promise<T | n
   }
 }
 
-/** Suppress alert/confirm/prompt in all frames of win. */
+/**
+ * Suppress alert/confirm/prompt in all frames of win.
+ * Hooks `frame-created` (earliest per-frame point) so the override lands
+ * BEFORE SCORM scripts run their alert("...") on parse failure / 更新完畢.
+ * Also re-applies on dom-ready and finish-load as a safety net.
+ */
 export function suppressDialogs(win: BrowserWindow): void {
-  win.webContents.on("did-frame-finish-load", () => {
-    win.webContents
-      .executeJavaScript(
-        `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`,
-        true,
-      )
-      .catch(() => void 0);
+  const SUPPRESS = `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`;
+  win.webContents.on("frame-created", (_event, details) => {
+    if (details.frame) details.frame.executeJavaScript(SUPPRESS).catch(() => void 0);
   });
+  win.webContents.on("dom-ready", () => {
+    win.webContents.executeJavaScript(SUPPRESS, true).catch(() => void 0);
+  });
+  win.webContents.on("did-frame-finish-load", () => {
+    win.webContents.executeJavaScript(SUPPRESS, true).catch(() => void 0);
+  });
+  win.webContents.on("will-prevent-unload", (e) => e.preventDefault());
 }
 
 /**
