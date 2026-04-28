@@ -849,11 +849,17 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       // 1. 測驗 — re-run unless 通過狀態 == 通過. Skipping on examScore != null
       //    silently ignored courses showing "測驗 0 分" (= attempted, failed,
       //    needs retake to pass).
+      // Pass threshold floor: 80. Some courses' /info page declares a lower
+      // bar (e.g. 60), but server can be picky about extra criteria, and
+      // the user explicitly wants 80 as the safe minimum across the board.
+      // Use whichever is HIGHER between the page-declared threshold and 80.
       if (!passed && !abortSignal.aborted) {
-        log("info", `開始測驗：${name}（門檻 ${fresh?.passingScore ?? 60} 分）`);
+        const declared = fresh?.passingScore ?? 60;
+        const threshold = Math.max(declared, 80);
+        log("info", `開始測驗：${name}（門檻 ${threshold} 分${declared !== threshold ? `；課程要求 ${declared} 但全域下限 80` : ""}）`);
         const res = await solveExam(cid, session, {
           onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-          passingScore: fresh?.passingScore ?? 60,
+          passingScore: threshold,
         });
         if (res.ok) {
           const scoreStr = res.score != null ? `${res.score}分` : "?";
