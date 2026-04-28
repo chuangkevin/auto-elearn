@@ -421,6 +421,10 @@ interface AttemptResult {
   score: number | null;
   questions: ExtractedQuestion[];
   learned: number;
+  /** Validated result-page answers from this attempt (matched to a question
+   *  + one of its options). Used by runExamLoop to lock those Qs into
+   *  bfStates so brute-force probing skips them next round. */
+  learnedFromResult: ResultEntry[];
   /** Option idx that was actually selected for each question, by question index. */
   picksByIdx: number[];
 }
@@ -448,7 +452,7 @@ async function runOneAttempt(
   const questions = await extractQuestions(win);
   if (questions.length === 0) {
     onProgress(`[${label}] 無法取得題目`);
-    return { score: null, questions: [], learned: 0, picksByIdx: [] };
+    return { score: null, questions: [], learned: 0, learnedFromResult: [], picksByIdx: [] };
   }
   onProgress(
     `[${label}] ${questions.length} 題${opts.skipMixedDb ? "（跳過 mixed.db，強制 LLM/learned）" : ""}${opts.forcedAnswers && opts.forcedAnswers.size > 0 ? `（暴力覆蓋 ${opts.forcedAnswers.size} 題）` : ""}`,
@@ -510,6 +514,7 @@ async function runOneAttempt(
   // parser hitting unrelated "正確" decoration text doesn't pollute
   // learned_answers.
   let learned = 0;
+  let learnedFromResult: ResultEntry[] = [];
   if (score !== null) {
     // Always dump the first result page once per process so we can verify
     // the parser format off-line — independent of whether parsing
@@ -517,11 +522,11 @@ async function runOneAttempt(
     // fired when the parser was over-matching garbage.)
     await dumpResultHtml(win, cid);
 
-    const correctAnswers = await extractResultAnswers(win, questions);
-    for (const { question, correct } of correctAnswers) {
+    learnedFromResult = await extractResultAnswers(win, questions);
+    for (const { question, correct } of learnedFromResult) {
       saveLearnedAnswer({ question, answer: correct, source: "result-page", confidence: 1.0, courseId: cid });
     }
-    learned = correctAnswers.length;
+    learned = learnedFromResult.length;
     if (learned > 0) {
       onProgress(`[${label}] 從成績頁學到 ${learned} 題正解（已驗證對應題目+選項）`);
     } else if (score < opts.passingScore) {
@@ -529,7 +534,7 @@ async function runOneAttempt(
     }
   }
 
-  return { score, questions, learned, picksByIdx };
+  return { score, questions, learned, learnedFromResult, picksByIdx };
 }
 
 // ─── Exam loop (retry until 100 or max attempts) ──────────────
@@ -671,7 +676,7 @@ async function runExamLoop(
       }
     }
 
-    const { score, learned, questions, picksByIdx } = await runOneAttempt(
+    const { score, learned, learnedFromResult, questions, picksByIdx } = await runOneAttempt(
       win,
       cid,
       examUrl,
@@ -681,19 +686,24 @@ async function runExamLoop(
       { skipMixedDb, passingScore, forcedAnswers },
     );
 
-    if (score !== null && (best === null || score > best)) best = score;
+    // NOTE: do NOT update `best` here yet — the brute-force compare below
+    // needs the OLD ceiling to classify the probe as ↑/↓/=. `best` gets
+    // promoted inside the ↑ branch (or implicitly by capturing it on the
+    // first scoring attempt where bfStates is null).
 
     // Initialize / update brute-force state from this attempt's results.
-    // The decision uses `best` (overall best across all attempts) as the
-    // reference, NOT a per-Q stored score — once one Q's flip lifts the
-    // ceiling, every subsequent Q's probe must compare to the new ceiling
-    // or we'd misclassify "still right" Qs as ambiguous "=".
+    // The decision uses the prior `best` (overall best across all attempts)
+    // as the reference, NOT a per-Q stored score — once one Q's flip lifts
+    // the ceiling, every subsequent Q's probe must compare to the new
+    // ceiling or we'd misclassify "still right" Qs as ambiguous "=".
     if (score !== null) {
       const priorBest = best ?? score;
-      if (score > priorBest) best = score;
 
       if (!bfStates) {
-        // First scoring attempt — seed state from each question's pick.
+        // First scoring attempt — seed state from each question's pick AND
+        // capture the baseline as `best`. Subsequent probes compare
+        // against this number until the ↑ branch promotes it.
+        best = score;
         bfStates = new Map();
         bfQueue = [];
         for (const q of questions) {
@@ -745,6 +755,30 @@ async function runExamLoop(
             // do NOT advance bfQueueIdx — same Q, next option next round
           }
         }
+      }
+    }
+
+    // Integrate result-page learnings into bfStates: when elearn shows the
+    // correct answer post-submission, lock that Q's bestOption to the
+    // matched option idx and remove it from the probe queue. This is the
+    // free-lunch path — no probe attempts wasted on a Q whose answer the
+    // server already gave us.
+    if (bfStates && learnedFromResult.length > 0) {
+      for (const entry of learnedFromResult) {
+        const key = normalizeQuestion(entry.question);
+        const st = bfStates.get(key);
+        if (!st) continue;
+        const optIdx = matchOptionText(entry.correct, st.options);
+        if (optIdx === null || optIdx < 0) continue;
+        if (st.bestOption === optIdx) continue; // already locked at the right one
+        st.bestOption = optIdx;
+        st.tested = new Set(st.options.map((_, i) => i)); // mark all options tested → won't be probed again
+        // Pop this Q out of the queue if it's the current head, so the next
+        // iteration doesn't re-probe a Q the server already settled.
+        while (bfQueueIdx < bfQueue.length && bfQueue[bfQueueIdx] === key) bfQueueIdx++;
+        onProgress(
+          `[${label}] 🎓 結果頁告知正解：「${st.questionText.slice(0, 24)}…」 = opt[${optIdx}] 「${(st.options[optIdx] ?? "").slice(0, 24)}」（已鎖定，跳過暴力探測）`,
+        );
       }
     }
 
