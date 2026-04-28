@@ -61,7 +61,12 @@ export function classify(c: Course, detail?: CourseDetail | null): CoursePhase {
     if (officiallyPassed) return "done";
 
     if (!readingDone && !examActuallyPassed && !surveyDone) return "reading";
-    if (hasExam && !examActuallyPassed) return "exam";
+    // detail.examScore !== null proves the course HAS an exam — listing's
+    // exam_exists is as unreliable as isReadDones (course "我國電動車" v0.4.5
+    // bug: listing reported no exam, detail showed 60 分 < 80, classify
+    // skipped "exam" branch and returned "rating", lighting ✓ 測驗 falsely).
+    const examPresent = hasExam || detail.examScore !== null;
+    if (examPresent && !examActuallyPassed) return "exam";
     if (!surveyDone) return "survey";
     return "rating";
   }

@@ -1781,8 +1781,12 @@ function Monitor({ state }: { state: AppState }) {
             // currently in, instead of just a single phase label that mixes
             // "is this 5%-into-reading or 5%-into-finishing" together.
             const readingDone = c.readSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
-            const examDoneFlag = c.examDone || c.phase === "survey" || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
-            const surveyDoneFlag = c.surveyDone || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
+            // ✓ only when server actually credits the phase (c.examDone =
+            // detail.examScore >= passFloor; c.surveyDone = detail.surveyDone===true).
+            // No phase-based fallback — phase can race ahead of /info poll and
+            // user explicitly required UI must not lie.
+            const examDoneFlag = c.examDone || c.phase === "done";
+            const surveyDoneFlag = c.surveyDone || c.phase === "done";
             const reflectionDoneFlag = c.reflectionDone || c.phase === "done";
             const stepActive = (done: boolean, isCurrent: boolean) =>
               done
