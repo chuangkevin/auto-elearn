@@ -79,7 +79,17 @@ function pickBestActid(
  * course HTTP heartbeats still run at full HEARTBEAT_PARALLEL_MAX — only
  * the BrowserWindow-driven phases need throttling.
  */
-export const ELEARN_WINDOW_CONCURRENCY = 2;
+// Reduced from 2 to 1 after the sinica.elearn cid 10047013/10047031 incident:
+// both cids share enCid 10001418 (one underlying SCORM course, two listings).
+// Parallel extractTicket on shared-enCid courses caused the second nav to
+// overwrite the server-side LC session cookie before the first window's
+// SCORM iframe finished loading — both ended up scraping the SAME actid,
+// so server only credited reading time to ONE listing while the other
+// stayed at "閱讀時數: 0". Sequential extraction guarantees each cid
+// captures its own SCORM context. The chain's pure-HTTP heartbeats still
+// fire at full HEARTBEAT_PARALLEL_MAX after extraction; only the
+// BrowserWindow-driven /info → 上課去 startup is throttled.
+export const ELEARN_WINDOW_CONCURRENCY = 1;
 let _extractActive = 0;
 const _extractWaiters: Array<() => void> = [];
 
@@ -308,6 +318,21 @@ async function _extractTicketImpl(
           .candidates ?? [];
         if (!data.actid && initialCandidates.length > 0) {
           data.actid = pickBestActid(initialCandidates, caption);
+        }
+        // Always dump the candidates list so shared-enCid SCORM trees and
+        // mis-picked actids are inspectable post-mortem without re-running.
+        try {
+          writeFileSync(
+            join(app.getPath("temp"), `auto-elearn-actid-${cid}.json`),
+            JSON.stringify(
+              { cid, encCid: data.cid, href: data.href, caption, picked: data.actid, candidates: initialCandidates },
+              null,
+              2,
+            ),
+            "utf8",
+          );
+        } catch {
+          /* non-fatal */
         }
         // CRITICAL: actually CLICK the lesson link in the SCORM tree, don't
         // just call goToActivity programmatically. Three reasons:
