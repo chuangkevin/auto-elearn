@@ -883,14 +883,27 @@ async function runPipelineFor(cids: string[]): Promise<void> {
 
       // 3. 心得
       if (!abortSignal.aborted) {
-        const rr = await writeReflection(cid, name, session, {
-          onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-        });
-        if (rr.ok) {
-          log("info", `心得完成 ${name}（${rr.source}）`);
-          if (card) card.reflectionDone = true;
-        } else if (rr.error && !rr.error.includes("略過")) {
-          log("warn", `心得失敗 ${name}：${rr.error}`);
+        // Re-check the detail page — exam+survey may have just flipped the
+        // course to 已通過 on server, in which case /info/{cid} 上課去 stops
+        // navigating to the LC and the reflection click would time out at
+        // frames=0. Don't bother trying.
+        const refreshed = await fetchCourseDetail(session, cid);
+        if (refreshed?.passed === true) {
+          log("info", `${name}：課程已通過，跳過心得`);
+          if (card) {
+            card.reflectionDone = true;
+            card.phase = "done";
+          }
+        } else {
+          const rr = await writeReflection(cid, name, session, {
+            onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+          });
+          if (rr.ok) {
+            log("info", `心得完成 ${name}（${rr.source}）`);
+            if (card) card.reflectionDone = true;
+          } else if (rr.error && !rr.error.includes("略過")) {
+            log("warn", `心得失敗 ${name}：${rr.error}`);
+          }
         }
       }
 

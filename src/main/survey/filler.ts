@@ -24,12 +24,18 @@ export async function fillSurvey(
   const log = opts.onProgress ?? (() => void 0);
   const result: SurveyResult = { ok: false, filled: 0, submitted: false };
 
-  // No disableDialogs — see reader.ts; window.confirm must return true.
+  // disableDialogs at Chromium-level (see reader.ts). confirm() override
+  // happens just-in-time via lc-nav.ts before clicking 上課去.
   const win = new BrowserWindow({
     show: false,
     width: 1280,
     height: 900,
-    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      disableDialogs: true,
+    },
   });
   suppressDialogs(win);
 

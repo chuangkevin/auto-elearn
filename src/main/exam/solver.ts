@@ -369,14 +369,19 @@ export async function solveExam(
     bySource: { db: 0, fuzzy: 0, llm: 0, random: 0 },
   };
 
-  // No disableDialogs — see reader.ts notes; we need window.confirm to
-  // return true for elearn's 「您已完成此課程，確定要繼續嗎?」 prompt so
-  // the 上課去 click actually navigates.
+  // disableDialogs kills alert/prompt at Chromium level. confirm() is
+  // overridden to return true via JS injection in lc-nav.ts before any
+  // click on 上課去 — see enterLC().
   const win = new BrowserWindow({
     show: false,
     width: 1280,
     height: 900,
-    webPreferences: { session, contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      disableDialogs: true,
+    },
   });
   suppressDialogs(win);
 

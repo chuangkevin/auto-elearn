@@ -158,25 +158,15 @@ async function _extractTicketImpl(
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      // NOTE: don't enable disableDialogs here. elearn's 上課去 button
-      // calls window.confirm("您已完成此課程，確定要繼續嗎?") on courses
-      // that have been previously taken — disableDialogs forces confirm
-      // to return false, the location.href change never fires, enterLC
-      // times out at frames=0. Instead inject window.confirm = () => true
-      // via JS so the answer is "yes, continue".
+      // disableDialogs kills alert("更新完畢") / alert("Error while
+      // parsing the document.") at the Chromium level — much earlier than
+      // any JS hook. The downside is window.confirm() also gets forced
+      // to return false at the same level, which would block elearn's
+      // 「您已完成此課程，確定要繼續嗎?」 dialog. We compensate by
+      // overriding window.confirm via JS injection (with `world: "main"`)
+      // BEFORE we click 上課去 — see lc-nav.ts.
+      disableDialogs: true,
     },
-  });
-  // Override alert/confirm/prompt as early as possible. confirm MUST return
-  // true so the player proceeds; alert/prompt are no-ops.
-  const SUPPRESS = `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`;
-  win.webContents.on("frame-created", (_event, details) => {
-    if (details.frame) details.frame.executeJavaScript(SUPPRESS).catch(() => void 0);
-  });
-  win.webContents.on("dom-ready", () => {
-    win.webContents.executeJavaScript(SUPPRESS, true).catch(() => void 0);
-  });
-  win.webContents.on("did-frame-finish-load", () => {
-    win.webContents.executeJavaScript(SUPPRESS, true).catch(() => void 0);
   });
   win.webContents.on("will-prevent-unload", (e) => e.preventDefault());
 

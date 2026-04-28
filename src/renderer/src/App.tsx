@@ -1776,6 +1776,29 @@ function Monitor({ state }: { state: AppState }) {
         <div className="space-y-1 max-h-48 overflow-auto bg-slate-900/40 rounded p-2">
           {running.map((c) => {
             const pct = c.requiredSec > 0 ? Math.min(100, Math.round((c.readSec / c.requiredSec) * 100)) : 0;
+            // Per-course stepper mirroring elearn's "✓ 閱讀時數 / 2 測驗 / 3 問卷"
+            // strip. Lets the user see at a glance which phase each course is
+            // currently in, instead of just a single phase label that mixes
+            // "is this 5%-into-reading or 5%-into-finishing" together.
+            const readingDone = c.readSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
+            const examDoneFlag = c.examDone || c.phase === "survey" || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
+            const surveyDoneFlag = c.surveyDone || c.phase === "rating" || c.phase === "reflection" || c.phase === "done";
+            const reflectionDoneFlag = c.reflectionDone || c.phase === "done";
+            const stepActive = (done: boolean, isCurrent: boolean) =>
+              done
+                ? "bg-emerald-600 text-white"
+                : isCurrent
+                ? "bg-amber-500 text-white animate-pulse"
+                : "bg-slate-700 text-slate-400";
+            const currentPhase = !readingDone
+              ? "reading"
+              : !examDoneFlag
+              ? "exam"
+              : !surveyDoneFlag
+              ? "survey"
+              : !reflectionDoneFlag
+              ? "reflection"
+              : "done";
             return (
               <div
                 key={c.cid}
@@ -1795,8 +1818,23 @@ function Monitor({ state }: { state: AppState }) {
                   <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
                     {pct}% · {Math.floor(c.readSec / 60)}/{Math.floor(c.requiredSec / 60)} 分
                   </span>
-                  <span className="text-[10px] text-slate-400 whitespace-nowrap min-w-[3rem] text-right">
-                    {phaseLabel(c.phase)}
+                </div>
+                {/* Phase stepper: ✓ 閱讀 / ② 測驗 / ③ 問卷 / ④ 心得 */}
+                <div className="flex items-center gap-1 mt-1 text-[10px]">
+                  <span className={`px-1.5 py-0.5 rounded ${stepActive(readingDone, currentPhase === "reading")}`}>
+                    {readingDone ? "✓" : "①"} 閱讀
+                  </span>
+                  <span className="text-slate-600">›</span>
+                  <span className={`px-1.5 py-0.5 rounded ${stepActive(examDoneFlag, currentPhase === "exam")}`}>
+                    {examDoneFlag ? "✓" : "②"} 測驗
+                  </span>
+                  <span className="text-slate-600">›</span>
+                  <span className={`px-1.5 py-0.5 rounded ${stepActive(surveyDoneFlag, currentPhase === "survey")}`}>
+                    {surveyDoneFlag ? "✓" : "③"} 問卷
+                  </span>
+                  <span className="text-slate-600">›</span>
+                  <span className={`px-1.5 py-0.5 rounded ${stepActive(reflectionDoneFlag, currentPhase === "reflection")}`}>
+                    {reflectionDoneFlag ? "✓" : "④"} 心得
                   </span>
                 </div>
               </div>

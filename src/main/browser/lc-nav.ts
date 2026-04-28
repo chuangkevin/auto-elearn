@@ -77,9 +77,27 @@ async function _enterLCImpl(
   });
 
   log(`enterLC: loading /info/${cid}`);
-  await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
+  try {
+    await win.loadURL(`https://elearn.hrd.gov.tw/info/${cid}`);
+  } catch (e) {
+    // ERR_ABORTED here is usually elearn's multi-window guard redirecting
+    // us to /mooc/warning.php mid-load. Bail; the caller will retry.
+    log(`enterLC: loadURL failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
   await wait(2500);
   log(`enterLC: post-load url=${win.webContents.getURL()}`);
+
+  // Override window.confirm BEFORE clicking 上課去. With disableDialogs
+  // enabled at the BrowserWindow level (Chromium kills alert/prompt
+  // outright), confirm would also default to false — which would block
+  // elearn's 「您已完成此課程，確定要繼續嗎?」 prompt and the click
+  // would never trigger location.href. We inject the override into the
+  // page's main world right before the click so confirm returns true.
+  await execJs(
+    win,
+    `(() => { try { window.confirm = () => true; } catch(e){} })();`,
+  );
 
   // Click launch button
   const clickResult = await execJs<{ found: boolean; tag?: string; text?: string }>(
@@ -112,6 +130,14 @@ async function _enterLCImpl(
   const url = win.webContents.getURL();
   const frameCount = (await execJs<number>(win, `window.frames.length`)) ?? 0;
   log(`enterLC: post-click url=${url} frames=${frameCount} popup=${capturedLcUrl ?? "-"}`);
+
+  // Multi-window guard: elearn redirects to /mooc/warning.php when too
+  // many concurrent windows hit the same course session. Bail early so
+  // caller can back off and retry.
+  if (url.includes("/mooc/warning.php")) {
+    log("enterLC: 多重視窗 guard 命中 (/mooc/warning.php)，放棄此次重試");
+    return false;
+  }
 
   // The LC frameset can live on several hosts:
   //   • center.elearn.hrd.gov.tw/mooc/...   (central platform)
