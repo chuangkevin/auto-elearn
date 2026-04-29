@@ -26,16 +26,29 @@ jobs:
         run: npm run build:win
 
       - name: Zip portable exe
+        # CRITICAL: only zip the portable artifact at release/ top level.
+        # electron-builder also drops release/win-unpacked/auto-elearn.exe
+        # which DOESN'T work standalone (it's the unpacked layout that
+        # needs all the surrounding *.dll / locales / resources to run).
+        # An earlier `-Recurse` version was zipping that broken exe too,
+        # uploading both to the GitHub Release, and users grabbed the
+        # short-named "auto-elearn.zip" → got "找不到 ffmpeg.dll" on launch.
         shell: pwsh
         run: |
-          Get-ChildItem -Path release -Filter "*.exe" -Recurse | ForEach-Object {
-            $dest = "release\$($_.BaseName).zip"
-            Compress-Archive -Path $_.FullName -DestinationPath $dest -Force
+          $portable = Get-ChildItem -Path release -Filter "*-win-portable.exe" -File
+          if (-not $portable) {
+            Write-Error "Portable exe not found under release/ (top level)"
+            exit 1
+          }
+          foreach ($exe in $portable) {
+            $dest = "release\$($exe.BaseName).zip"
+            Compress-Archive -Path $exe.FullName -DestinationPath $dest -Force
             Write-Host "Zipped: $dest"
           }
 
       - name: Create GitHub Release and upload artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.zip
+          # Only the portable zip — never the win-unpacked exe.
+          files: release/*-win-portable.zip
           generate_release_notes: true
