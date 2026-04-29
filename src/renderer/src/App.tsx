@@ -1145,7 +1145,9 @@ function StealthSetupCard({
       </p>
       <p className="text-xs text-slate-500 mb-2">忘記密碼怎麼辦？</p>
       <div className="mb-3 text-xs text-slate-400 leading-relaxed bg-slate-800/50 border border-slate-700 rounded px-2 py-2">
-        在記事本裡點上面的「<b>檔案</b> → <b>結束</b>」，連續點 5 次，就會跳出重設密碼的視窗。
+        在記事本最上面那排點「<b>檔案</b>」 → 點最下面那項「<b>結束</b>」，
+        選單會收起來，再點一次「<b>檔案</b>」 → 「<b>結束</b>」，
+        這樣重複到「結束」被點到第 <b>5</b> 次（15 秒內，畫面右下會看到 <code>1/5、2/5…</code> 計數）就會跳出重設密碼的視窗。
       </div>
       <p className="text-[11px] text-slate-500 mb-1">這組密碼存在這個檔案裡：</p>
       <div className="mb-4 font-mono text-[10px] text-slate-300 bg-slate-950 border border-slate-700 rounded px-2 py-1 break-all select-all">

@@ -15,6 +15,26 @@ body,
   overflow: hidden;
 }
 
+/*
+ * 視窗極小時的防跑版保險。
+ *
+ * BrowserWindow 已經設了 minWidth: 1100 / minHeight: 720（main/index.ts），
+ * 一般 Windows 桌面拖不到比這小，但下面幾種狀況還是會擠到：
+ *   - 高 DPI 縮放 175%/200% 時，渲染區實際寬度 < window 物理寬度
+ *   - 兩塊不同解析度螢幕拖拉時，部分 driver 會短暫忽略 minWidth
+ *   - 使用者把視窗拖到副螢幕邊緣讓系統強制縮成一半
+ *
+ * 比 BrowserWindow.minWidth 寬一點點，防止 flex 排版被擠壞 — 真的不夠寬就
+ * 在 body 出現水平捲軸給使用者捲，比直接破版好。垂直就吃 viewport，避免
+ * #root 的 height:100% 變得無意義。
+ */
+body {
+  min-width: 1100px;
+  min-height: 600px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
