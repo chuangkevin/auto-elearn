@@ -244,8 +244,16 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // 必須包含 leftCollapsed —— 收起 / 展開左邊操作區會改變 #browserview-mount
+    // 的 flex（leftFlex 變 0 0 28px、rightFlex 變 1 1 auto），對應的 bounds
+    // 要重推給 main。光靠 ResizeObserver 在 flex 1 1 auto 邊界 case 不可靠，
+    // 不顯式帶 dep 會讓 BrowserView 卡在舊 bounds、原本左半變黑色空白區。
     pushBrowserViewBounds();
-  }, [browserRatio, collapsed]);
+    // belt-and-braces：layout 在某些 zoom / DPI 下會多 reflow 一次，
+    // 50ms 後再推一次保險。
+    const t = setTimeout(pushBrowserViewBounds, 50);
+    return () => clearTimeout(t);
+  }, [browserRatio, collapsed, leftCollapsed]);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
