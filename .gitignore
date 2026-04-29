@@ -21,3 +21,4 @@ Thumbs.db
 user-data/
 data/*.db-wal
 data/*.db-shm
+verify_screenshots/

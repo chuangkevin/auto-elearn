@@ -47,6 +47,9 @@ declare global {
       stealthLock: () => void;
       stealthConfigPath: () => Promise<string>;
       openGeminiDialog: () => void;
+      onGeminiDialogRequest: (cb: () => void) => () => void;
+      getGeminiKey: () => Promise<string>;
+      setGeminiKey: (key: string) => Promise<void>;
       ackFirstRun: () => void;
       rendererLog: (level: "info" | "warn" | "error", msg: string) => void;
       openLogsFolder: () => void;
@@ -647,6 +650,165 @@ function GeminiInfoCard({
   );
 }
 
+/**
+ * Gemini API Key 設定 modal — v0.6.7 從 child BrowserWindow 改成 renderer 內的
+ * React component（多螢幕環境下原本會跑到別的 monitor 看起來像「程式黑掉卡住」）。
+ *
+ * 行為：
+ * - 開起來時自動 fetch 既有 key 並填入（`getGeminiKey()`）。
+ * - 顯示 / 隱藏切換用 type="password" / "text"。
+ * - Enter 送出，Esc 關閉。
+ * - 「儲存」呼叫 `setGeminiKey(key.trim())`；「清除」呼叫 `setGeminiKey("")`；
+ *   「取消」直接關閉，不寫入。
+ * - 視覺風格沿用原本 gemini-key-dialog.html 的 catppuccin 紫色主題，貼到主視窗
+ *   裡也不違和。
+ */
+function GeminiKeyModal({ onClose }: { onClose: () => void }) {
+  const [keyValue, setKeyValue] = useState("");
+  const [show, setShow] = useState(false);
+  const [status, setStatus] = useState<{ msg: string; color: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // 載入既有 key（如果有）。失敗就讓欄位空著，使用者可以重新打。
+  useEffect(() => {
+    let cancelled = false;
+    window.api
+      .getGeminiKey()
+      .then((k) => {
+        if (!cancelled && k) setKeyValue(k);
+      })
+      .catch(() => void 0);
+    // 一進來就 focus 輸入框，使用者直接打
+    setTimeout(() => inputRef.current?.focus(), 0);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Esc 關閉。聽全域 keydown 而不是 input 的，這樣即使 focus 跑出 input 也能 Esc。
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function save() {
+    const key = keyValue.trim();
+    if (!key) {
+      setStatus({ msg: "請輸入 API Key", color: "#f38ba8" });
+      return;
+    }
+    setBusy(true);
+    try {
+      await window.api.setGeminiKey(key);
+      setStatus({ msg: "已儲存 ✓", color: "#a6e3a1" });
+      setTimeout(onClose, 700);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clear() {
+    setBusy(true);
+    try {
+      await window.api.setGeminiKey("");
+      setKeyValue("");
+      setStatus({ msg: "已清除", color: "#fab387" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="rounded-lg shadow-2xl w-[480px] max-w-[92vw] p-6"
+      style={{
+        background: "#1e1e2e",
+        color: "#cdd6f4",
+        fontFamily: "'Microsoft JhengHei', 'Segoe UI', sans-serif",
+      }}
+    >
+      <h3 className="text-sm font-semibold mb-4" style={{ color: "#cba6f7" }}>
+        🔑 設定 Gemini API Key
+      </h3>
+      <label className="block text-xs mb-1.5" style={{ color: "#a6adc8" }}>
+        API Key
+      </label>
+      <div className="relative">
+        <input
+          ref={inputRef}
+          type={show ? "text" : "password"}
+          value={keyValue}
+          onChange={(e) => setKeyValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void save();
+            }
+          }}
+          placeholder="AIzaSy…"
+          autoComplete="off"
+          spellCheck={false}
+          className="w-full px-2.5 py-2 pr-9 rounded-md outline-none border text-[13px]"
+          style={{
+            background: "#313244",
+            borderColor: "#45475a",
+            color: "#cdd6f4",
+            fontFamily: "Consolas, monospace",
+          }}
+        />
+        <span
+          onClick={() => setShow((s) => !s)}
+          title="顯示 / 隱藏"
+          className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-sm"
+          style={{ color: "#6c7086" }}
+        >
+          👁
+        </span>
+      </div>
+      <div className="text-[11px] mt-1.5" style={{ color: "#6c7086" }}>
+        Key 存在本機 config.json，不上傳。沒設定的話程式會用內建題庫和歷史紀錄答題，仍然能用。
+      </div>
+      <div className="text-xs mt-2.5 min-h-[18px]" style={{ color: status?.color }}>
+        {status?.msg ?? ""}
+      </div>
+      <div className="flex justify-end gap-2 mt-4">
+        <button
+          disabled={busy}
+          onClick={clear}
+          className="px-4 py-1.5 rounded-md text-[13px] disabled:opacity-50"
+          style={{ background: "#45475a", color: "#cdd6f4" }}
+        >
+          清除
+        </button>
+        <button
+          disabled={busy}
+          onClick={onClose}
+          className="px-4 py-1.5 rounded-md text-[13px] border disabled:opacity-50"
+          style={{
+            background: "#313244",
+            borderColor: "#45475a",
+            color: "#a6adc8",
+          }}
+        >
+          取消
+        </button>
+        <button
+          disabled={busy}
+          onClick={save}
+          className="px-4 py-1.5 rounded-md text-[13px] font-semibold disabled:opacity-50"
+          style={{ background: "#cba6f7", color: "#1e1e2e" }}
+        >
+          儲存
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Shell() {
   const [stealth, setStealth] = useState<StealthState | "loading">("loading");
   // React-managed setup dialog (Electron renderers return null from window.prompt,
@@ -656,6 +818,9 @@ export default function Shell() {
   const [setupConfirm, setSetupConfirm] = useState("");
   const [setupErr, setSetupErr] = useState<string | null>(null);
   const [showGeminiInfo, setShowGeminiInfo] = useState(false);
+  // v0.6.7：Gemini key 改成 renderer 內的 React modal（原本是 child BrowserWindow，
+  // 在多螢幕環境會跑到別的 monitor 看起來像「程式黑掉卡住」）。
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
 
   useEffect(() => {
     window.api
@@ -663,6 +828,14 @@ export default function Shell() {
       .then((s) => setStealth(s))
       .catch(() => setStealth("no_secret"));
   }, []);
+
+  // OS 選單「說明 → 設定 Gemini API Key」是 main 端發的事件，所以要 IPC subscribe；
+  // 偽裝鎖定（locked）時不開（locked UI 是 Noteqad，不該彈設定 modal）。
+  useEffect(() => {
+    if (stealth !== "unlocked" && stealth !== "no_secret") return;
+    const off = window.api.onGeminiDialogRequest?.(() => setShowGeminiKey(true));
+    return () => off?.();
+  }, [stealth]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -764,16 +937,33 @@ export default function Shell() {
         ⚙ Gemini
       </button>
 
-      {/* Gemini 說明卡片 — 由 Shell 管理（按鈕在 Shell 層） */}
+      {/* Gemini 說明卡片 — 由 Shell 管理（按鈕在 Shell 層）。
+          MUST 用 ModalGuard 包：BrowserView 是 Electron native overlay，
+          畫在 renderer 之上；不收掉 BrowserView 的話 modal 右半會被 elearn
+          網頁蓋住（v0.6.0 起的隱藏 regression，v0.6.7 補上）。 */}
       {showGeminiInfo && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60">
-          <GeminiInfoCard
-            onClose={() => setShowGeminiInfo(false)}
-            onOpen={() => {
-              setShowGeminiInfo(false);
-              window.api.openGeminiDialog();
-            }}
-          />
+          <ModalGuard>
+            <GeminiInfoCard
+              onClose={() => setShowGeminiInfo(false)}
+              onOpen={() => {
+                // v0.6.7：直接切到 React modal，不再走 IPC 開 BrowserWindow。
+                setShowGeminiInfo(false);
+                setShowGeminiKey(true);
+              }}
+            />
+          </ModalGuard>
+        </div>
+      )}
+
+      {/* Gemini API Key 設定 modal — v0.6.7 從 child BrowserWindow 改成 renderer 內
+          的 React component，永遠出現在主視窗中央，不會跑到別的 monitor。
+          一樣用 ModalGuard 收掉 BrowserView，避免被 elearn 網頁蓋住。 */}
+      {showGeminiKey && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70">
+          <ModalGuard>
+            <GeminiKeyModal onClose={() => setShowGeminiKey(false)} />
+          </ModalGuard>
         </div>
       )}
 

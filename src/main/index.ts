@@ -240,37 +240,14 @@ async function fetchProgressCached(session: Session): Promise<Map<string, PollDa
   return map;
 }
 
-// ── Gemini key dialog ─────────────────────────────────────────
-function showGeminiKeyDialog(): void {
-  if (!mainWindow) return;
-  const preloadPath = join(__dirname, "../preload/index.js");
-  // v0.6.0 regression: previously resources/* was duplicated into <resourcesPath>/resources/
-  // via package.json's `build.extraResources`. Moving the build config to
-  // electron-builder.yml dropped that block, so in packaged builds
-  // <resourcesPath>/resources/gemini-key-dialog.html no longer exists — only
-  // <appPath>/resources/gemini-key-dialog.html (inside app.asar) does. Use
-  // app.getAppPath() everywhere; asar transparency handles the read.
-  const htmlPath = join(app.getAppPath(), "resources/gemini-key-dialog.html");
-
-  const dlg = new BrowserWindow({
-    width: 480,
-    height: 240,
-    parent: mainWindow,
-    modal: true,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    autoHideMenuBar: true,
-    title: "設定 Gemini API Key",
-    webPreferences: {
-      preload: preloadPath,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-  dlg.setMenu(null);
-  dlg.loadFile(htmlPath);
+// Gemini key dialog 從 v0.6.7 起改成 renderer 內的 React modal
+// （src/renderer/src/App.tsx GeminiKeyModal）。原本 child BrowserWindow + modal
+// 在多螢幕環境會跑到別的 monitor（v0.6.6 災情：Windows BrowserWindow modal
+// 子視窗的初始 position 在某些 DPI / 多螢幕組合下會被 OS 放到錯的 display），
+// 改成 renderer modal 後永遠跟主視窗同個 viewport。OS 選單的 click handler
+// 改成發 IPC.GEMINI_DIALOG_REQUEST 讓 renderer 自己 setShowGeminiKey(true)。
+function requestRendererGeminiDialog(): void {
+  mainWindow?.webContents.send(IPC.GEMINI_DIALOG_REQUEST);
 }
 
 function buildAppMenu(): void {
@@ -280,7 +257,7 @@ function buildAppMenu(): void {
       submenu: [
         {
           label: "設定 Gemini API Key(&G)…",
-          click: () => showGeminiKeyDialog(),
+          click: () => requestRendererGeminiDialog(),
         },
       ],
     },
@@ -290,7 +267,11 @@ function buildAppMenu(): void {
 
 // ── Window + BrowserView ──────────────────────────────────────
 function createWindow() {
-  // Same v0.6.0 regression as showGeminiKeyDialog — see comment there.
+  // v0.6.0 regression: previously resources/* was duplicated into <resourcesPath>/resources/
+  // via package.json's `build.extraResources`. Moving the build config to
+  // electron-builder.yml dropped that block, so in packaged builds
+  // <resourcesPath>/resources/icon.ico no longer exists — only
+  // <appPath>/resources/icon.ico (inside app.asar) does.
   // Passing a non-existent icon path through to BrowserWindow on Windows
   // can crash the renderer process on launch ("閃退") on systems whose
   // shell32 image-loading path doesn't tolerate a missing .ico gracefully,
@@ -1433,7 +1414,10 @@ ipcMain.handle(IPC.GEMINI_KEY_GET, () => loadConfig().geminiApiKey ?? "");
 ipcMain.handle(IPC.GEMINI_KEY_SET, (_evt, key: string) => {
   saveConfig({ geminiApiKey: key.trim() || undefined });
 });
-ipcMain.on(IPC.OPEN_GEMINI_DIALOG, () => showGeminiKeyDialog());
+// Legacy: renderer 不應該再呼叫這個（直接在 React 內 setShowGeminiKey(true) 即可），
+// 但為了 preload 對外的 api 形狀向後相容暫時保留 — 改成 forward 同個事件給
+// renderer 自己處理。
+ipcMain.on(IPC.OPEN_GEMINI_DIALOG, () => requestRendererGeminiDialog());
 
 ipcMain.on(IPC.ACK_FIRST_RUN, () => {
   ackFirstRun();
@@ -1450,8 +1434,23 @@ ipcMain.on(IPC.RENDERER_LOG, (_evt, payload: { level: "info" | "warn" | "error";
 });
 
 ipcMain.on(IPC.OPEN_LOGS_FOLDER, () => {
-  // shell.openPath 失敗會 resolve 一個 error 字串而不是 throw；用 catch 兜底保險。
-  void shell.openPath(getLogsDir()).catch(() => void 0);
+  // getLogsDir() 每次呼叫都會 existsSync + mkdir 兜底；即使使用者手動刪過
+  // logs 資料夾，這裡也會先重建一個空的，避免 File Explorer 跳「位置無法
+  // 使用」的錯誤對話框（v0.6.7 dev 驗證時的災情）。
+  // shell.openPath 失敗時會 resolve 一個 error 字串而不是 throw — 用 then
+  // 把 error 寫進 log 檔，這樣即使開不起來，使用者下次傳 log 給開發者也看得到。
+  const dir = getLogsDir();
+  shell
+    .openPath(dir)
+    .then((err) => {
+      if (err) appendLogLine("warn", `shell.openPath 失敗：${err}（路徑：${dir}）`);
+    })
+    .catch((e) => {
+      appendLogLine(
+        "warn",
+        `shell.openPath 例外：${e instanceof Error ? e.message : String(e)}（路徑：${dir}）`,
+      );
+    });
 });
 
 ipcMain.handle(IPC.APP_VERSION_GET, () => app.getVersion());
@@ -1752,31 +1751,23 @@ export { bus, state, log, pushState };
 // BrowserWindow overlapping the others, which looked like "double title bars".
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
-  // The most common reason for this branch is a still-running instance from
-  // an earlier double-click. Plain app.quit() looks identical to a crash to
-  // the user (window appears for a millisecond and disappears, hence
-  // "v0.6.0 一打開就閃退"). Pop a native dialog so they know to look at the
-  // existing window. showMessageBoxSync needs whenReady; we still quit either
-  // way.
-  app.whenReady().then(() => {
-    void import("electron").then(({ dialog }) => {
-      dialog.showMessageBoxSync({
-        type: "info",
-        title: "Noteqad 已經開過了",
-        message: "Noteqad 已經在背景執行了。",
-        detail:
-          "請先看看工作列 / 通知區域有沒有現有的視窗（或用 Alt+Tab 切換），" +
-          "或開工作管理員把舊的 Noteqad.exe 結束掉再重新打開。",
-        buttons: ["好"],
-      });
-      app.quit();
-    });
-  });
+  // v0.6.7：原本第二個 instance 會 popup native 對話框告訴使用者「已經開過了」，
+  // 但那個 native dialog 在多螢幕環境會跑到別的 monitor，看起來跟「閃退」一模一樣
+  // — 反而更糟。
+  //
+  // 改成第二個 instance 直接靜默 quit，由第一個 instance 的 second-instance
+  // handler 把它已有的視窗 restore + focus + flashFrame，使用者看到的是
+  //「我點兩下 .exe，現有視窗自己跳出來閃了一下」— 完全合理的 UX，不會誤判閃退。
+  app.quit();
 } else {
   app.on("second-instance", () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
     mainWindow.focus();
+    // 工作列圖示閃 2 秒讓使用者一眼看到「我剛點的那次跑這裡來了」。
+    mainWindow.flashFrame(true);
+    setTimeout(() => mainWindow?.flashFrame(false), 2000);
   });
 
   app.whenReady().then(() => {

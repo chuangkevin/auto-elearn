@@ -145,8 +145,14 @@ export const IPC = {
   GEMINI_KEY_GET: "gemini:key-get",
   /** dialog → main: save or clear Gemini API key */
   GEMINI_KEY_SET: "gemini:key-set",
-  /** renderer → main: open the Gemini key dialog */
+  /** renderer → main: open the Gemini key dialog. Legacy — kept so older preload
+   *  binaries don't blow up; no-op in main now since the dialog is a React modal
+   *  owned by the renderer (v0.6.7 — fix multi-monitor "彈窗跑到別的螢幕"). */
   OPEN_GEMINI_DIALOG: "gemini:open-dialog",
+  /** main → renderer: tell renderer to show its React Gemini-key modal. Used by
+   *  the OS menu「說明 → 設定 Gemini API Key」click handler (which runs in main)
+   *  to forward into the renderer-owned modal. */
+  GEMINI_DIALOG_REQUEST: "gemini:dialog-request",
   /** renderer → main: list 次類別 under a 主類別 id */
   CATEGORY_CHILDREN: "category:children",
   /** renderer → main: 標記 SmartScreen 說明已讀過，以後不要再顯示 */

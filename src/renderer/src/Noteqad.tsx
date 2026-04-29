@@ -281,7 +281,7 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
       <div className="h-5 bg-[#f5f5f5] border-t border-[#e5e5e5] text-[11px] px-2 flex items-center text-[#666]">
         <span className={wrongFlash ? "text-rose-600 font-semibold" : ""}>
           {wrongFlash
-            ? `密碼不對${wrongCount >= 3 ? "（忘記密碼？點上面「檔案 → 結束」連點 5 次可以重設）" : ""}`
+            ? `密碼不對${wrongCount >= 3 ? "（忘了密碼？看上面「檔案」→ 點「結束」，連續點 5 次就會跳重設密碼，下面會出現 (1/5) (2/5) 計數器幫你看）" : ""}`
             : `第 ${text.split("\n").length} 行，第 ${text.split("\n").slice(-1)[0].length + 1} 欄`}
         </span>
         <span className="ml-auto">100%</span>
@@ -386,10 +386,22 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
         </div>
       )}
 
-      {/* Debug hint — visible only when clicking 結束 repeatedly so first-time users know */}
+      {/* 計數器：使用者點「檔案 → 結束」時跳出來，看得到「再 X 次就會跳重設密碼」。
+          沒這個的話新使用者會以為點下去什麼事都沒發生（程式真的結束了？沒結束！只是
+          在偷偷數），看不到進度就放棄。15 秒沒繼續會自動歸零（exitClickTimestamps
+          那邊處理）。 */}
       {exitClicks > 0 && exitClicks < 5 && (
-        <div className="fixed right-2 bottom-6 text-[10px] text-slate-400 pointer-events-none">
-          ({exitClicks}/5)
+        <div
+          className="fixed right-3 bottom-8 text-[11px] pointer-events-none rounded px-2 py-1 shadow"
+          style={{
+            background: "rgba(255,255,200,0.96)",
+            color: "#664",
+            border: "1px solid #e6db8c",
+          }}
+        >
+          已點 {exitClicks}/5 次「檔案 → 結束」
+          <br />
+          再點 {5 - exitClicks} 次就會跳重設密碼視窗
         </div>
       )}
     </div>

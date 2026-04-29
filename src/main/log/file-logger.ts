@@ -17,13 +17,20 @@ import { join } from "node:path";
 
 let _logsDir: string | null = null;
 
+/**
+ * 回傳 userData/logs/ 的絕對路徑，並保證路徑「目前」存在 — 即使快取過後使用者
+ * 手動把資料夾刪掉，下次右鍵「版本」→ shell.openPath 也會自己重建一個空資料夾，
+ * 不會跳「位置無法使用」的 File Explorer 錯誤對話框（v0.6.7 災情）。
+ */
 export function getLogsDir(): string {
-  if (_logsDir) return _logsDir;
-  _logsDir = join(app.getPath("userData"), "logs");
+  if (!_logsDir) _logsDir = join(app.getPath("userData"), "logs");
+  // 每次呼叫都做一次 existsSync + mkdir：成本是一次 stat，極低；好處是 logger
+  // 可以容錯使用者中途刪資料夾。寫不進去（disk full / 權限怪異）就吃掉，後續
+  // appendFileSync 也會自己 catch。
   try {
     if (!existsSync(_logsDir)) mkdirSync(_logsDir, { recursive: true });
   } catch {
-    /* 寫不進去就算了，下面 append 也會吃掉 throw */
+    /* 寫不進去就放掉，後續 append 也會被 catch */
   }
   return _logsDir;
 }
