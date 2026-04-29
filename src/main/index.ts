@@ -80,7 +80,7 @@ function maskLog(msg: string): string {
 function firstRunFlagPath(): string {
   return join(app.getPath("userData"), ".first-run-acked");
 }
-function isFirstRunFlagPresent(): boolean {
+function isFirstRun(): boolean {
   try {
     return !existsSync(firstRunFlagPath());
   } catch {
@@ -378,7 +378,7 @@ function createWindow() {
     state.status = "setup";
     log("info", "第一次使用：請輸入人事服務網（e 等公務園）的帳號密碼");
   }
-  state.isFirstRun = isFirstRunFlagPresent();
+  state.isFirstRun = isFirstRun();
   pushState();
 
   detectLogin(elearnView.webContents)
@@ -1752,7 +1752,26 @@ export { bus, state, log, pushState };
 // BrowserWindow overlapping the others, which looked like "double title bars".
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
-  app.quit();
+  // The most common reason for this branch is a still-running instance from
+  // an earlier double-click. Plain app.quit() looks identical to a crash to
+  // the user (window appears for a millisecond and disappears, hence
+  // "v0.6.0 一打開就閃退"). Pop a native dialog so they know to look at the
+  // existing window. showMessageBoxSync needs whenReady; we still quit either
+  // way.
+  app.whenReady().then(() => {
+    void import("electron").then(({ dialog }) => {
+      dialog.showMessageBoxSync({
+        type: "info",
+        title: "Noteqad 已經開過了",
+        message: "Noteqad 已經在背景執行了。",
+        detail:
+          "請先看看工作列 / 通知區域有沒有現有的視窗（或用 Alt+Tab 切換），" +
+          "或開工作管理員把舊的 Noteqad.exe 結束掉再重新打開。",
+        buttons: ["好"],
+      });
+      app.quit();
+    });
+  });
 } else {
   app.on("second-instance", () => {
     if (!mainWindow) return;

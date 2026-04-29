@@ -38,10 +38,17 @@ export function getDb(): Database.Database {
   mkdirSync(userDataDir, { recursive: true });
   const dbPath = join(userDataDir, "auto-elearn.db");
 
-  // On first run, seed the 98K questions table from resources/mixed.db
+  // On first run, seed the 98K questions table from resources/mixed.db.
+  // Packaged layout (electron-builder.yml asarUnpack: resources/**/*):
+  //   <resources>/app.asar.unpacked/resources/mixed.db   ← real on-disk file
+  //   <resources>/app.asar/resources/mixed.db            ← virtual (asar-aware fs)
+  // Both copyFileSync from inside asar and reading from the unpacked path work
+  // here because Electron patches `fs`. We use the unpacked path so the call
+  // matches what `answer-store.ts` does for native sqlite (which is NOT
+  // asar-aware) and so the codebase only has one packaged-resource convention.
   if (!existsSync(dbPath)) {
     const seed = app.isPackaged
-      ? join(process.resourcesPath, "mixed.db")
+      ? join(process.resourcesPath, "app.asar.unpacked/resources/mixed.db")
       : join(__dirname, "../../resources/mixed.db");
     if (existsSync(seed)) {
       copyFileSync(seed, dbPath);

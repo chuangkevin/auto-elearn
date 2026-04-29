@@ -20,12 +20,15 @@ export interface DbRow {
 let db: Database.Database | null = null;
 
 function locateDb(): string {
-  // In packaged mode electron puts resources/ alongside the app
-  // In dev mode we can read from the repo's resources/ directly.
-  // electron-builder config copies resources/* to the app's resources folder, which
-  // is app.getAppPath() + "../" or process.resourcesPath.
+  // electron-builder.yml bundles resources/ inside app.asar with
+  // `asarUnpack: resources/**/*`, so the on-disk path is
+  //   <resources>/app.asar.unpacked/resources/mixed.db
+  // better-sqlite3 is a native module — it does NOT go through Electron's
+  // asar-aware fs shim, so we MUST point it at the real unpacked file, not at
+  // a virtual app.asar/... path. The other entries below are kept as
+  // fallbacks for dev and for legacy layouts.
   const candidates = [
-    path.join(process.resourcesPath ?? "", "mixed.db"),
+    path.join(process.resourcesPath ?? "", "app.asar.unpacked", "resources", "mixed.db"),
     path.join(process.resourcesPath ?? "", "resources", "mixed.db"),
     path.join(app.getAppPath(), "resources", "mixed.db"),
     // dev fallback — running from repo root
