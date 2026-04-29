@@ -36,6 +36,11 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
   const [wrongFlash, setWrongFlash] = useState(false);
   const [wrongCount, setWrongCount] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 右鍵 context menu 狀態：null = 沒打開；{x,y} = 在那個座標顯示。
+  // 真正記事本的右鍵只有編輯指令 + 從右至左閱讀那些；我們在最後加一條
+  //「版本 vX.Y.Z」當作藏在偽裝裡的 log 出口。
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
 
   // Unlock = last line + Enter equals secret. We check on keydown rather than
   // polling, so the comparison happens at the moment the user presses Enter.
@@ -137,10 +142,74 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
   const [configPath, setConfigPath] = useState<string>("");
   useEffect(() => {
     const api = (
-      window as unknown as { api?: { stealthConfigPath?: () => Promise<string> } }
+      window as unknown as {
+        api?: {
+          stealthConfigPath?: () => Promise<string>;
+          getAppVersion?: () => Promise<string>;
+        };
+      }
     ).api;
     api?.stealthConfigPath?.().then(setConfigPath).catch(() => void 0);
+    api?.getAppVersion?.().then(setAppVersion).catch(() => void 0);
   }, []);
+
+  // 右鍵 menu 開著的時候，按 Esc / 點外面要關掉。
+  useEffect(() => {
+    if (!contextMenu) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setContextMenu(null);
+    }
+    function onClick() {
+      setContextMenu(null);
+    }
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onClick);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onClick);
+    };
+  }, [contextMenu]);
+
+  // 右鍵 menu 的「動作」清單。前段是真記事本會有的編輯指令，最後一條是
+  // 我們塞進去的「版本 vX.Y.Z」— 點下去打開 log 資料夾，使用者可以直接把
+  // 當天 .log 檔丟給開發者除錯。
+  function ctxAction(action: "undo" | "cut" | "copy" | "paste" | "delete" | "selectAll" | "openLogs") {
+    setContextMenu(null);
+    const ta = textareaRef.current;
+    switch (action) {
+      case "undo":
+        document.execCommand("undo");
+        break;
+      case "cut":
+        document.execCommand("cut");
+        break;
+      case "copy":
+        document.execCommand("copy");
+        break;
+      case "paste":
+        document.execCommand("paste");
+        break;
+      case "delete": {
+        if (!ta) return;
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        if (start === end) return;
+        const next = text.slice(0, start) + text.slice(end);
+        setText(next);
+        break;
+      }
+      case "selectAll":
+        ta?.select();
+        break;
+      case "openLogs": {
+        const api = (
+          window as unknown as { api?: { openLogsFolder?: () => void } }
+        ).api;
+        api?.openLogsFolder?.();
+        break;
+      }
+    }
+  }
 
   return (
     // No fake title bar — the OS window already has one saying "未命名 - 記事本"
@@ -195,6 +264,15 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onTextareaKeyDown}
+        onContextMenu={(e) => {
+          // 攔截 Electron 預設的網頁 context menu（不擋的話會顯示「重新整理 / 檢查」
+          // 那些一看就知道是 Chromium 的選項，破壞偽裝）。改顯示我們自己畫的記事本
+          // 風格選單，最後一項放「版本 vX.Y.Z」當作藏在偽裝裡的 log 出口。
+          e.preventDefault();
+          // 不要讓全域 mousedown 監聽器立刻把剛打開的 menu 關掉
+          e.stopPropagation();
+          setContextMenu({ x: e.clientX, y: e.clientY });
+        }}
         spellCheck={false}
         style={{ whiteSpace: "pre-wrap" }}
       />
@@ -210,6 +288,38 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
         <span className="ml-4">Windows (CRLF)</span>
         <span className="ml-4">UTF-8</span>
       </div>
+
+      {/* 右鍵 context menu — 真記事本風格的小 popup。最後一條「版本 vX.Y.Z」是
+          藏在偽裝裡的 log 出口；點下去打開 userData/logs/ 資料夾。 */}
+      {contextMenu && (
+        <div
+          className="fixed z-[90] min-w-[200px] bg-white border border-[#bfbfbf] shadow-md py-1 select-none"
+          style={{
+            // 防止 menu 跑出畫面右邊 / 下面（簡單夾一下）。
+            left: Math.min(contextMenu.x, Math.max(0, window.innerWidth - 220)),
+            top: Math.min(contextMenu.y, Math.max(0, window.innerHeight - 280)),
+          }}
+          // 自己內部的 mousedown 不要被全域 listener 收掉，不然點選項時 menu
+          // 會在 ctxAction 跑之前就被關掉。
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <CtxItem label="復原(U)" onClick={() => ctxAction("undo")} />
+          <CtxSep />
+          <CtxItem label="剪下(T)" onClick={() => ctxAction("cut")} />
+          <CtxItem label="複製(C)" onClick={() => ctxAction("copy")} />
+          <CtxItem label="貼上(P)" onClick={() => ctxAction("paste")} />
+          <CtxItem label="刪除(L)" onClick={() => ctxAction("delete")} />
+          <CtxSep />
+          <CtxItem label="全選(A)" onClick={() => ctxAction("selectAll")} />
+          <CtxSep />
+          <CtxItem
+            label={`版本 ${appVersion ? `v${appVersion}` : "（讀取中…）"}`}
+            onClick={() => ctxAction("openLogs")}
+            title="點我打開記錄檔資料夾，可以把 .log 檔傳給開發者除錯"
+          />
+        </div>
+      )}
 
       {/* Hidden-gesture setup / reset dialog */}
       {showSetupDialog && (
@@ -284,4 +394,28 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
       )}
     </div>
   );
+}
+
+function CtxItem({
+  label,
+  onClick,
+  title,
+}: {
+  label: string;
+  onClick: () => void;
+  title?: string;
+}) {
+  return (
+    <button
+      className="block w-full text-left px-4 py-0.5 hover:bg-[#0b65c2] hover:text-white text-[12px]"
+      onClick={onClick}
+      title={title}
+    >
+      {label}
+    </button>
+  );
+}
+
+function CtxSep() {
+  return <div className="h-px bg-[#dcdcdc] my-1" />;
 }

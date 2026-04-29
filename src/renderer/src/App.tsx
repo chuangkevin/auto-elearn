@@ -48,6 +48,9 @@ declare global {
       stealthConfigPath: () => Promise<string>;
       openGeminiDialog: () => void;
       ackFirstRun: () => void;
+      rendererLog: (level: "info" | "warn" | "error", msg: string) => void;
+      openLogsFolder: () => void;
+      getAppVersion: () => Promise<string>;
     };
   }
 }

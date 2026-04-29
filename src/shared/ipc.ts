@@ -151,6 +151,12 @@ export const IPC = {
   CATEGORY_CHILDREN: "category:children",
   /** renderer → main: 標記 SmartScreen 說明已讀過，以後不要再顯示 */
   ACK_FIRST_RUN: "first-run:ack",
+  /** renderer → main: renderer 端的 console.error / window 錯誤 forward 到 main 的檔案 log */
+  RENDERER_LOG: "renderer:log",
+  /** renderer → main: 用 shell.openPath 打開 userData/logs/ 資料夾，讓使用者把 .log 給開發者 */
+  OPEN_LOGS_FOLDER: "logs:open-folder",
+  /** renderer → main: 取得 app.getVersion()，給偽裝記事本右鍵的「版本」項顯示用 */
+  APP_VERSION_GET: "app:version-get",
 } as const;
 
 export interface SearchOptions {

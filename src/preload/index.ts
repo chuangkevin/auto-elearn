@@ -68,6 +68,10 @@ const api = {
   setGeminiKey: (key: string): Promise<void> => ipcRenderer.invoke(IPC.GEMINI_KEY_SET, key),
   openGeminiDialog: () => ipcRenderer.send(IPC.OPEN_GEMINI_DIALOG),
   ackFirstRun: () => ipcRenderer.send(IPC.ACK_FIRST_RUN),
+  rendererLog: (level: "info" | "warn" | "error", msg: string) =>
+    ipcRenderer.send(IPC.RENDERER_LOG, { level, msg }),
+  openLogsFolder: () => ipcRenderer.send(IPC.OPEN_LOGS_FOLDER),
+  getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC.APP_VERSION_GET),
 };
 
 contextBridge.exposeInMainWorld("api", api);

@@ -55,6 +55,8 @@ import {
 } from "./stealth/stealth";
 import { maskAccount, maskName, maskSecretsInString } from "../shared/mask";
 import { existsSync, mkdirSync, writeFileSync as fsWriteFileSync } from "node:fs";
+import { appendLogLine, getLogsDir, installCrashHandlers } from "./log/file-logger";
+import { migrateFromOldUserDataIfNeeded } from "./persist/migrate-userdata";
 
 /**
  * In-memory cache of sensitive strings (real account / real user name)
@@ -206,6 +208,9 @@ function log(level: "info" | "warn" | "error", msg: string) {
   // 開發者主控台不必隱碼，方便 debug；正式打包後也不會被使用者看到。
   // eslint-disable-next-line no-console
   console.log(`[${level}] ${msg}`);
+  // 同步把隱碼版寫到 userData/logs/main-YYYY-MM-DD.log，使用者要回報問題時
+  // 可以從偽裝記事本右鍵的「版本」項打開資料夾把檔案傳給開發者。
+  appendLogLine(level, safe);
 }
 
 // Pipe Gemini failures to the visible UI log so the user actually sees WHY
@@ -1436,6 +1441,21 @@ ipcMain.on(IPC.ACK_FIRST_RUN, () => {
   pushState();
 });
 
+ipcMain.on(IPC.RENDERER_LOG, (_evt, payload: { level: "info" | "warn" | "error"; msg: string }) => {
+  // Renderer 端 console.error / window 'error' / unhandledrejection 都走這條，
+  // 也經過隱碼後寫到同一個 log 檔，這樣使用者一份檔給開發者就夠。
+  if (!payload || typeof payload.msg !== "string") return;
+  const lvl = payload.level === "warn" || payload.level === "error" ? payload.level : "info";
+  appendLogLine(lvl, maskLog(payload.msg), "renderer");
+});
+
+ipcMain.on(IPC.OPEN_LOGS_FOLDER, () => {
+  // shell.openPath 失敗會 resolve 一個 error 字串而不是 throw；用 catch 兜底保險。
+  void shell.openPath(getLogsDir()).catch(() => void 0);
+});
+
+ipcMain.handle(IPC.APP_VERSION_GET, () => app.getVersion());
+
 ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
   const prev = loadRun();
   if (!prev || !prev.pipelineCids.length) return;
@@ -1742,6 +1762,34 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     electronApp.setAppUserModelId("tw.kevin.auto-elearn");
+
+    // 必須在任何讀寫 userData 的程式碼（hasSavedCredentials / loadConfig /
+    // db.ts / loadRun 等）之前跑：v0.5.x 的舊資料夾複製到 v0.6.x 的新位置。
+    // 否則升級的使用者會被當成「全新使用者」，要重設帳密 + 偽裝密碼。
+    const mig = migrateFromOldUserDataIfNeeded();
+
+    // 安裝 process 級別的 crash handler 並把後續 main process log 寫到檔。
+    // 必須在 createWindow 之前 install — createWindow 內部會丟例外的話我們也想記下來。
+    installCrashHandlers((s) => maskLog(s));
+
+    if (mig.ranThisLaunch) {
+      log(
+        "info",
+        `偵測到 v0.5.x 舊資料夾，已搬到新位置：` +
+          `成功 ${mig.migrated.length} 個（${mig.migrated.join(", ") || "—"}）` +
+          (mig.skippedAlreadyExists.length
+            ? `；跳過已存在 ${mig.skippedAlreadyExists.length} 個`
+            : "") +
+          (mig.failed.length ? `；失敗 ${mig.failed.length} 個` : ""),
+      );
+      for (const f of mig.failed) {
+        log("warn", `搬家失敗：${f.file} — ${f.reason}`);
+      }
+    } else {
+      // 不是從 v0.5.x 升上來，或之前已經遷移過 — 不洗版，輕量記一筆方便除錯
+      appendLogLine("info", `userData 路徑：${app.getPath("userData")}（無需遷移）`);
+    }
+
     app.on("browser-window-created", (_, w) => optimizer.watchWindowShortcuts(w));
     createWindow();
 
