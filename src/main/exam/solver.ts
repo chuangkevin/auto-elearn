@@ -61,66 +61,170 @@ async function extractQuestions(win: BrowserWindow): Promise<ExtractedQuestion[]
     await wait(1000);
   }
 
-  return (
-    (await execJs<ExtractedQuestion[]>(
-      win,
-      `(() => {
-        const rows = Array.from(document.querySelectorAll('tr.bg03,tr.bg04'));
-        if (!rows.length) return null;
-        const norm = (s) => (s || '').trim().replace(/\\s+/g,' ').slice(0,200);
-        const out = [];
-        rows.forEach((row, index) => {
-          const inputs = Array.from(row.querySelectorAll('input[type=radio],input[type=checkbox]'));
-          if (!inputs.length) return;
+  // Position-based extraction: walk the row tree depth-first, splitting text
+  // nodes into N segments by their position relative to the N inputs.
+  // We collect text BOTH before (pre[]) and after (post[]) each input.
+  // Some elearn templates put the option label after the input
+  // (`<input> 是<input> 否`) and others put it before
+  // (`是<input>否<input>`); we pick whichever side has uniformly non-empty
+  // segments per option. This replaces the earlier closest-li/closest-label
+  // chain which silently returned empty strings on biosafety / HEPA exams.
+  const result = await execJs<{
+    questions: ExtractedQuestion[];
+    diagnostic: string | null;
+  }>(
+    win,
+    `(() => {
+      const rows = Array.from(document.querySelectorAll('tr.bg03,tr.bg04'));
+      if (!rows.length) return { questions: [], diagnostic: null };
+      const norm = (s) => (s || '').replace(/\\s+/g,' ').trim().slice(0,200);
+      const questions = [];
+      let diagnostic = null;
 
-          // Strip option list from clone to get pure question text
-          const clone = row.cloneNode(true);
-          clone.querySelectorAll('ol,ul,input,script,style').forEach(el => el.remove());
-          const text = norm(clone.textContent).slice(0,400);
+      rows.forEach((row, index) => {
+        const inputs = Array.from(row.querySelectorAll('input[type=radio],input[type=checkbox]'));
+        if (!inputs.length) return;
 
-          // Options: each input has its own surrounding text. Walk up ONE
-          // level at a time looking for a container that yields non-empty
-          // text after we strip out the input itself. Fixes cases where
-          // <li> exists but is empty, or where options sit in <td>/<span>
-          // siblings of the radio.
-          const values = inputs.map(i => i.value);
-          const options = inputs.map(inp => {
-            // Try ancestors in order of specificity
-            const candidates = [
-              inp.closest('li'),
-              inp.closest('label'),
-              inp.parentElement,
-              inp.parentElement?.parentElement,
-            ].filter(Boolean);
-            for (const cand of candidates) {
-              const c = cand.cloneNode(true);
-              c.querySelectorAll('input').forEach(el => el.remove());
-              const t = norm(c.textContent);
-              if (t) return t;
+        // Question text: clone row, strip ol/ul/input/script/style → textContent
+        const clone = row.cloneNode(true);
+        clone.querySelectorAll('ol,ul,input,script,style').forEach(el => el.remove());
+        const text = norm(clone.textContent).slice(0,400);
+
+        const values = inputs.map(i => i.value);
+        const inputSet = new Set(inputs);
+        const N = inputs.length;
+        // post[i] = text seen AFTER input[i], before input[i+1] (or end).
+        // pre[i]  = text seen BEFORE input[i], after input[i-1] (or row start).
+        // For elearn's standard "<input>option-text" markup post is correct.
+        // For the rare "option-text<input>" markup pre is correct. Use the
+        // one with more non-empty slots; tie → post (which is the elearn
+        // default; otherwise pre[0] would always win because it absorbs
+        // the row's question text).
+        //
+        // 是非題 special: option text is two <img> (right.gif / wrong.gif)
+        // not text. Detect imgs in each segment and map to 是/否 so DB
+        // lookups + log readability survive.
+        const post = Array.from({length: N}, () => ({ texts: [], imgs: [] }));
+        const pre  = Array.from({length: N}, () => ({ texts: [], imgs: [] }));
+        let cursorIdx = -1;
+
+        const walk = (node) => {
+          if (node.nodeType === 1) {
+            if (inputSet.has(node)) {
+              cursorIdx = inputs.indexOf(node);
+              return;
             }
-            // Last resort: trailing text node directly after the input
-            try {
-              let n = inp.nextSibling;
-              while (n && n.nodeType !== 3 /* TEXT_NODE */ && n.nodeType !== 1) n = n.nextSibling;
-              if (n) return norm(n.textContent || (n.nodeType === 1 ? n.textContent : ''));
-            } catch (e) {}
-            return '';
-          });
+            const tag = (node.tagName || '').toUpperCase();
+            if (tag === 'SCRIPT' || tag === 'STYLE') return;
+            if (tag === 'IMG') {
+              const src = (node.getAttribute && node.getAttribute('src')) || '';
+              if (cursorIdx === -1) {
+                pre[0].imgs.push(src);
+              } else {
+                if (cursorIdx < N) post[cursorIdx].imgs.push(src);
+                if (cursorIdx + 1 < N) pre[cursorIdx + 1].imgs.push(src);
+              }
+              return; // don't descend into img
+            }
+            Array.from(node.childNodes).forEach(walk);
+          } else if (node.nodeType === 3) {
+            const t = (node.textContent || '').trim();
+            if (!t) return;
+            if (cursorIdx === -1) {
+              pre[0].texts.push(t);
+            } else {
+              if (cursorIdx < N) post[cursorIdx].texts.push(t);
+              if (cursorIdx + 1 < N) pre[cursorIdx + 1].texts.push(t);
+            }
+          }
+        };
+        walk(row);
 
-          out.push({
-            index,
-            text,
-            options,
-            values,
-            inputName: inputs[0].name || '',
-            isMultiple: inputs[0].type === 'checkbox',
-          });
+        // Map "right" / "wrong" (and 是/否-style) image filenames to text
+        // so 是非題 questions get matchable option text.
+        const imgToLabel = (imgs) => {
+          for (const src of imgs) {
+            const s = (src || '').toLowerCase();
+            if (s.includes('right') || s.includes('correct') || s.includes('yes') || s.includes('true') || s.includes('o.gif')) return '是';
+            if (s.includes('wrong') || s.includes('error')   || s.includes('no')  || s.includes('false') || s.includes('x.gif')) return '否';
+          }
+          return '';
+        };
+
+        const buildOptions = (segs) => segs.map(seg => {
+          const t = norm(seg.texts.join(' '));
+          if (t) return t;
+          const lbl = imgToLabel(seg.imgs);
+          if (lbl) return lbl;
+          return '';
         });
-        return out.length ? out : null;
-      })()`,
-    )) ?? []
+        const optsPost = buildOptions(post);
+        const optsPre  = buildOptions(pre);
+
+        const nonEmpty = (arr) => arr.filter(s => s).length;
+        // Default to post. Only switch to pre when pre captures STRICTLY
+        // more option slots — otherwise pre[0] would steal row-prefix text
+        // (e.g. "單選 配分：[10.00] 1. 從需求者…") and present it as
+        // option A, which is what was happening before this rewrite.
+        let options = nonEmpty(optsPre) > nonEmpty(optsPost) ? optsPre : optsPost;
+
+        // Dedupe defensively: if every option ended up identical (single
+        // ancestor with all options' text concatenated), zero them out.
+        // The brute-force solver still works (it submits by value, not by
+        // text), and downstream matching won't be fooled by phantom hits.
+        if (options.length > 1 && options.every(o => o === options[0]) && options[0].length > 0) {
+          options = options.map(() => '');
+        }
+
+        // Last-resort 是非 detection: 2 inputs with values that look like
+        // T/F or 1/0 → force 是/否 even if no img matched (in case the
+        // markup uses some other indicator we didn't catch).
+        if (options.length === 2 && options.every(o => !o)) {
+          const vSet = new Set(inputs.map(i => (i.value || '').toUpperCase()));
+          if (vSet.has('T') && vSet.has('F')) {
+            options = inputs.map(i => (i.value || '').toUpperCase() === 'T' ? '是' : '否');
+          } else if (vSet.has('1') && vSet.has('0')) {
+            options = inputs.map(i => i.value === '1' ? '是' : '否');
+          }
+        }
+
+        // First row with empty options: dump the row HTML so we can iterate.
+        if (!diagnostic && options.some(o => !o)) {
+          diagnostic = (row.outerHTML || '').slice(0, 8000);
+        }
+
+        questions.push({
+          index,
+          text,
+          options,
+          values,
+          inputName: inputs[0].name || '',
+          isMultiple: inputs[0].type === 'checkbox',
+        });
+      });
+
+      return { questions: questions.length ? questions : [], diagnostic };
+    })()`,
   );
+
+  if (!result) return [];
+
+  // If we got a diagnostic dump, persist it so the user can share it for
+  // markup-specific tuning. One file per process to avoid temp-dir spam.
+  if (result.diagnostic && !diagnosticDumped) {
+    diagnosticDumped = true;
+    try {
+      const file = join(app.getPath("temp"), `auto-elearn-exam-row.html`);
+      writeFileSync(file, result.diagnostic, "utf8");
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  return result.questions ?? [];
 }
+
+let diagnosticDumped = false;
 
 // ─── Option selection ─────────────────────────────────────────
 
@@ -531,7 +635,7 @@ async function runExamLoop(
   label: string,
   bySource: Record<AnswerSource, number>,
   onProgress: (msg: string) => void,
-  passingScore = 60,
+  passingScore = 80,
 ): Promise<number | null> {
   let best: number | null = null;
 
@@ -825,8 +929,10 @@ export async function solveExam(
     onProgress?: (msg: string) => void;
     timeoutMs?: number;
     /** Per-course passing threshold (parsed from /info 課程須知). Solver
-     *  stops retrying once a score >= passingScore is achieved. Default 60
-     *  is the lowest elearn tier; 公務人員10小時 is 75 and a few are 80. */
+     *  stops retrying once a score >= passingScore is achieved. Default 80
+     *  matches course-detail.ts' conservative fallback for pages where we
+     *  couldn't read the threshold. Caller (chain pipeline) usually passes
+     *  the parsed per-course value. */
     passingScore?: number;
   } = {},
 ): Promise<SolveResult> {
@@ -854,8 +960,20 @@ export async function solveExam(
   suppressDialogs(win);
 
   try {
-    // Initial LC entry to discover sysbar items
-    const ok = await enterLC(win, cid, onProgress);
+    // Initial LC entry to discover sysbar items. Retry up to 3× because
+    // elearn occasionally drops the 上課去 click on the floor (popup
+    // blocker quirk + multi-window guard double-tap) — last-seen pattern is
+    // post-click url stays at /info/{cid} with frames=0 even though the
+    // click registered. A short backoff lets the multi-window state clear.
+    let ok = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      ok = await enterLC(win, cid, onProgress);
+      if (ok) break;
+      if (attempt < 3) {
+        onProgress(`solveExam: enterLC 第 ${attempt} 次失敗，等 ${5 + attempt * 3}s 再試`);
+        await wait((5 + attempt * 3) * 1000);
+      }
+    }
     if (!ok) {
       result.error = "無法進入學習中心";
       return result;
@@ -873,7 +991,7 @@ export async function solveExam(
       return result;
     }
 
-    const passingScore = opts.passingScore ?? 60;
+    const passingScore = opts.passingScore ?? 80;
 
     // ── Main exam ──
     if (hasMainExam) {

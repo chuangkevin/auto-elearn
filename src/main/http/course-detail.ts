@@ -18,7 +18,10 @@ export interface CourseDetail {
   passed: boolean | null;
   /** Passing score required by THIS course — parsed from 課程須知
    *  ("課程測驗：60分(含)以上" / "75分(含)以上" / "80 分"). Falls back to
-   *  60 if the page omits it. Used by solver to know when to stop retrying. */
+   *  80 if the page omits it (conservative — 60-default caused entire batches
+   *  of courses to silently fail 通過狀態 because the solver stopped at 60
+   *  but the server actually required 80). Used by solver as the stop-retry
+   *  threshold AND by classify() / examDone to mark course pass-state. */
   passingScore: number;
   /** raw label-value pairs (debug/forensic). */
   raw: Record<string, string>;
@@ -131,8 +134,11 @@ export async function fetchCourseDetail(
   //   <li><span>課程測驗：60分(含)以上</span></li>
   //   <li><span>課程測驗：75分(含)以上</span></li>
   //   <li><span>課程測驗：80分以上</span></li>
-  // Default to 60 if the page omits it (matches elearn's lowest tier).
-  let passingScore = 60;
+  // Default to 80 if the page omits it: server frequently demands ≥80 even
+  // when the listing doesn't spell it out, and 60-default was leaving whole
+  // batches stuck at "通過狀態:--". Better to occasionally over-shoot a 60
+  // course than to under-shoot an 80 one.
+  let passingScore = 80;
   const bodyText = $.text();
   const m = bodyText.match(/課程測驗\s*[:：]\s*(\d{1,3})\s*分/);
   if (m) {

@@ -741,3 +741,61 @@ Headers 每個 POST 都要帶：`X-Requested-With: XMLHttpRequest`, `Referer: ec
 - 再鎖：🫥 按鈕或 `Ctrl+Alt+H`；pipeline 在背景繼續跑
 - OS title bar 鎖在「未命名 - 記事本」；`page-title-updated` 事件被攔下來；exe 檔名 `Noteqad.exe`
 - 密碼以明碼存 `config.json`（使用者明確指定）— 威脅模型是「旁人偷看畫面」，不是檔案系統外洩
+
+## 18. v0.5.0 修法集（2026-04-29）
+
+四個修法 + 三個搭配修，都從一輪 100 分通過的實機測試驗回。
+
+### 18.1 通過門檻：每課用自己的、fallback 80
+
+- `course-detail.ts passingScore` default 從 60 改成 **80**
+- `index.ts:636` `trackedToCard.passFloor`、`index.ts:943` chain threshold、`types.ts:53` `classify passFloor`、`solver.ts:534/876` 全部移除 `Math.max(declared, 80)`
+- 60 分及格的課做到 60 就停；80 分及格的課做到 80 才停；解析失敗的課保守 80
+- 之前強推 80 → 60 課 brute-force 跑 11 次都過不了；之前 default 60 → 80 課做到 60 就停永遠 `--`
+
+### 18.2 沒過測驗就 block 問卷
+
+`runFinishChain` 加 `examOK` flag：
+
+```js
+let examOK = passed;
+if (!passed) {
+  const res = await solveExam(cid, session, ...);
+  examOK = res.passed === true || res.total === 0;
+}
+if (examOK && !passed && !surveyDone) fillSurvey(...);
+```
+
+`res.total === 0` 例外處理 sysbar 沒測驗選單的純閱讀課。
+
+### 18.3 測驗 row option 文字抓取重寫
+
+`solver.ts extractQuestions` 改 position-based DOM walker：
+
+- 走 row 的 tree，遇 input 設 cursor，遇 text/img 依 cursor 歸到 `pre[cursor+1]` / `post[cursor]`
+- 預設 post（input 後文字），只有 `nonEmpty(pre) > nonEmpty(post)` 才用 pre
+- ❌ 不能 totalLen 比較：pre[0] 含題目文字會贏掉短選項
+- 是非題：walker 收 `<img>` 的 src，`right/correct/yes/true/o.gif` → "是"，`wrong/error/no/false/x.gif` → "否"
+- 兜底：兩 input 文字都空且 value=`T/F` 或 `1/0` → 直接照 value 推
+- 第一個有空 option 的 row → dump `outerHTML` 到 `%TEMP%/auto-elearn-exam-row.html`
+
+詳見 memory/`reference_exam_extraction.md`。
+
+### 18.4 mixed.db 撈不到時的補強
+
+- `lookupByLike` 多一個 12-char prefix 第三策略（前 12 字當 LIKE substring）
+- `matchAgainstDb` 加 `best.sim < 0.35` 的最低門檻 → 避免 12-char 撈到無關題目灌進 learned_answers 變污染
+
+### 18.5 MaxListenersExceededWarning（cosmetic）
+
+`suppressDialogs(win)` + reader.ts ticket 視窗都加 `webContents.setMaxListeners(64)`。Electron 內建 `did-stop-loading` listener 是 loadURL/executeJavaScript 一次性的，會自動清，但 in-flight 多 promise 同時掛著會破 default 10。
+
+### 18.6 Heartbeat 達標主動 break
+
+engine.ts detail-poll 看到 `detail.readSec >= t.requiredSec` 直接 `break` + 標 `serverConfirmed=true`。
+post-finish wait 從 3 分鐘砍到 30 秒；30 秒內也順便 detail-poll 雙保險。
+
+### 18.7 enterLC 外層 retry
+
+`solveExam` / `history-solver` 外層第一道 enterLC 加 3 次 retry，間隔 8s/11s。
+elearn 偶發行為：「上課去」click event fire 了但 URL 沒變、frames=0 — 第一次失敗就放棄太脆弱。

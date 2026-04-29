@@ -86,14 +86,25 @@ export function normalizeQuestion(s: string): string {
 /**
  * Find candidate rows in the DB whose normalized 題目 matches the normalized query.
  * Returns up to `limit` matches. Uses SQLite LIKE with a normalized middle-string.
+ *
+ * Strategy progression (each only fires if the previous yielded zero):
+ *   1. full normalized text — exact-prefix-style hit
+ *   2. 90% prefix — recover from minor trailing differences (typos, extra
+ *      "請選出最適合的答案" tail)
+ *   3. shortest distinctive substring — when the DB lacks the exact question
+ *      but contains a near-paraphrase, a 12-char window often catches it
+ *      (e.g. "通風空調系統的設計" matches across rephrasings). Caps at 12
+ *      chars so we don't return wildcard noise.
  */
 export function lookupByLike(raw: string, limit = 5): DbRow[] {
   const d = openDb();
   const norm = normalizeQuestion(raw);
   if (!norm) return [];
-  // Drop last char(s) to recover from minor trailing differences — try exact first,
-  // then a shorter substring if no hits.
-  const strategies = [norm, norm.slice(0, Math.max(6, Math.floor(norm.length * 0.9)))];
+  const strategies = [
+    norm,
+    norm.slice(0, Math.max(6, Math.floor(norm.length * 0.9))),
+    norm.length > 12 ? norm.slice(0, 12) : null,
+  ].filter((s): s is string => typeof s === "string" && s.length >= 4);
 
   for (const s of strategies) {
     const pat = `%${s}%`;

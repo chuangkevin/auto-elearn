@@ -228,7 +228,24 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
       lastDetailPollAt = Date.now();
       try {
         const detail = await opts.detailPollFn(cid);
-        if (detail) opts.onDetailPoll?.(cid, detail);
+        if (detail) {
+          opts.onDetailPoll?.(cid, detail);
+          // Once server has credited the full required time, every extra
+          // ping is wasted and the chain wants to advance to exam ASAP.
+          // Earlier code only broke on isReadDones=1 (永遠不會來) or
+          // caption=已通過 (also fires only after exam+survey), so reading
+          // would tick well past the threshold and then sit through the
+          // 3-min post-finish wait too.
+          if (detail.readSec !== null && detail.readSec >= t.requiredSec) {
+            serverConfirmed = true;
+            opts.onProgress?.(cid, "tick", {
+              readingDoneEarly: true,
+              readSec: detail.readSec,
+              requiredSec: t.requiredSec,
+            });
+            break;
+          }
+        }
       } catch {
         // non-fatal — local card just stays at last known value
       }
@@ -257,17 +274,32 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
     });
   }
 
-  // Poll for up to 3 minutes (every 15s) waiting for isReadDones=1 after the
-  // finish signal — gives the server time to process accumulated reading time.
-  if (!serverConfirmed && opts.pollFn) {
-    const pollDeadline = Date.now() + 180_000;
+  // Poll briefly for isReadDones=1 / detail.readSec >= required after the
+  // finish signal. Earlier this was 3 minutes (180_000ms), but isReadDones
+  // is hardcoded to 0 server-side and won't flip until the entire course
+  // passes — so we'd burn 3 full minutes per course on a flag that never
+  // fires. Cut to 30s with detail-poll fallback so we exit fast once
+  // reading time is confirmed credited.
+  if (!serverConfirmed && (opts.pollFn || opts.detailPollFn)) {
+    const pollDeadline = Date.now() + 30_000;
     while (!serverConfirmed && Date.now() < pollDeadline && !opts.signal?.aborted) {
-      await sleep(15_000);
+      await sleep(10_000);
       try {
-        const pollResult = await opts.pollFn(cid);
-        if (pollResult) {
-          opts.onPoll?.(cid, pollResult);
-          if (pollResult.isReadDones === 1) serverConfirmed = true;
+        if (opts.pollFn) {
+          const pollResult = await opts.pollFn(cid);
+          if (pollResult) {
+            opts.onPoll?.(cid, pollResult);
+            if (pollResult.isReadDones === 1) serverConfirmed = true;
+          }
+        }
+        if (!serverConfirmed && opts.detailPollFn) {
+          const detail = await opts.detailPollFn(cid);
+          if (detail) {
+            opts.onDetailPoll?.(cid, detail);
+            if (detail.readSec !== null && detail.readSec >= t.requiredSec) {
+              serverConfirmed = true;
+            }
+          }
         }
       } catch { /* non-fatal */ }
     }

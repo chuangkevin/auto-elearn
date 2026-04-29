@@ -152,6 +152,48 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - 早期終止 guard:`bfQueueIdx >= bfQueue.length` 就 break,不再要求每題每選項都試完（v0.4.14 教訓:tested set 永遠不會滿，無早期終止會無限送題）
 - `MAX_EXAM_ATTEMPTS = 30`（容納 worst case：10 Q × 平均 ~2 alt 探測 + buffer）
 
+### 通過門檻：每課用自己的、fallback 80（v0.5.0 起）
+- 之前寫死 `Math.max(declared, 80)` 全域強推 80 → 60 分及格的課被推到 80 → 暴力 probe 跑 11 次都過不了，留一堆失敗紀錄看起來很可疑
+- 之前把 default 寫 60 → 80 分及格的課做到 60 就停 → 通過狀態永遠 `--`
+- 修法：`course-detail.ts` 從 `課程須知` 解 `課程測驗：N分(含)以上`；解失敗 fallback **80**（保守）；solver / classify / examDone 全部直接用 declared，不再 `Math.max(_, 80)`
+- 影響：60 分及格的課做到 60 就交問卷；80 分及格的課做到 80 才交；解析失敗的課保守做到 80
+
+### 沒過測驗就 block 問卷（v0.5.0 起）
+- 之前邏輯：`if (!passed && !surveyDone)` → 即使 exam res.passed=false 也照交問卷
+- 為什麼錯：sever 不會因為交了問卷就 flip 通過（exam 還沒過），交了 = 留下「測驗 50 分 + 鮮交問卷」的指紋特別像 bot
+- 修法：chain 維護 `examOK = (passed || res.passed === true || res.total === 0)`；只有 examOK 時才 fillSurvey
+- `res.total === 0` 例外：sysbar 沒測驗選單（純閱讀課）→ 不算測驗失敗
+
+### 測驗 row option 文字抓取（v0.5.0 重寫）
+elearn 各機關的測驗 row 版型差很多，原本 `closest('label')` / `closest('li')` / parent strip-inputs 在多種版型下會抓空字串或抓到題目文字當選項 A。
+
+**最終做法：position-based walker** in `src/main/exam/solver.ts extractQuestions`：
+- 走遍整個 `<tr>` 的 DOM tree，遇到 input 設 cursor，遇到 text 依 cursor 歸到 `pre[cursor+1]` / `post[cursor]`
+- 預設用 **post**（input 後文字）；只有 `nonEmpty(pre) > nonEmpty(post)` 才用 pre
+  - 不能比 totalLen / 不能比 ≥：因為 pre[0] 永遠包到題目文字，會吃掉選項 A
+- 是非題版型 = `<input value="T"><img right.gif>` / `<input value="F"><img wrong.gif>` 沒文字
+  - walker 收 img src，src 含 `right/correct/yes/true/o.gif` → "是"，含 `wrong/error/no/false/x.gif` → "否"
+  - 兜底：兩 input 文字都空且 value 是 T/F 或 1/0 → 直接 value 推「是」/「否」
+- 第一個有空 option 的 row → dump outerHTML 到 `%TEMP%/auto-elearn-exam-row.html`（debug 用）
+- option 文字錯了 → matcher `pickOptionIndex` 找不到正解 → 落到 random → 永遠 0 分；這是為什麼一定要修對
+
+### MaxListenersExceededWarning 修法（v0.5.0）
+- log 反覆「11 did-stop-loading listeners added」是 cosmetic，不是真 leak
+- Electron `webContents.loadURL()` / `executeJavaScript()` 內部加一次性 listener，會 settle 自動清掉，但 in-flight 多 promise 同時掛著就破 default 10
+- `suppressDialogs(win)` + reader.ts 的 ticket 視窗各加 `webContents.setMaxListeners(64)` → warning 消失
+- 不要試著「只加在某些操作」—— 整個 BrowserWindow 都 raise 才乾淨
+
+### Heartbeat 達標要主動 break（v0.5.0）
+- 原本 heartbeat 迴圈只在 `isReadDones === 1`（永遠不會來）或 `caption === "已通過"`（要全課通過才來）才 break
+- 結果 server 已經 credit 60/60 分鐘了還繼續 ping，跑滿 maxSec 才退出，浪費時間
+- 修法：detail poll 看到 `detail.readSec >= t.requiredSec` 直接 break + 標記 `serverConfirmed=true`（同時跳過 post-finish 等待）
+- post-finish wait 從 3 分鐘砍到 30 秒；30 秒內也順便 detail-poll 雙保險
+
+### enterLC 外層 retry（v0.5.0）
+- elearn 偶發行為：點「上課去」click event fire 了，但 URL 沒變、frames=0，等於整個 click 沒效（多重視窗 guard 雙擊 / popup blocker quirk）
+- `runExamLoop` 內層原本就有 retry，但 `solveExam` / `history-solver` 外層第一道 enterLC 沒 retry → 第一次失敗就放棄 → 「無法進入學習中心」
+- 修法：兩處外層 enterLC 都加 3 次 retry，間隔 8s / 11s
+
 ### 結果頁正解 parser 永遠不要重啟（v0.4.17 教訓）
 - `view_result.php` 不顯示真正的正解 —— 「公布答案」按鈕點下去會打 `set_see_question_result.php?{eid}` 永久鎖重考，不能點
 - 任何試圖從成績頁文字 regex 抓「正解」的 parser 都會抓到使用者選的答案 / 不相關 UI 文字 → 灌進 learned_answers 變成假正解

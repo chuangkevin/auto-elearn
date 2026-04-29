@@ -67,6 +67,13 @@ export function matchAgainstDb(questionText: string): MatchResult | null {
     if (!best || sim > best.sim) best = { row, sim };
   }
   if (!best) return null;
+  // Reject low-similarity hits — without a floor, the 12-char-prefix LIKE
+  // strategy in lookupByLike would happily return a wildly different
+  // question that just shares a domain phrase, and the solver would pick
+  // its (totally unrelated) "correct" answer with confidence 0.3. Better
+  // to fall through to LLM/brute than feed the bookkeeping a known-bad
+  // answer that learned_answers might then cache as ground truth.
+  if (best.sim < 0.35) return null;
 
   const source: AnswerSource = best.sim >= 0.85 ? "db" : "fuzzy";
   return {

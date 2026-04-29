@@ -45,12 +45,11 @@ export function classify(c: Course, detail?: CourseDetail | null): CoursePhase {
   if (detail) {
     const required = requiredSecondsFor(c);
     const readingDone = detail.readSec !== null && detail.readSec >= required;
-    // GLOBAL pass-floor 80 — matches the threshold solver uses. A course
-    // showing "測驗 60 分 通過狀態:--" should still classify as needing
-    // 測驗 (not rating), because 60 < 80 and we want the chain to retake.
-    // Use Math.max with the page-declared threshold in case some course
-    // demands more than 80.
-    const passFloor = Math.max(detail.passingScore ?? 60, 80);
+    // Per-course pass threshold from 課程須知 (course-detail.ts falls back
+    // to 80 when omitted). Earlier we forced a global floor of 80 here, but
+    // that misclassified courses that genuinely pass at 60 — they'd reach
+    // 60, get re-routed back to "exam" forever, and never advance to survey.
+    const passFloor = detail.passingScore ?? 80;
     const examActuallyPassed = detail.examScore !== null && detail.examScore >= passFloor;
     const surveyDone = detail.surveyDone === true;
     const officiallyPassed = detail.passed === true;

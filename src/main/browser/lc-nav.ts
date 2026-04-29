@@ -22,6 +22,13 @@ export async function execJs<T>(win: BrowserWindow, code: string): Promise<T | n
  * Also re-applies on dom-ready and finish-load as a safety net.
  */
 export function suppressDialogs(win: BrowserWindow): void {
+  // Bump the WebContents EventEmitter ceiling. Each enterLC call inside the
+  // exam-loop pumps win.loadURL() + a stream of executeJavaScript() calls;
+  // Electron's internals attach one-shot did-stop-loading listeners per
+  // pending Promise, and across 10+ retries the default ceiling of 10 trips
+  // a noisy MaxListenersExceededWarning. The listeners ARE cleaned up when
+  // each Promise settles — the warning is cosmetic, not an actual leak.
+  win.webContents.setMaxListeners(64);
   const SUPPRESS = `try{window.alert=()=>void 0;window.confirm=()=>true;window.prompt=()=>'';}catch(e){}`;
   win.webContents.on("frame-created", (_event, details) => {
     if (details.frame) details.frame.executeJavaScript(SUPPRESS).catch(() => void 0);

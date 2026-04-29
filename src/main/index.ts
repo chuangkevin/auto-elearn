@@ -629,11 +629,11 @@ async function refreshCourses(): Promise<void> {
 function trackedToCard(t: Tracked): CourseCard {
   // Prefer authoritative detail-page state (閱讀時數 / 測驗 / 問卷) over the
   // unreliable listing flags. Listing flags are kept only as fallback.
-  // examDone follows the global 80-point floor — a "60 分" course is NOT
-  // marked as exam-done, otherwise the UI stepper falsely shows ✓ 測驗
-  // and the chain considers the course finished even though server's
-  // 通過狀態 is still "--".
-  const passFloor = Math.max(t.detail?.passingScore ?? 60, 80);
+  // examDone uses the per-course declared threshold from 課程須知.
+  // course-detail.ts falls back to 80 when the page omits the value, so a
+  // course that genuinely requires 60 lights ✓ at 60, while courses where
+  // we couldn't read the page conservatively need 80.
+  const passFloor = t.detail?.passingScore ?? 80;
   const examDone =
     t.detail?.examScore != null
       ? t.detail.examScore >= passFloor
@@ -918,10 +918,19 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       // 1. 測驗 — re-run unless 通過狀態 == 通過. Skipping on examScore != null
       //    silently ignored courses showing "測驗 0 分" (= attempted, failed,
       //    needs retake to pass).
-      // Pass threshold floor: 80. Some courses' /info page declares a lower
-      // bar (e.g. 60), but server can be picky about extra criteria, and
-      // the user explicitly wants 80 as the safe minimum across the board.
-      // Use whichever is HIGHER between the page-declared threshold and 80.
+      // Pass threshold: trust each course's declared 課程測驗 value (parsed
+      // by course-detail.ts; defaults to 80 when the page omits it). The
+      // earlier global floor of 80 forced the solver to over-attempt 60-pass
+      // courses (extra exam attempts looked suspicious server-side); the
+      // earlier 60 default caused 80-pass courses to stop short and never
+      // flip 通過狀態.
+      // examOK gates the survey step below. Starts true if the course is
+      // already passed OR doesn't have an exam to run; flips false if our
+      // attempt scored below the passing threshold so we don't fake-submit
+      // a 問卷 on a course the server is never going to credit anyway
+      // (and an exam record sitting at e.g. 70 followed by a fresh 問卷
+      // submission is a textbook auto-cheat fingerprint).
+      let examOK = passed;
       if (!passed && !abortSignal.aborted) {
         // History-based pre-solve: if the course already has past attempt
         // records on /learn/exam/view_result.php, mathematically derive the
@@ -939,9 +948,8 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           log("warn", `  [${name}] history-solve 例外：${(e as Error)?.message ?? e}`);
         }
 
-        const declared = fresh?.passingScore ?? 60;
-        const threshold = Math.max(declared, 80);
-        log("info", `開始測驗：${name}（門檻 ${threshold} 分${declared !== threshold ? `；課程要求 ${declared} 但全域下限 80` : ""}）`);
+        const threshold = fresh?.passingScore ?? 80;
+        log("info", `開始測驗：${name}（門檻 ${threshold} 分）`);
         const res = await solveExam(cid, session, {
           onProgress: (msg) => log("info", `  [${name}] ${msg}`),
           passingScore: threshold,
@@ -954,13 +962,21 @@ async function runPipelineFor(cids: string[]): Promise<void> {
             `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
           );
           if (card && res.passed) card.examDone = true;
+          // total === 0 → no exam menu in sysbar (rare; reading-only courses)
+          // → treat as OK so survey/done can proceed.
+          examOK = res.passed === true || res.total === 0;
         } else {
           log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
+          examOK = false;
         }
       }
 
-      // 2. 問卷
-      if (!passed && !surveyDone && !abortSignal.aborted) {
+      // 2. 問卷 — gate by examOK, not by passed alone. Earlier code only
+      // checked `!passed && !surveyDone`, which fired the survey filler
+      // even on courses where the exam just failed (e.g. 70/80) — pointless
+      // because the server won't flip 通過狀態 without a passing exam, and
+      // it leaves a suspicious "failed exam → fresh 問卷" trail.
+      if (examOK && !passed && !surveyDone && !abortSignal.aborted) {
         log("info", `問卷：${name}`);
         const sr = await fillSurvey(cid, session, {
           onProgress: (msg) => log("info", `  [${name}] ${msg}`),

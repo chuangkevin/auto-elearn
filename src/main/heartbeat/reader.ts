@@ -192,6 +192,11 @@ async function _extractTicketImpl(
       disableDialogs: true,
     },
   });
+  // Same listener-ceiling bump as suppressDialogs() — Electron attaches
+  // one-shot did-stop-loading listeners per pending loadURL/executeJavaScript
+  // Promise; reader windows can pump a dozen JS calls during the 20s dwell
+  // and trip the default ceiling of 10.
+  win.webContents.setMaxListeners(64);
   win.webContents.on("will-prevent-unload", (e) => e.preventDefault());
 
   try {

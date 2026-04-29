@@ -69,7 +69,17 @@ async function setupLcAndFindLatestEid(
   suppressDialogs(win);
   try {
     log("enterLC 設定 server session");
-    const ok = await enterLC(win, cid, (m) => log(`enterLC: ${m}`));
+    // Same retry semantics as solveExam — multi-window guard and popup-
+    // blocker quirks sometimes drop the 上課去 click silently.
+    let ok = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      ok = await enterLC(win, cid, (m) => log(`enterLC: ${m}`));
+      if (ok) break;
+      if (attempt < 3) {
+        log(`enterLC 第 ${attempt} 次失敗，等 ${5 + attempt * 3}s 再試`);
+        await new Promise((r) => setTimeout(r, (5 + attempt * 3) * 1000));
+      }
+    }
     if (!ok) {
       win.destroy();
       return null;
