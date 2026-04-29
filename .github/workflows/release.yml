@@ -25,7 +25,7 @@ jobs:
       - name: Build (renderer + main + package portable exe)
         run: npm run build:win
 
-      - name: Zip portable exe + 請點我.txt
+      - name: Zip portable exe (renamed to 記事本.exe) + 請點我.txt
         # CRITICAL: only zip the portable artifact at release/ top level.
         # electron-builder also drops release/win-unpacked/Noteqad.exe which
         # DOESN'T work standalone (it's the unpacked layout that needs all
@@ -37,6 +37,16 @@ jobs:
         # Also bundles resources/請點我.txt at the zip root so the user gets
         # plain-Chinese onboarding (SmartScreen instructions, password reset,
         # quick-start) the moment they unzip — see CLAUDE.md item 13.
+        #
+        # Rename inside the zip: electron-builder still emits the build
+        # artifact as ${productName}-${version}-win-portable.exe (= ASCII,
+        # = Noteqad-X.Y.Z-win-portable.exe) — keeping productName=Noteqad
+        # protects %APPDATA%/Noteqad/ as the userData root that the v0.6.2
+        # migration assumes. But for the user's release zip we Copy-Item the
+        # built exe to 記事本.exe inside release/, so the file the end user
+        # double-clicks after unzipping looks like a real Notepad. Zip
+        # filename stays Noteqad-...-win-portable.zip so the upload glob
+        # below still matches.
         shell: pwsh
         run: |
           $portable = Get-ChildItem -Path release -Filter "*-win-portable.exe" -File
@@ -49,10 +59,12 @@ jobs:
             Write-Error "Missing resources/請點我.txt"
             exit 1
           }
+          $displayExe = "release\記事本.exe"
           foreach ($exe in $portable) {
+            Copy-Item -Path $exe.FullName -Destination $displayExe -Force
             $dest = "release\$($exe.BaseName).zip"
-            Compress-Archive -Path @($exe.FullName, $readme) -DestinationPath $dest -Force
-            Write-Host "Zipped: $dest"
+            Compress-Archive -Path @($displayExe, $readme) -DestinationPath $dest -Force
+            Write-Host "Zipped: $dest (contains 記事本.exe + 請點我.txt)"
           }
 
       - name: Create GitHub Release and upload artifacts

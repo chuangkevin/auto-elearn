@@ -158,6 +158,29 @@ function App() {
   const prevStatus = useRef<string | null>(null);
   const dragging = useRef(false);
 
+  // 解鎖狀態的右鍵 context menu — 跟 Noteqad 偽裝畫面一樣可以一鍵打開 log 資料夾。
+  // 沒打開偽裝模式的使用者也能找到 log 給管理員（v0.6.5 caveat 修法）。
+  const [appCtxMenu, setAppCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+  useEffect(() => {
+    window.api.getAppVersion?.().then(setAppVersion).catch(() => void 0);
+  }, []);
+  useEffect(() => {
+    if (!appCtxMenu) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setAppCtxMenu(null);
+    }
+    function onClick() {
+      setAppCtxMenu(null);
+    }
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onClick);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onClick);
+    };
+  }, [appCtxMenu]);
+
   // 第一次啟動時跳出 SmartScreen 說明（main 端會給 isFirstRun 旗標）。
   useEffect(() => {
     if (state?.isFirstRun) setShowFirstRunHelp(true);
@@ -312,7 +335,19 @@ function App() {
       : `1 1 ${browserRatio * 100}%`;
 
   return (
-    <div className="h-screen flex flex-row relative">
+    <div
+      className="h-screen flex flex-row relative"
+      onContextMenu={(e) => {
+        // 攔掉 Electron 預設的 webview context menu（「重新整理 / 檢查」這些
+        // 一看就 Chromium 風）；改顯示我們自己的 mini menu，最重要的是讓使用者
+        // 拿得到 log 資料夾。注意：BrowserView 是 native overlay，蓋住的區域
+        // 這個 React onContextMenu 不會 fire（native 自己處理），所以這條
+        // listener 只在 dashboard / 操作區那塊作用，符合預期。
+        e.preventDefault();
+        e.stopPropagation();
+        setAppCtxMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
       {/* Left panel: relative+overflow-hidden so absolute-positioned modals
           are clipped to this column and never spill onto the BrowserView. */}
       <div
@@ -502,6 +537,32 @@ function App() {
               }}
             />
           </ModalGuard>
+        </div>
+      )}
+
+      {/* 解鎖狀態的右鍵 mini menu — 只放「版本 + 打開 log」一條，不複製 Noteqad 的
+          整個 Notepad 編輯選單，因為這裡是 dashboard，使用者根本不會在 dashboard 上
+          剪下複製。 */}
+      {appCtxMenu && (
+        <div
+          className="fixed z-[90] min-w-[200px] bg-white border border-[#bfbfbf] shadow-md py-1 select-none"
+          style={{
+            left: Math.min(appCtxMenu.x, Math.max(0, window.innerWidth - 220)),
+            top: Math.min(appCtxMenu.y, Math.max(0, window.innerHeight - 60)),
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            className="block w-full text-left px-4 py-1 hover:bg-[#0b65c2] hover:text-white text-[12px] text-black"
+            title="點我打開記錄檔資料夾，可以把 .log 檔傳給管理員除錯"
+            onClick={() => {
+              setAppCtxMenu(null);
+              window.api.openLogsFolder?.();
+            }}
+          >
+            版本 {appVersion ? `v${appVersion}` : "（讀取中…）"}
+          </button>
         </div>
       )}
 
