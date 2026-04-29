@@ -239,9 +239,13 @@ async function fetchProgressCached(session: Session): Promise<Map<string, PollDa
 function showGeminiKeyDialog(): void {
   if (!mainWindow) return;
   const preloadPath = join(__dirname, "../preload/index.js");
-  const htmlPath = app.isPackaged
-    ? join(process.resourcesPath, "resources/gemini-key-dialog.html")
-    : join(app.getAppPath(), "resources/gemini-key-dialog.html");
+  // v0.6.0 regression: previously resources/* was duplicated into <resourcesPath>/resources/
+  // via package.json's `build.extraResources`. Moving the build config to
+  // electron-builder.yml dropped that block, so in packaged builds
+  // <resourcesPath>/resources/gemini-key-dialog.html no longer exists — only
+  // <appPath>/resources/gemini-key-dialog.html (inside app.asar) does. Use
+  // app.getAppPath() everywhere; asar transparency handles the read.
+  const htmlPath = join(app.getAppPath(), "resources/gemini-key-dialog.html");
 
   const dlg = new BrowserWindow({
     width: 480,
@@ -281,9 +285,14 @@ function buildAppMenu(): void {
 
 // ── Window + BrowserView ──────────────────────────────────────
 function createWindow() {
-  const iconPath = app.isPackaged
-    ? join(process.resourcesPath, "resources/icon.ico")
-    : join(app.getAppPath(), "resources/icon.ico");
+  // Same v0.6.0 regression as showGeminiKeyDialog — see comment there.
+  // Passing a non-existent icon path through to BrowserWindow on Windows
+  // can crash the renderer process on launch ("閃退") on systems whose
+  // shell32 image-loading path doesn't tolerate a missing .ico gracefully,
+  // which is why v0.6.0 booted fine on dev machines but flash-crashed for
+  // some packaged-build users. Resolve via app.getAppPath() — asar
+  // transparency reads the icon from inside app.asar.
+  const iconPath = join(app.getAppPath(), "resources/icon.ico");
 
   mainWindow = new BrowserWindow({
     width: 1360,
