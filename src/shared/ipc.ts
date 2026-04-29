@@ -54,7 +54,10 @@ export interface LogEntry {
 export interface AppState {
   status: AppStatus;
   pauseReason?: string;
+  /** 已登入使用者；name 已經在 main 端隱碼好（保留首字 + ***），renderer 只負責顯示。 */
   user?: { name: string };
+  /** 是否第一次執行（用來決定要不要顯示 SmartScreen 說明）。 */
+  isFirstRun?: boolean;
   /** BrowserView session health, updated by the login watchdog */
   loginStatus?: "ok" | "relogging" | "failed";
   /** cids the user ticked and asked us to process this run */
@@ -146,6 +149,8 @@ export const IPC = {
   OPEN_GEMINI_DIALOG: "gemini:open-dialog",
   /** renderer → main: list 次類別 under a 主類別 id */
   CATEGORY_CHILDREN: "category:children",
+  /** renderer → main: 標記 SmartScreen 說明已讀過，以後不要再顯示 */
+  ACK_FIRST_RUN: "first-run:ack",
 } as const;
 
 export interface SearchOptions {

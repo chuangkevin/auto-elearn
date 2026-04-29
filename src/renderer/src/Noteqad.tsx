@@ -199,13 +199,11 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
         style={{ whiteSpace: "pre-wrap" }}
       />
 
-      {/* Status bar — doubles as subtle feedback for wrong password. The status
-          bar is where Notepad shows row/col so putting a hint here stays in
-          character without drawing attention of passers-by. */}
+      {/* 狀態列：用來在密碼錯時悄悄提示，但平時看起來就只是行/欄座標。 */}
       <div className="h-5 bg-[#f5f5f5] border-t border-[#e5e5e5] text-[11px] px-2 flex items-center text-[#666]">
         <span className={wrongFlash ? "text-rose-600 font-semibold" : ""}>
           {wrongFlash
-            ? `密碼錯誤${wrongCount >= 3 ? "（忘了？檔案 > 結束 連點 5 次可重設）" : ""}`
+            ? `密碼不對${wrongCount >= 3 ? "（忘記密碼？點上面「檔案 → 結束」連點 5 次可以重設）" : ""}`
             : `第 ${text.split("\n").length} 行，第 ${text.split("\n").slice(-1)[0].length + 1} 欄`}
         </span>
         <span className="ml-auto">100%</span>
@@ -218,21 +216,23 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50">
           <div className="bg-white border border-[#bfbfbf] shadow-lg w-[420px] p-4">
             <div className="text-sm font-semibold mb-2">
-              {hasSecret ? "重設解鎖密碼" : "設定解鎖密碼"}
+              {hasSecret ? "重新設定解鎖密碼" : "設定解鎖密碼"}
             </div>
             <div className="text-xs text-slate-600 mb-3 leading-relaxed">
               {hasSecret ? (
                 <>
-                  忘記密碼？直接在這裡覆寫一組新的。（一般解鎖請在下方文字區輸入密碼 + Enter）
+                  忘記密碼？直接在這裡蓋一組新的就好。<br />
+                  （平常要解鎖：直接在下面的記事本文字區打密碼 + Enter）
                   <br />
                 </>
               ) : (
                 <>
-                  設定後，下次打開 Notepad 時在文字區輸入此密碼 + Enter 即可進入真正的應用。
+                  設好後，下次打開時會看到這個記事本畫面。<br />
+                  在文字區裡輸入這組密碼 + Enter 才會進到真正的程式。
                   <br />
                 </>
               )}
-              密碼以明碼存放於：
+              密碼存在這個檔案：
               <div className="mt-1 font-mono text-[11px] text-slate-700 bg-slate-100 border border-slate-300 rounded px-2 py-1 break-all select-all">
                 {configPath || "(路徑載入中…)"}
               </div>
@@ -269,7 +269,7 @@ export default function Noteqad({ hasSecret, onUnlockAttempt, onSetSecret }: Pro
                 className="px-3 py-1 bg-[#0b65c2] hover:bg-[#0955a5] text-white text-sm"
                 onClick={submitSetup}
               >
-                {hasSecret ? "覆寫並解鎖" : "確定"}
+                {hasSecret ? "蓋掉舊的並解鎖" : "確定"}
               </button>
             </div>
           </div>

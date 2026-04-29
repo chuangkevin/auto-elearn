@@ -1,6 +1,6 @@
 {
   "name": "auto-elearn",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "description": "e 等公務園自動刷課 Windows 桌面應用",
   "main": "./out/main/index.js",
@@ -15,39 +15,6 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web"
-  },
-  "build": {
-    "appId": "tw.kevin.auto-elearn",
-    "productName": "auto-elearn",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "out/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/",
-        "to": "resources/",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
-    "win": {
-      "icon": "resources/icon.ico",
-      "target": [
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "portable": {
-      "artifactName": "${productName}-${version}-win-portable.exe"
-    }
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",

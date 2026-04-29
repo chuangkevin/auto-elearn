@@ -53,11 +53,46 @@ import {
   setSecret as stealthSetSecret,
   tryUnlock as stealthTryUnlock,
 } from "./stealth/stealth";
+import { maskAccount, maskName, maskSecretsInString } from "../shared/mask";
+import { existsSync, mkdirSync, writeFileSync as fsWriteFileSync } from "node:fs";
 
-function maskAccount(acc: string): string {
-  if (!acc) return "";
-  if (acc.length <= 4) return acc;
-  return `${acc.slice(0, 1)}${"*".repeat(acc.length - 5)}${acc.slice(-4)}`;
+/**
+ * In-memory cache of sensitive strings (real account / real user name)
+ * that must never leak into UI or log payloads. Populated as the app learns
+ * them and used by `pushSecretToMaskList` + `maskLog`.
+ */
+const _logSecrets: Array<{ value: string; masked: string }> = [];
+function pushSecretToMaskList(value: string | undefined | null, masked: string) {
+  if (!value || value.length < 2) return;
+  if (_logSecrets.some((s) => s.value === value)) return;
+  _logSecrets.push({ value, masked });
+}
+function maskLog(msg: string): string {
+  return maskSecretsInString(msg, _logSecrets);
+}
+
+/**
+ * 首次執行旗標 — 寫在 userData 下的 .first-run-acked。
+ * 沒這個檔 = 第一次跑，UI 會在啟動時跳出「Windows 首次封鎖怎麼處理」說明。
+ */
+function firstRunFlagPath(): string {
+  return join(app.getPath("userData"), ".first-run-acked");
+}
+function isFirstRunFlagPresent(): boolean {
+  try {
+    return !existsSync(firstRunFlagPath());
+  } catch {
+    return false;
+  }
+}
+function ackFirstRun(): void {
+  try {
+    const dir = app.getPath("userData");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    fsWriteFileSync(firstRunFlagPath(), new Date().toISOString(), "utf8");
+  } catch {
+    /* 寫不進去就算了，至少不會 crash */
+  }
 }
 
 // Hard cap purely to avoid spawning hundreds of hidden BrowserWindows during
@@ -162,9 +197,13 @@ function pushState() {
 }
 
 function log(level: "info" | "warn" | "error", msg: string) {
-  state.logs.push({ ts: Date.now(), level, msg });
+  // 在 push 進 state 之前先把帳號 / 使用者名稱字串隱碼，
+  // 不然敏感資訊會經由 log 日誌流出去（即使 UI 上有遮，從日誌也看得到）。
+  const safe = maskLog(msg);
+  state.logs.push({ ts: Date.now(), level, msg: safe });
   if (state.logs.length > 200) state.logs.splice(0, state.logs.length - 200);
   pushState();
+  // 開發者主控台不必隱碼，方便 debug；正式打包後也不會被使用者看到。
   // eslint-disable-next-line no-console
   console.log(`[${level}] ${msg}`);
 }
@@ -265,7 +304,13 @@ function createWindow() {
     },
   });
   // Electron keeps refreshing title from the rendered document; lock it down.
-  mainWindow.on("page-title-updated", (e) => e.preventDefault());
+  // 整個 app 的視窗標題永遠是「未命名 - 記事本」；不論是不是偽裝模式都不會洩漏真實程式名稱。
+  mainWindow.on("page-title-updated", (e) => {
+    e.preventDefault();
+    if (mainWindow && mainWindow.getTitle() !== "未命名 - 記事本") {
+      mainWindow.setTitle("未命名 - 記事本");
+    }
+  });
 
   // Keep at least 100px of the title bar inside the display's work area so the
   // user can always grab the window back. Works across multi-monitor setups.
@@ -309,20 +354,26 @@ function createWindow() {
   });
 
   if (hasSavedCredentials()) {
+    // 預先把帳號加進隱碼名單；之後若 log 不慎打到原始帳號也會自動換成隱碼版。
+    const c = loadCredentials();
+    if (c?.account) pushSecretToMaskList(c.account, maskAccount(c.account));
     state.status = "await_login";
-    log("info", "偵測到已儲存帳密，背景自動登入中...");
+    log("info", "已記得你的帳號，背景幫你登入中…");
     void tryAutoLogin().catch(() => void 0);
   } else {
     state.status = "setup";
-    log("info", "首次啟動：請設定 eCPA 帳號密碼");
+    log("info", "第一次使用：請輸入人事服務網（e 等公務園）的帳號密碼");
   }
+  state.isFirstRun = isFirstRunFlagPresent();
   pushState();
 
   detectLogin(elearnView.webContents)
     .then(async (user) => {
-      state.user = { name: user };
+      // 真名只出現在 main process 的記憶體裡，UI 拿到的永遠是隱碼版。
+      pushSecretToMaskList(user, maskName(user));
+      state.user = { name: maskName(user) };
       state.loginStatus = "ok";
-      log("info", `偵測到登入：${user}`);
+      log("info", `已成功登入`);
       startLoginWatchdog();
       await dismissNuisancePopups(elearnView!.webContents);
       await refreshCourses();
@@ -508,9 +559,10 @@ async function showPrefilledEcpaLogin(creds: SavedCredentials): Promise<void> {
   // Fire-and-forget: this runs in parallel with the navigate below.
   detectLogin(wc)
     .then(async (user) => {
-      state.user = { name: user };
+      pushSecretToMaskList(user, maskName(user));
+      state.user = { name: maskName(user) };
       state.loginStatus = "ok";
-      log("info", `偵測到登入：${user}`);
+      log("info", `已成功登入`);
       startLoginWatchdog();
       await dismissNuisancePopups(wc);
       await refreshCourses();
@@ -661,14 +713,6 @@ function updateStats() {
   state.stats.done = scope.filter((c) => c.phase === "done").length;
   state.stats.progressPct =
     state.stats.total === 0 ? 0 : Math.round((state.stats.done / state.stats.total) * 100);
-}
-
-function formatHms(sec: number): string {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
 // ── BrowserView login watchdog ────────────────────────────────
@@ -1376,6 +1420,12 @@ ipcMain.handle(IPC.GEMINI_KEY_SET, (_evt, key: string) => {
   saveConfig({ geminiApiKey: key.trim() || undefined });
 });
 ipcMain.on(IPC.OPEN_GEMINI_DIALOG, () => showGeminiKeyDialog());
+
+ipcMain.on(IPC.ACK_FIRST_RUN, () => {
+  ackFirstRun();
+  state.isFirstRun = false;
+  pushState();
+});
 
 ipcMain.on(IPC.RESUME_ANSWER, (_evt, resume: boolean) => {
   const prev = loadRun();

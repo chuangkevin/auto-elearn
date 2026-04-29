@@ -25,14 +25,18 @@ jobs:
       - name: Build (renderer + main + package portable exe)
         run: npm run build:win
 
-      - name: Zip portable exe
+      - name: Zip portable exe + 請點我.txt
         # CRITICAL: only zip the portable artifact at release/ top level.
-        # electron-builder also drops release/win-unpacked/auto-elearn.exe
-        # which DOESN'T work standalone (it's the unpacked layout that
-        # needs all the surrounding *.dll / locales / resources to run).
-        # An earlier `-Recurse` version was zipping that broken exe too,
-        # uploading both to the GitHub Release, and users grabbed the
-        # short-named "auto-elearn.zip" → got "找不到 ffmpeg.dll" on launch.
+        # electron-builder also drops release/win-unpacked/Noteqad.exe which
+        # DOESN'T work standalone (it's the unpacked layout that needs all
+        # the surrounding *.dll / locales / resources to run). An earlier
+        # `-Recurse` version was zipping that broken exe too, uploading both
+        # to the GitHub Release, and users grabbed the short-named
+        # "Noteqad.zip" → got "找不到 ffmpeg.dll" on launch.
+        #
+        # Also bundles resources/請點我.txt at the zip root so the user gets
+        # plain-Chinese onboarding (SmartScreen instructions, password reset,
+        # quick-start) the moment they unzip — see CLAUDE.md item 13.
         shell: pwsh
         run: |
           $portable = Get-ChildItem -Path release -Filter "*-win-portable.exe" -File
@@ -40,9 +44,14 @@ jobs:
             Write-Error "Portable exe not found under release/ (top level)"
             exit 1
           }
+          $readme = "resources\請點我.txt"
+          if (-not (Test-Path $readme)) {
+            Write-Error "Missing resources/請點我.txt"
+            exit 1
+          }
           foreach ($exe in $portable) {
             $dest = "release\$($exe.BaseName).zip"
-            Compress-Archive -Path $exe.FullName -DestinationPath $dest -Force
+            Compress-Archive -Path @($exe.FullName, $readme) -DestinationPath $dest -Force
             Write-Host "Zipped: $dest"
           }
 

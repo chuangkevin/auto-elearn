@@ -1,6 +1,7 @@
 appId: tw.kevin.auto-elearn
-# Product name = output .exe / installer name. Using "Noteqad" matches the on-screen
-# Notepad disguise (stealth mode); the app still runs auto-elearn code underneath.
+# productName = .exe filename + window display name. Disguise: "Noteqad" looks
+# enough like "Notepad" at a glance that a glance at the taskbar/Alt-Tab list
+# doesn't blow cover. The real app code still runs underneath.
 productName: Noteqad
 directories:
   output: release
@@ -19,14 +20,13 @@ asarUnpack:
   - "node_modules/bindings/**/*"
   - "node_modules/file-uri-to-path/**/*"
 win:
+  icon: resources/icon.ico
+  # portable = single-file standalone .exe; no installer / no Start menu shortcut
+  # leaves a Windows fingerprint. The release workflow zips this exe as-is +
+  # a 「請點我.txt」 readme into the published GitHub Release zip.
   target:
-    - target: nsis
+    - target: portable
       arch:
         - x64
-  artifactName: ${productName}-${version}-setup.${ext}
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
-  perMachine: false
-  artifactName: ${productName}-${version}-setup.${ext}
-  shortcutName: ${productName}
+portable:
+  artifactName: ${productName}-${version}-win-portable.${ext}

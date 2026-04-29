@@ -47,6 +47,7 @@ declare global {
       stealthLock: () => void;
       stealthConfigPath: () => Promise<string>;
       openGeminiDialog: () => void;
+      ackFirstRun: () => void;
     };
   }
 }
@@ -145,10 +146,19 @@ function App() {
   const state = useAppState();
   const leftRef = useRef<HTMLDivElement>(null);
   const [browserRatio, setBrowserRatio] = useState(SELECTING_BROWSER_RATIO);
+  // collapsed: 把右邊瀏覽器收起、只留左邊操作區。
+  // leftCollapsed: 把左邊操作區收起、只留右邊瀏覽器（看影片時用）。
   const [collapsed, setCollapsed] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [showFirstRunHelp, setShowFirstRunHelp] = useState(false);
   const userAdjustedRatio = useRef(false);
   const prevStatus = useRef<string | null>(null);
   const dragging = useRef(false);
+
+  // 第一次啟動時跳出 SmartScreen 說明（main 端會給 isFirstRun 旗標）。
+  useEffect(() => {
+    if (state?.isFirstRun) setShowFirstRunHelp(true);
+  }, [state?.isFirstRun]);
 
   // Credentials + auto-login UI state
   const [credsPrompt, setCredsPrompt] = useState<CredsPromptPayload | null>(null);
@@ -190,7 +200,7 @@ function App() {
   }
 
   function forgetCreds() {
-    if (!confirm("確定要清除已儲存的帳密嗎？之後 session 過期就需要手動登入。")) return;
+    if (!confirm("確定要忘記已記住的帳號嗎？之後斷線就要手動再登一次。")) return;
     window.api.forgetCredentials();
     setCredsStatus({ saved: false });
   }
@@ -275,10 +285,20 @@ function App() {
     );
   }
 
-  const leftFlex = collapsed ? `1 1 auto` : `1 1 ${(1 - browserRatio) * 100}%`;
+  // 三種版面：
+  //   leftCollapsed → 左邊縮成窄條、瀏覽器吃滿（看影片用）
+  //   collapsed     → 右邊縮成窄條、操作區吃滿（看 log 用）
+  //   都關 = 兩邊照 browserRatio 分配
+  const leftFlex = leftCollapsed
+    ? `0 0 ${COLLAPSED_BROWSER_PX}px`
+    : collapsed
+      ? `1 1 auto`
+      : `1 1 ${(1 - browserRatio) * 100}%`;
   const rightFlex = collapsed
     ? `0 0 ${COLLAPSED_BROWSER_PX}px`
-    : `1 1 ${browserRatio * 100}%`;
+    : leftCollapsed
+      ? `1 1 auto`
+      : `1 1 ${browserRatio * 100}%`;
 
   return (
     <div className="h-screen flex flex-row relative">
@@ -289,9 +309,20 @@ function App() {
         className="relative overflow-hidden"
         style={{ flex: leftFlex, minWidth: 0 }}
       >
+        {leftCollapsed ? (
+          <button
+            className="h-full w-full flex items-center justify-center text-xs text-slate-300 bg-slate-800 hover:bg-slate-700"
+            onClick={() => setLeftCollapsed(false)}
+            title="重新展開操作區"
+            style={{ writingMode: "vertical-rl" }}
+          >
+            操作區已收起，點我展開
+          </button>
+        ) : (
         <div className="overflow-auto h-full">
           <TopPanel state={state} />
         </div>
+        )}
 
         {/* Auto-login status toast — inside left panel so it stays left */}
         {autoLogin && (
@@ -304,11 +335,11 @@ function App() {
                 : "bg-slate-800/90 border-slate-600 text-slate-100"
             }`}
           >
-            {autoLogin.stage === "start" && "🔐 背景自動登入中..."}
-            {autoLogin.stage === "filling" && "🔐 填寫登入表單..."}
-            {autoLogin.stage === "submitted" && "🔐 等待驗證..."}
-            {autoLogin.stage === "success" && "✅ 自動登入成功"}
-            {autoLogin.stage === "failed" && `❌ 自動登入失敗：${autoLogin.error ?? "請手動登入"}`}
+            {autoLogin.stage === "start" && "🔐 幫你登入中…"}
+            {autoLogin.stage === "filling" && "🔐 正在輸入帳號密碼…"}
+            {autoLogin.stage === "submitted" && "🔐 等網站確認中…"}
+            {autoLogin.stage === "success" && "✅ 登入成功"}
+            {autoLogin.stage === "failed" && `❌ 登入失敗：${autoLogin.error ?? "請自己登入一次"}`}
           </div>
         )}
 
@@ -339,17 +370,17 @@ function App() {
           <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
             <ModalGuard>
               <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
-                <h2 className="text-lg font-semibold text-slate-100 mb-2">偵測到上次未完成的進度</h2>
+                <h2 className="text-lg font-semibold text-slate-100 mb-2">上次有沒上完的課</h2>
                 <p className="text-sm text-slate-300 mb-1">
-                  上次中斷時間：<span className="text-slate-400"> {new Date(resumePrompt.startedAt).toLocaleString()}</span>
+                  上次停下來的時間：<span className="text-slate-400"> {new Date(resumePrompt.startedAt).toLocaleString()}</span>
                 </p>
                 <p className="text-sm text-slate-300 mb-4">
                   還有 <span className="font-bold text-emerald-300">{resumePrompt.pipelineCids.length}</span>{" "}
-                  門課在進行中，要繼續嗎？
+                  門課還沒上完，要不要繼續？
                 </p>
                 <div className="flex justify-end gap-2">
-                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerResume(false)}>丟棄</button>
-                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold" onClick={() => answerResume(true)}>繼續上次進度</button>
+                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerResume(false)}>不要，重新選</button>
+                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold" onClick={() => answerResume(true)}>繼續上次</button>
                 </div>
               </div>
             </ModalGuard>
@@ -359,17 +390,17 @@ function App() {
           <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
             <ModalGuard>
               <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
-                <h2 className="text-lg font-semibold text-slate-100 mb-2">儲存帳密以便自動重登？</h2>
+                <h2 className="text-lg font-semibold text-slate-100 mb-2">要把帳號記起來嗎？</h2>
                 <p className="text-sm text-slate-300 mb-1">
-                  偵測到 eCPA 登入成功（帳號 <span className="text-emerald-300">{credsPrompt.maskedAccount}</span>）。
+                  剛剛登入成功（帳號 <span className="text-emerald-300">{credsPrompt.maskedAccount}</span>）。
                 </p>
                 <p className="text-sm text-slate-400 mb-4 leading-relaxed">
-                  儲存後，session 過期時系統會用此帳密在背景重新登入，不打斷你刷課。
-                  帳密經 Windows DPAPI 加密後存在 <code>userData</code>，只有你這台電腦的你可以解開。
+                  記起來之後，下次斷線會自動幫你重新登入，不用一直手動。<br/>
+                  帳號用 Windows 內建的加密保管，<b>只存在這台電腦上</b>，不會傳到網路。
                 </p>
                 <div className="flex justify-end gap-2">
-                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerCredsPrompt(false)}>不要，這次就好</button>
-                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm" onClick={() => answerCredsPrompt(true)}>儲存並啟用自動重登</button>
+                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerCredsPrompt(false)}>這次就好</button>
+                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm" onClick={() => answerCredsPrompt(true)}>記起來</button>
                 </div>
               </div>
             </ModalGuard>
@@ -407,22 +438,32 @@ function App() {
           minWidth: 0,
         }}
       />
-      {/* Collapse toggle — bottom-right of the dashboard column so it never
-          overlaps Monitor's 暫停/回選課/中止 buttons at the top, and so the
-          BrowserView can't render over it. */}
-      <button
-        className="absolute bottom-3 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
-        style={{
-          right: collapsed ? COLLAPSED_BROWSER_PX + 12 : `calc(${browserRatio * 100}% + 12px)`,
-        }}
-        onClick={toggleCollapse}
-        title={collapsed ? "重新展開 e 等公務園瀏覽器" : "收起 e 等公務園瀏覽器，Monitor 吃滿畫面"}
-      >
-        {collapsed ? "🖥 展開瀏覽器" : "📴 收起瀏覽器"}
-      </button>
+      {/* 把右邊瀏覽器收起來（讓左邊操作區吃滿）。 */}
+      {!leftCollapsed && (
+        <button
+          className="absolute bottom-3 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
+          style={{
+            right: collapsed ? COLLAPSED_BROWSER_PX + 12 : `calc(${browserRatio * 100}% + 12px)`,
+          }}
+          onClick={toggleCollapse}
+          title={collapsed ? "重新打開右邊網頁" : "右邊網頁收起來，操作區看得更清楚"}
+        >
+          {collapsed ? "→ 打開網頁" : "← 收起網頁"}
+        </button>
+      )}
 
-      {/* Credentials chip — always shown in bottom-left (stacked above 🫥 button).
-          Click to open a manage modal. Shows 已記憶 / 設定 state. */}
+      {/* 把左邊操作區收起來（讓右邊網頁吃滿）。 */}
+      {!collapsed && !leftCollapsed && (
+        <button
+          className="absolute bottom-3 left-44 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
+          onClick={() => setLeftCollapsed(true)}
+          title="把左邊操作區收起來，網頁吃滿畫面"
+        >
+          ← 收起左邊
+        </button>
+      )}
+
+      {/* 帳密管理按鈕 — 永遠出現在左下角。點開可改 / 清除。 */}
       <button
         className={`fixed left-3 bottom-11 z-40 px-2 py-1 rounded text-xs border backdrop-blur shadow-lg ${
           credsStatus?.saved
@@ -432,13 +473,104 @@ function App() {
         onClick={() => setCredsModalOpen(true)}
         title={
           credsStatus?.saved
-            ? "已儲存帳密；點擊管理（手動覆寫 / 清除）"
-            : "手動儲存 eCPA 帳號密碼以啟用自動重登"
+            ? "點我可以改帳號密碼，或清除已記得的帳號"
+            : "手動輸入 e 等公務園的帳號密碼"
         }
       >
-        {credsStatus?.saved ? `🔑 已記憶 ${credsStatus.maskedAccount ?? ""}` : "🔑 設定帳密"}
+        {credsStatus?.saved ? `🔑 已記得帳號` : "🔑 還沒記住帳號，點我設定"}
       </button>
 
+      {/* 第一次啟動時跳一次「Windows 第一次跑會跳警告」說明 */}
+      {showFirstRunHelp && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70">
+          <ModalGuard>
+            <FirstRunHelpCard
+              onClose={() => {
+                setShowFirstRunHelp(false);
+                window.api.ackFirstRun();
+              }}
+            />
+          </ModalGuard>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+function FirstRunHelpCard({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="bg-white text-slate-900 rounded-lg max-w-lg w-[92%] p-6 shadow-2xl">
+      <h2 className="text-lg font-semibold mb-3 text-emerald-700">
+        👋 歡迎！第一次打開的小提醒
+      </h2>
+      <p className="text-sm leading-relaxed mb-3">
+        Windows 第一次打開可能會跳一個藍色的警告視窗（叫做 SmartScreen）。
+        這是因為這個程式不是大公司簽名發行的，<b>不代表有問題</b>，
+        照下面的步驟跳過就可以了：
+      </p>
+      <ol className="text-sm leading-relaxed mb-4 list-decimal pl-5 space-y-1.5">
+        <li>看到藍色「Windows 已保護你的電腦」視窗時，<b>不要按關閉</b></li>
+        <li>點警告中間的「<b>其他資訊</b>」</li>
+        <li>右下角會多出一顆「<b>仍要執行</b>」按鈕，按下去</li>
+        <li>程式就會正常打開了，下次再打開不會再跳這個視窗</li>
+      </ol>
+      <div className="bg-slate-100 border border-slate-200 rounded p-3 text-xs leading-relaxed text-slate-700 mb-4">
+        如果不小心按了「關閉」也沒關係，再點兩下程式檔再做一次就好。
+      </div>
+      <div className="flex justify-end">
+        <button
+          className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+          onClick={onClose}
+        >
+          我知道了
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function GeminiInfoCard({
+  onClose,
+  onOpen,
+}: {
+  onClose: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
+      <h2 className="text-lg font-semibold mb-2">⚙ 關於 Gemini 設定</h2>
+      <p className="text-sm text-slate-300 leading-relaxed mb-3">
+        這個欄位是讓你「選用」是否要接 Google 的 AI 來幫忙答題。
+      </p>
+      <ul className="text-sm text-slate-300 leading-relaxed mb-3 list-disc pl-5 space-y-1">
+        <li>
+          <b className="text-emerald-300">沒設定也能用</b>，
+          系統會自己用內建題庫和歷史紀錄答題。
+        </li>
+        <li>有設定的話，遇到題庫沒收錄的題目時，會多一個 AI 後援。</li>
+        <li>
+          這把鑰匙存在你電腦的設定檔裡，<b>不會傳到網路上</b>。
+        </li>
+      </ul>
+      <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+        要設定的話需要去 Google AI Studio 申請一把免費的 API Key
+        （搜尋「Gemini API Key」就找得到教學）。
+      </p>
+      <div className="flex justify-end gap-2">
+        <button
+          className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+          onClick={onClose}
+        >
+          先不要
+        </button>
+        <button
+          className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+          onClick={onOpen}
+        >
+          打開設定
+        </button>
+      </div>
     </div>
   );
 }
@@ -451,6 +583,7 @@ export default function Shell() {
   const [setupValue, setSetupValue] = useState("");
   const [setupConfirm, setSetupConfirm] = useState("");
   const [setupErr, setSetupErr] = useState<string | null>(null);
+  const [showGeminiInfo, setShowGeminiInfo] = useState(false);
 
   useEffect(() => {
     window.api
@@ -527,19 +660,19 @@ export default function Shell() {
       {stealth === "unlocked" && (
         <button
           className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-          title="鎖定回 Notepad（Ctrl+Alt+H）"
+          title="馬上偽裝成記事本（也可以用 Ctrl+Alt+H）"
           onClick={() => {
             window.api.stealthLock();
             setStealth("locked");
           }}
         >
-          🫥 隱藏
+          🫥 馬上偽裝
         </button>
       )}
       {stealth === "no_secret" && (
         <button
           className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-          title="設定偽裝密碼。設定後，下次啟動會先顯示 Notepad，輸入密碼 + Enter 才會進入 app。"
+          title="設一組密碼，下次打開會偽裝成記事本。要在記事本裡輸入這組密碼才會進到真正的程式。"
           onClick={() => {
             setSetupValue("");
             setSetupConfirm("");
@@ -547,17 +680,30 @@ export default function Shell() {
             setSetupOpen(true);
           }}
         >
-          🫥 啟用偽裝
+          🫥 設一組偽裝密碼
         </button>
       )}
-      {/* Gear button — always visible, opens Gemini API key dialog */}
+      {/* ⚙ Gemini —— 點開先彈說明，避免使用者誤以為「沒設定不能用」。 */}
       <button
         className="fixed left-24 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-amber-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-        title="設定 Gemini API Key"
-        onClick={() => window.api.openGeminiDialog()}
+        title="點我看 Gemini 是什麼，要不要設定（沒設定也能用）"
+        onClick={() => setShowGeminiInfo(true)}
       >
         ⚙ Gemini
       </button>
+
+      {/* Gemini 說明卡片 — 由 Shell 管理（按鈕在 Shell 層） */}
+      {showGeminiInfo && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60">
+          <GeminiInfoCard
+            onClose={() => setShowGeminiInfo(false)}
+            onOpen={() => {
+              setShowGeminiInfo(false);
+              window.api.openGeminiDialog();
+            }}
+          />
+        </div>
+      )}
 
       {setupOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60">
@@ -619,7 +765,7 @@ function CredsManageCard({
     setBusy(true);
     try {
       const res = await onSave(account.trim(), password);
-      if (!res.ok) setErr(res.reason ?? "儲存失敗");
+      if (!res.ok) setErr(res.reason ?? "存不起來");
     } finally {
       setBusy(false);
     }
@@ -627,28 +773,28 @@ function CredsManageCard({
 
   return (
     <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
-      <h2 className="text-lg font-semibold mb-2">🔑 eCPA 帳密管理</h2>
+      <h2 className="text-lg font-semibold mb-2">🔑 帳號設定</h2>
 
       {status?.saved ? (
         <p className="text-sm text-slate-300 mb-4">
-          已儲存：<span className="text-emerald-300 font-mono">{status.maskedAccount}</span>
+          已記得：<span className="text-emerald-300 font-mono">{status.maskedAccount}</span>
           {status.lastUsedAt && (
             <span className="block text-xs text-slate-500 mt-1">
-              最後使用：{new Date(status.lastUsedAt).toLocaleString()}
+              上次用：{new Date(status.lastUsedAt).toLocaleString()}
             </span>
           )}
         </p>
       ) : (
         <p className="text-sm text-slate-400 mb-4 leading-relaxed">
-          未儲存。手動輸入 eCPA 的登入帳號（身分證字號或短碼）+ 密碼即可啟用自動重登。
-          若輸入短碼，系統會在第一次登入時自動解析為身分證字號存起來。
+          還沒記住任何帳號。把人事服務網（e 等公務園）的帳號密碼填進來，
+          下次斷線就會自動幫你登回去。
         </p>
       )}
 
       <div className="space-y-2 mb-3">
         <input
           className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
-          placeholder={status?.saved ? "輸入新的 eCPA 帳號（覆寫）" : "eCPA 帳號（身分證字號）"}
+          placeholder={status?.saved ? "新的帳號（會蓋掉舊的）" : "帳號（身分證字號）"}
           value={account}
           onChange={(e) => setAccount(e.target.value)}
           autoFocus
@@ -656,7 +802,7 @@ function CredsManageCard({
         />
         <input
           className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
-          placeholder="eCPA 密碼"
+          placeholder="密碼"
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -668,8 +814,7 @@ function CredsManageCard({
       {err && <div className="text-xs text-rose-400 mb-3">{err}</div>}
 
       <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-        帳密會用 Windows DPAPI 加密後存在 <code>userData/credentials.bin</code>，
-        只有這台電腦上的你自己可以解開。
+        帳號用 Windows 內建加密保管，只存在這台電腦上，不會傳到網路。
       </p>
 
       <div className="flex justify-between items-center">
@@ -679,7 +824,7 @@ function CredsManageCard({
             onClick={onClear}
             disabled={busy}
           >
-            🗑 清除帳密
+            🗑 忘記帳號
           </button>
         ) : (
           <span />
@@ -697,7 +842,7 @@ function CredsManageCard({
             onClick={submit}
             disabled={busy}
           >
-            {busy ? "儲存中..." : status?.saved ? "覆寫" : "儲存"}
+            {busy ? "存中…" : status?.saved ? "蓋掉舊的" : "記起來"}
           </button>
         </div>
       </div>
@@ -728,18 +873,25 @@ function StealthSetupCard({
   }, []);
   return (
     <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
-      <h2 className="text-lg font-semibold mb-2">🫥 啟用偽裝（Notepad 模式）</h2>
-      <p className="text-sm text-slate-400 mb-2 leading-relaxed">
-        設定密碼後，下次啟動 app 會先顯示一個 Notepad 畫面。在 textarea 打此密碼 + Enter
-        才會進入真正的 app。使用中可按 <code>Ctrl+Alt+H</code> 或 🫥 按鈕隨時再鎖回 Notepad。
+      <h2 className="text-lg font-semibold mb-2">🫥 設一組偽裝密碼</h2>
+      <p className="text-sm text-slate-300 mb-2 leading-relaxed">
+        設了之後，下次打開程式會看起來像「記事本」。<br />
+        要在那個記事本裡<b>輸入這組密碼 + Enter</b> 才會進到真正的程式。
       </p>
-      <p className="text-sm text-slate-400 mb-2">密碼以明碼存放於：</p>
-      <div className="mb-4 font-mono text-[11px] text-slate-200 bg-slate-950 border border-slate-700 rounded px-2 py-1 break-all select-all">
+      <p className="text-sm text-slate-300 mb-2 leading-relaxed">
+        進到程式後，按左下角 🫥 或 <code>Ctrl+Alt+H</code> 可以馬上再變回記事本。
+      </p>
+      <p className="text-xs text-slate-500 mb-2">忘記密碼怎麼辦？</p>
+      <div className="mb-3 text-xs text-slate-400 leading-relaxed bg-slate-800/50 border border-slate-700 rounded px-2 py-2">
+        在記事本裡點上面的「<b>檔案</b> → <b>結束</b>」，連續點 5 次，就會跳出重設密碼的視窗。
+      </div>
+      <p className="text-[11px] text-slate-500 mb-1">這組密碼存在這個檔案裡：</p>
+      <div className="mb-4 font-mono text-[10px] text-slate-300 bg-slate-950 border border-slate-700 rounded px-2 py-1 break-all select-all">
         {configPath || "(路徑載入中…)"}
       </div>
       <input
         className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm mb-2 focus:outline-none focus:border-emerald-500"
-        placeholder="輸入密碼"
+        placeholder="輸入要用的密碼"
         type="password"
         value={value}
         onChange={(e) => onChangeValue(e.target.value)}
@@ -747,7 +899,7 @@ function StealthSetupCard({
       />
       <input
         className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm mb-2 focus:outline-none focus:border-emerald-500"
-        placeholder="再輸入一次"
+        placeholder="再打一次確認"
         type="password"
         value={confirmValue}
         onChange={(e) => onChangeConfirm(e.target.value)}
@@ -765,7 +917,7 @@ function StealthSetupCard({
           className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
           onClick={onSubmit}
         >
-          啟用偽裝
+          設定好了
         </button>
       </div>
     </div>
@@ -813,7 +965,7 @@ function CredentialsSetup() {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-4 px-8">
         <div className="text-5xl">✅</div>
-        <p className="text-slate-200 text-lg font-semibold">帳密已儲存，自動登入中...</p>
+        <p className="text-slate-200 text-lg font-semibold">帳號已記住，正在幫你登入…</p>
         <div className="w-4 h-4 rounded-full bg-emerald-400 animate-pulse" />
       </div>
     );
@@ -822,17 +974,18 @@ function CredentialsSetup() {
   return (
     <div className="h-full flex flex-col items-center justify-center gap-6 px-8 py-10">
       <div className="text-center">
-        <h1 className="text-2xl font-bold mb-2">auto-elearn 初始設定</h1>
-        <p className="text-slate-400 text-sm leading-relaxed max-w-sm">
-          輸入人事服務網 eCPA 帳號密碼，儲存後自動登入。<br />
-          帳密以 Windows DPAPI 加密存在本機，不上傳任何伺服器。
+        <h1 className="text-2xl font-bold mb-2">第一次使用</h1>
+        <p className="text-slate-300 text-sm leading-relaxed max-w-sm">
+          請輸入「人事服務網（e 等公務園）」的帳號密碼。<br />
+          記住之後，下次打開會自動幫你登入，<br />
+          也不會把帳號傳到網路上，只存在你自己的電腦裡。
         </p>
       </div>
 
       <div className="w-full max-w-sm space-y-3">
         <input
           className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-          placeholder="eCPA 帳號（身分證字號或短碼）"
+          placeholder="帳號（身分證字號）"
           value={account}
           onChange={(e) => setAccount(e.target.value)}
           disabled={busy}
@@ -841,7 +994,7 @@ function CredentialsSetup() {
         <input
           type="password"
           className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-          placeholder="eCPA 密碼"
+          placeholder="密碼"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
@@ -853,10 +1006,10 @@ function CredentialsSetup() {
           disabled={busy}
           onClick={submit}
         >
-          {busy ? "儲存中..." : "儲存並自動登入"}
+          {busy ? "記住中…" : "記住帳號並登入"}
         </button>
         <p className="text-slate-500 text-xs text-center">
-          或直接在右邊瀏覽器手動登入，也可跳過此步驟
+          也可以直接在右邊網頁裡自己登入
         </p>
       </div>
     </div>
@@ -867,16 +1020,16 @@ function AwaitingLogin({ state }: { state: AppState }) {
   return (
     <div className="h-full flex flex-col px-6 py-6 gap-4 overflow-hidden">
       <div className="text-center space-y-2">
-        <h1 className="text-2xl font-bold">auto-elearn</h1>
-        <p className="text-slate-300">👉 請在右邊瀏覽器登入 e 等公務園</p>
+        <h1 className="text-2xl font-bold">等你登入</h1>
+        <p className="text-slate-300">👉 請在右邊網頁登入 e 等公務園</p>
         <p className="text-slate-400 text-xs">
-          任何登入方式都支援：帳號密碼 / 自然人憑證 / MyData
+          帳號密碼 / 自然人憑證 / MyData 都可以，看你習慣哪一種
         </p>
         <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse mx-auto" />
       </div>
 
       <div className="flex-1 flex flex-col min-h-0">
-        <h2 className="text-xs font-semibold text-slate-400 mb-1">📜 日誌（含自動登入進度）</h2>
+        <h2 className="text-xs font-semibold text-slate-400 mb-1">📜 系統訊息</h2>
         <div className="flex-1 bg-black/30 rounded p-2 text-xs font-mono overflow-auto space-y-0.5 min-h-0 border border-slate-800">
           {state.logs.slice(-100).map((l, i) => (
             <div
@@ -893,7 +1046,7 @@ function AwaitingLogin({ state }: { state: AppState }) {
             </div>
           ))}
           {state.logs.length === 0 && (
-            <div className="text-slate-500">（尚無紀錄）</div>
+            <div className="text-slate-500">（還沒有訊息）</div>
           )}
         </div>
       </div>
@@ -1132,7 +1285,7 @@ function Selecting({ state }: { state: AppState }) {
         <div>
           <div className="text-xs uppercase text-slate-400">
             {state.loginStatus === "relogging"
-              ? "重新登入中"
+              ? "正在重新登入"
               : state.loginStatus === "failed"
               ? "登入失敗"
               : "已登入"}
@@ -1147,29 +1300,29 @@ function Selecting({ state }: { state: AppState }) {
         <button
           className="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm"
           onClick={() => window.api.refreshCourses()}
-          title="重新抓取已報名課程清單"
+          title="重新抓最新的課程清單"
         >
-          🔄 重新掃描
+          🔄 重新整理
         </button>
       </header>
 
-      {/* Section: 繼續上次進度 */}
+      {/* 之前還沒上完的課 */}
       <section>
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-sm font-semibold text-slate-300">
-            📂 繼續上次進度（已報名但未完成 {pending.length} 門）
+            📂 之前還沒上完的課（{pending.length} 門）
           </h2>
           {pending.length > 0 && (
             <button
               className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-xs"
               onClick={togglePendingAll}
             >
-              全選 / 全不選
+              全選 / 全部取消
             </button>
           )}
         </div>
         {pending.length === 0 ? (
-          <p className="text-slate-500 text-sm">目前沒有未完成課程</p>
+          <p className="text-slate-500 text-sm">目前沒有沒上完的課</p>
         ) : (
           <div className="space-y-1 max-h-48 overflow-auto bg-slate-900/40 rounded p-2">
             {pending.map((c) => (
@@ -1190,9 +1343,12 @@ function Selecting({ state }: { state: AppState }) {
         )}
       </section>
 
-      {/* Section: 搜尋新課 */}
+      {/* 找新課來上 */}
       <section>
-        <h2 className="text-sm font-semibold text-slate-300 mb-2">🔍 搜尋新課</h2>
+        <h2 className="text-sm font-semibold text-slate-300 mb-2">🔍 找新課來上</h2>
+        <div className="text-xs text-slate-400 mb-2 leading-relaxed">
+          選好想上的課之後，最下面有一顆「確認操作」的綠色按鈕，按下去就會自動上課。
+        </div>
         <div className="flex gap-2 mb-2 items-center">
           <div className="inline-flex rounded border border-slate-700 bg-slate-800 p-0.5 text-xs">
             <button
@@ -1201,7 +1357,7 @@ function Selecting({ state }: { state: AppState }) {
               }`}
               onClick={() => setMode("keyword")}
             >
-              關鍵字
+              用關鍵字找
             </button>
             <button
               className={`px-2 py-1 rounded ${
@@ -1209,13 +1365,13 @@ function Selecting({ state }: { state: AppState }) {
               }`}
               onClick={() => setMode("codes")}
             >
-              類別代碼
+              用代碼找
             </button>
           </div>
           {mode === "keyword" ? (
             <input
               className="flex-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-              placeholder="輸入關鍵字（例：資安、AI、個資、性別、人權、環境、國防）"
+              placeholder="輸入想找的字（例：資安、AI、個資、性別、人權、環境、國防）"
               value={keyword}
               onChange={(e) => {
                 const v = e.target.value;
@@ -1245,12 +1401,12 @@ function Selecting({ state }: { state: AppState }) {
             onClick={() => doSearch()}
             disabled={searching}
           >
-            {searching ? "搜尋中..." : "搜尋"}
+            {searching ? "找中…" : "去找"}
           </button>
         </div>
         {mode === "codes" && (
           <div className="text-xs text-slate-400 mb-2">
-            支援逗號、空白、破折號範圍（如：540, 541-546）
+            可以用逗號、空白、破折號連寫（例：540, 541-546）
           </div>
         )}
         {mode === "keyword" && (
@@ -1259,9 +1415,9 @@ function Selecting({ state }: { state: AppState }) {
               className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
               value={mainCategoryId}
               onChange={(e) => setMainCategoryId(e.target.value)}
-              title="主類別"
+              title="大分類"
             >
-              <option value="">全部主類別</option>
+              <option value="">所有大分類</option>
               {MAIN_CATEGORIES.map((c) => (
                 <option key={c.id} value={c.id}>{c.label}</option>
               ))}
@@ -1271,9 +1427,9 @@ function Selecting({ state }: { state: AppState }) {
               value={subCategoryId}
               onChange={(e) => setSubCategoryId(e.target.value)}
               disabled={!mainCategoryId || subCategoryOptions.length === 0}
-              title="次類別"
+              title="小分類"
             >
-              <option value="">全部次類別</option>
+              <option value="">所有小分類</option>
               {subCategoryOptions.map((c) => (
                 <option key={c.id} value={c.id}>{c.label}</option>
               ))}
@@ -1282,9 +1438,9 @@ function Selecting({ state }: { state: AppState }) {
               className="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
               value={fromSchoolId}
               onChange={(e) => setFromSchoolId(e.target.value)}
-              title="加盟專區"
+              title="授課單位"
             >
-              <option value="">所有加盟專區</option>
+              <option value="">所有授課單位</option>
               {AFFILIATED_SCHOOLS.map((s) => (
                 <option key={s.id} value={s.id}>{s.label}</option>
               ))}
@@ -1296,7 +1452,7 @@ function Selecting({ state }: { state: AppState }) {
                 min="0"
                 max="999"
                 className="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
-                placeholder="最少 hr"
+                placeholder="最少幾小時"
                 value={hoursMin}
                 onChange={(e) => setHoursMin(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doSearch()}
@@ -1308,7 +1464,7 @@ function Selecting({ state }: { state: AppState }) {
                 min="0"
                 max="999"
                 className="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200"
-                placeholder="最多 hr"
+                placeholder="最多幾小時"
                 value={hoursMax}
                 onChange={(e) => setHoursMax(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doSearch()}
@@ -1323,7 +1479,7 @@ function Selecting({ state }: { state: AppState }) {
               checked={onlyAnyone}
               onChange={(e) => setOnlyAnyone(e.target.checked)}
             />
-            只顯示「任何人」可報名
+            只顯示一般人都能報的課
           </label>
           <label className="flex items-center gap-1 cursor-pointer">
             <input
@@ -1331,41 +1487,41 @@ function Selecting({ state }: { state: AppState }) {
               checked={hideEnrolled}
               onChange={(e) => setHideEnrolled(e.target.checked)}
             />
-            隱藏已報名
+            把已經報過的藏起來
           </label>
           {visibleResults.length > 0 && (
             <button
               className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-xs"
               onClick={toggleAllVisible}
             >
-              全選 / 全不選（可見 {visibleResults.length}）
+              全選 / 全不選（這頁有 {visibleResults.length} 門）
             </button>
           )}
         </div>
         {results.length === 0 && !searching && !hasSearched && (
           <p className="text-slate-500 text-sm">
-            還沒搜尋；直接按「搜尋」即可瀏覽全部，或先輸入關鍵字 / 代碼縮小範圍。
+            還沒找。直接點「去找」可以看全部的課；想縮小範圍可以先輸入關鍵字。
           </p>
         )}
         {results.length === 0 && !searching && hasSearched && (
           <p className="text-amber-400 text-sm">
-            搜尋 0 筆。
+            找不到課。
             {mode === "keyword" && /^\d+$/.test(keyword.trim())
-              ? " 看起來你打的是數字——試試切到右邊「類別代碼」模式？"
+              ? " 你輸入的是數字，試試切到「用代碼找」模式？"
               : mode === "codes"
-              ? " 代碼可能沒有對應到 elearn 分類；看 log 確認，或換用關鍵字。"
+              ? " 這個代碼可能對不到，換個代碼或改用關鍵字。"
               : " 換個關鍵字試試。"}
           </p>
         )}
         {results.length > 0 && visibleResults.length === 0 && !searching && (
           <div className="text-amber-300 text-sm flex items-center gap-3 flex-wrap">
             <span>
-              搜到 {results.length} 筆，但全部被「{[
-                hideEnrolled ? "隱藏已報名" : null,
-                onlyAnyone ? "只顯示任何人可報名" : null,
+              找到 {results.length} 門，但都被「{[
+                hideEnrolled ? "藏掉已報名的" : null,
+                onlyAnyone ? "只看一般人可報" : null,
               ]
                 .filter(Boolean)
-                .join("」+「")}」過濾掉了。
+                .join("」+「")}」擋掉了。
             </span>
             <button
               className="px-2 py-0.5 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-100"
@@ -1374,13 +1530,13 @@ function Selecting({ state }: { state: AppState }) {
                 setOnlyAnyone(false);
               }}
             >
-              關閉所有過濾，顯示全部 {results.length} 筆
+              全部顯示（{results.length} 門）
             </button>
           </div>
         )}
         {results.length > 0 && visibleResults.length > 0 && visibleResults.length < results.length && !searching && (
           <p className="text-xs text-slate-400">
-            可見 {visibleResults.length} / 共 {results.length} 筆（{results.length - visibleResults.length} 筆被前端篩選隱藏）
+            這頁顯示 {visibleResults.length} 門，總共找到 {results.length} 門（其他 {results.length - visibleResults.length} 門被篩掉了）
           </p>
         )}
         <div className="space-y-1 max-h-72 overflow-auto bg-slate-900/40 rounded p-2">
@@ -1408,30 +1564,30 @@ function Selecting({ state }: { state: AppState }) {
         </div>
       </section>
 
-      {/* Footer bar: summary + confirm */}
+      {/* 下方確認區：選完課之後，按下面按鈕開始上課 */}
       <footer className="sticky bottom-0 bg-slate-950/90 backdrop-blur-sm py-3 -mx-6 px-6 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
         <div className="text-sm flex items-center gap-4 flex-wrap">
           <span>
-            加選 / 處理 <span className="font-bold text-emerald-400">{selected.size}</span> 門
-            {" "}· 共{" "}
+            選了 <span className="font-bold text-emerald-400">{selected.size}</span> 門
+            {" "}· 總共{" "}
             <span className="font-bold text-emerald-400">{selectedTotalHours.toFixed(1)}</span>{" "}
             小時
-            {" "}· 並行{" "}
-            <span className="font-bold text-emerald-400">{Math.min(selected.size, HEARTBEAT_PARALLEL_MAX)}</span>
+            {" "}· 同時上{" "}
+            <span className="font-bold text-emerald-400">{Math.min(selected.size, HEARTBEAT_PARALLEL_MAX)}</span> 門
             {selected.size > HEARTBEAT_PARALLEL_MAX && (
               <span className="text-amber-400">
-                {" "}（已達上限 {HEARTBEAT_PARALLEL_MAX}，超出的會排隊輪流跑）
+                {" "}（最多同時 {HEARTBEAT_PARALLEL_MAX} 門，多的會排隊輪流上）
               </span>
             )}
           </span>
           {toUnenroll.size > 0 && (
             <span className="text-rose-400">
-              退選 <span className="font-bold">{toUnenroll.size}</span> 門
+              要退掉 <span className="font-bold">{toUnenroll.size}</span> 門
             </span>
           )}
           {applyProgress && (
             <span className="text-amber-300">
-              執行中 {applyProgress.done}/{applyProgress.total}：{applyProgress.msg}
+              處理中 {applyProgress.done}/{applyProgress.total}：{applyProgress.msg}
             </span>
           )}
         </div>
@@ -1440,7 +1596,7 @@ function Selecting({ state }: { state: AppState }) {
           disabled={(selected.size === 0 && toUnenroll.size === 0) || applying}
           onClick={openConfirm}
         >
-          {applying ? "執行中..." : "✅ 確認操作 →"}
+          {applying ? "處理中…" : "✅ 開始上課 →"}
         </button>
       </footer>
 
@@ -1491,12 +1647,12 @@ function ConfirmBatchModal({
     <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
       <ModalGuard>
       <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-xl w-[90%] max-h-[80%] overflow-auto p-6 shadow-2xl">
-        <h2 className="text-lg font-semibold text-slate-100 mb-4">確認批次操作</h2>
+        <h2 className="text-lg font-semibold text-slate-100 mb-4">再確認一下</h2>
 
         {toUnenroll.length > 0 && (
           <section className="mb-4">
             <h3 className="text-sm font-semibold text-rose-400 mb-2">
-              ❌ 將退選 {toUnenroll.length} 門
+              ❌ 要退掉 {toUnenroll.length} 門
             </h3>
             <ul className="text-sm text-slate-300 space-y-1 ml-3">
               {toUnenroll.map((c) => (
@@ -1512,7 +1668,7 @@ function ConfirmBatchModal({
         {toEnroll.length > 0 && (
           <section className="mb-4">
             <h3 className="text-sm font-semibold text-emerald-400 mb-2">
-              ✅ 將加選 / 處理 {toEnroll.length} 門（共{" "}
+              ✅ 要上 {toEnroll.length} 門課（總共{" "}
               {toEnroll.reduce((a, c) => a + c.hours, 0).toFixed(1)} 小時）
             </h3>
             <ul className="text-sm text-slate-300 space-y-1 ml-3">
@@ -1530,7 +1686,7 @@ function ConfirmBatchModal({
         )}
 
         <div className="text-xs text-slate-400 mb-4 border-t border-slate-800 pt-3">
-          執行順序：先退選 → 再加選（若有新課）→ 再自動刷課。退選會呼叫站方 UI 點擊流程，每門約需 1-3 秒。
+          順序：先退掉舊的，再加上新的，然後自動上課。每退一門大概要 1～3 秒。
         </div>
 
         <div className="flex justify-end gap-2">
@@ -1538,13 +1694,13 @@ function ConfirmBatchModal({
             className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
             onClick={onClose}
           >
-            取消
+            再想想
           </button>
           <button
             className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
             onClick={onConfirm}
           >
-            執行
+            開始
           </button>
         </div>
       </div>
@@ -1611,20 +1767,18 @@ function CourseRow({
         </div>
         {meta && <div className="text-xs text-slate-400 truncate">{meta}</div>}
       </div>
-      <span className="shrink-0 text-sm text-amber-300">{hours} hr</span>
+      <span className="shrink-0 text-sm text-amber-300">{hours} 小時</span>
       {onPreview && (
         <button
           className="text-xs text-slate-400 hover:text-emerald-400 px-1"
           onClick={(e) => {
-            // Stop propagation so the click doesn't bubble into the parent label
-            // and re-toggle the checkbox, undoing the user's actual action.
             e.preventDefault();
             e.stopPropagation();
             onPreview();
           }}
-          title="在右邊瀏覽器預覽"
+          title="在右邊網頁看看這堂課"
         >
-          預覽
+          看一下
         </button>
       )}
       {onToggleUnenroll && (
@@ -1639,9 +1793,9 @@ function CourseRow({
             e.stopPropagation();
             onToggleUnenroll();
           }}
-          title={stagedForUnenroll ? "取消退選（保留）" : "標記為待退選（按確認才會真的退）"}
+          title={stagedForUnenroll ? "不退了，留著" : "把這堂課退掉（要按下方確認才真的退）"}
         >
-          {stagedForUnenroll ? "↩ 復原" : "🗑 退選"}
+          {stagedForUnenroll ? "↩ 不退了" : "🗑 退掉"}
         </button>
       )}
       <span className="text-[10px] text-slate-600 ml-1">#{cid}</span>
@@ -1649,30 +1803,20 @@ function CourseRow({
   );
 }
 
-function formatHms(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return "00:00:00";
-  const s = Math.floor(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(h)}:${pad(m)}:${pad(r)}`;
-}
-
 function phaseLabel(p: string): string {
   switch (p) {
     case "pending":
-      return "待報名";
+      return "還沒報名";
     case "enrolled":
-      return "已報名，未開始";
+      return "報好了，還沒開始";
     case "reading":
-      return "閱讀中";
+      return "上課中";
     case "exam":
-      return "待測驗";
+      return "等著做測驗";
     case "survey":
-      return "待問卷";
+      return "等著填問卷";
     case "verifying":
-      return "等待 server 確認通過";
+      return "等系統確認過關";
     case "done":
       return "已完成";
     default:
@@ -1682,16 +1826,62 @@ function phaseLabel(p: string): string {
 
 // ── Monitor ──────────────────────────────────────────────────
 function Monitor({ state }: { state: AppState }) {
-  // Only show the courses the user actually picked for this run.
-  const scopeCids = state.pipelineCids
-    ? new Set(state.pipelineCids)
-    : null;
+  const scopeCids = state.pipelineCids ? new Set(state.pipelineCids) : null;
   const scope = scopeCids
     ? state.courses.filter((c) => scopeCids.has(c.cid))
     : state.courses;
   const running = scope.filter((c) => c.phase !== "done");
+
+  // 每門課的「本地計時器」：每次 server 回來新的 readSec 時對齊一次，
+  // 之間用 setInterval(1s) 自己往前算，所以 UI 不會 5 分鐘才動一次。
+  const tickRef = useRef<Map<string, { lastReadSec: number; lastSyncAt: number }>>(new Map());
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setNowTick((n) => (n + 1) % 1_000_000), 1000);
+    return () => clearInterval(id);
+  }, []);
+  // 同步：每次 state 進來就比對每門課的 readSec，有變更就重設基準
+  useEffect(() => {
+    const map = tickRef.current;
+    const seen = new Set<string>();
+    for (const c of scope) {
+      seen.add(c.cid);
+      const prev = map.get(c.cid);
+      if (!prev || prev.lastReadSec !== c.readSec) {
+        map.set(c.cid, { lastReadSec: c.readSec, lastSyncAt: Date.now() });
+      }
+    }
+    for (const k of Array.from(map.keys())) if (!seen.has(k)) map.delete(k);
+  }, [scope]);
+
+  // Course list / Log 的拖拉分隔條：用百分比 (0.2 ~ 0.8) 紀錄 Course list 佔下半部的比例。
+  const [coursePanelRatio, setCoursePanelRatio] = useState(0.6);
+  const splitDragging = useRef(false);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!splitDragging.current) return;
+      const box = splitContainerRef.current;
+      if (!box) return;
+      const r = box.getBoundingClientRect();
+      const ratio = (e.clientY - r.top) / r.height;
+      setCoursePanelRatio(Math.max(0.2, Math.min(0.8, ratio)));
+    }
+    function onUp() {
+      splitDragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
   return (
-    <div className="p-6 pb-14 space-y-4 text-slate-100 h-full flex flex-col">
+    <div className="p-6 pb-14 space-y-3 text-slate-100 h-full flex flex-col">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-bold flex items-center gap-1">
           {statusLabel(state.status)} · {state.user?.name ?? ""}
@@ -1704,7 +1894,7 @@ function Monitor({ state }: { state: AppState }) {
               className="px-3 py-1 rounded bg-amber-600 hover:bg-amber-500 text-sm"
               onClick={() => window.api.pause()}
             >
-              ⏸ 暫停
+              ⏸ 先停一下
             </button>
           )}
           {state.status === "paused" && (
@@ -1712,28 +1902,39 @@ function Monitor({ state }: { state: AppState }) {
               className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-sm"
               onClick={() => window.api.resume()}
             >
-              ▶ 恢復
+              ▶ 繼續上
             </button>
           )}
           <button
             className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-sm"
             onClick={() => window.api.backToSelect()}
-            title="停止目前執行並回到選課畫面"
+            title="停下來並回到選課畫面"
           >
-            ↩ 回選課
+            ↩ 回去選課
           </button>
           <button
             className="px-3 py-1 rounded bg-red-700 hover:bg-red-600 text-sm"
             onClick={() => window.api.abort()}
           >
-            🛑 結束
+            🛑 全部結束
           </button>
         </div>
       </header>
 
+      {/* 上課中提示：明顯告訴使用者「不要動」 */}
+      {(state.status === "running" || state.status === "enrolling") && (
+        <div className="bg-emerald-950/60 border-2 border-emerald-600 rounded-lg p-3 text-sm text-emerald-100 shadow">
+          <div className="font-bold text-base mb-1">🤖 系統正在自動上課中</div>
+          <div className="text-emerald-200">
+            請不要操作右邊的網頁，也不要登出，<b>讓它自己跑就好</b>。
+            可以最小化視窗去做別的事，但<b>不要關掉</b>。
+          </div>
+        </div>
+      )}
+
       {state.pauseReason && (
         <div className="bg-amber-950/50 border border-amber-700 rounded p-2 text-sm">
-          ⚠️ 暫停原因：{state.pauseReason}
+          ⚠️ 已暫停：{state.pauseReason === "session_expired" ? "登入逾時，正在重新登入" : "由你按下暫停"}
         </div>
       )}
 
@@ -1745,128 +1946,142 @@ function Monitor({ state }: { state: AppState }) {
           />
         </div>
         <p className="text-xs text-slate-400 mt-1">
-          {state.stats.done} / {state.stats.total} 完成 ({state.stats.progressPct}%)
+          已完成 {state.stats.done} / {state.stats.total} 門（{state.stats.progressPct}%）
         </p>
       </div>
 
-      {state.now.courseId && (
-        <div className="bg-slate-800/50 rounded-lg p-4">
-          <div className="text-xs uppercase text-slate-400 mb-1">目前進行中</div>
-          <div className="font-semibold">{state.now.courseName}</div>
-          <div className="text-sm text-slate-300 mt-1">
-            [{state.now.action}] {state.now.detail ?? ""}
-          </div>
-          {state.now.currentQuestion && (
-            <div className="mt-2 text-xs text-slate-400">
-              Q: {state.now.currentQuestion.text.slice(0, 80)}
-              <br />
-              A: {state.now.currentQuestion.answer}（{state.now.currentQuestion.source}）
-            </div>
-          )}
-        </div>
-      )}
-
-      <section>
-        <h2 className="text-sm font-semibold mb-2 text-slate-300">
-          📋 執行中課程 ({running.length} / {scope.length} 本次)
-        </h2>
-        <div className="space-y-1 max-h-48 overflow-auto bg-slate-900/40 rounded p-2">
-          {running.map((c) => {
-            const pct = c.requiredSec > 0 ? Math.min(100, Math.round((c.readSec / c.requiredSec) * 100)) : 0;
-            // Per-course stepper mirroring elearn's official strip:
-            //   "✓ 閱讀時數 / 2 測驗 / 3 問卷"
-            // Three steps only — no "心得", because elearn's flow doesn't have
-            // one. The course passes once 問卷 is filled; we add a separate
-            // "等待 server 確認通過" badge for the brief window between
-            // 問卷-submitted and 通過狀態-flipped.
-            const readingDone = c.readSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "verifying" || c.phase === "done";
-            // ✓ only when server actually credits the phase (c.examDone =
-            // detail.examScore >= passFloor; c.surveyDone = detail.surveyDone===true).
-            // No phase-based fallback — phase can race ahead of /info poll and
-            // user explicitly required UI must not lie.
-            const examDoneFlag = c.examDone || c.phase === "done";
-            const surveyDoneFlag = c.surveyDone || c.phase === "done";
-            const stepActive = (done: boolean, isCurrent: boolean) =>
-              done
-                ? "bg-emerald-600 text-white"
-                : isCurrent
-                ? "bg-amber-500 text-white animate-pulse"
-                : "bg-slate-700 text-slate-400";
-            const currentPhase = !readingDone
-              ? "reading"
-              : !examDoneFlag
-              ? "exam"
-              : !surveyDoneFlag
-              ? "survey"
-              : "done";
-            const verifying = c.phase === "verifying";
-            return (
-              <div
-                key={c.cid}
-                className="text-sm px-2 py-1.5 rounded bg-slate-800/30"
-              >
-                <div className="flex justify-between items-baseline gap-2">
-                  <span className="truncate flex-1">{c.name}</span>
-                  <span className="text-[10px] text-slate-500 whitespace-nowrap">#{c.cid}</span>
-                </div>
-                <div className="flex justify-between items-center gap-2 mt-0.5">
-                  <div className="flex-1 h-1 bg-slate-900/60 rounded overflow-hidden">
-                    <div
-                      className="h-full bg-emerald-500 transition-all"
-                      style={{ width: `${pct}%` }}
-                    />
+      {/* 上下兩塊（課程列表 / 日誌）+ 中間可拖曳分隔條 */}
+      <div ref={splitContainerRef} className="flex-1 flex flex-col min-h-0">
+        <section
+          className="flex flex-col min-h-0"
+          style={{ flex: `1 1 ${coursePanelRatio * 100}%` }}
+        >
+          <h2 className="text-sm font-semibold mb-2 text-slate-300 shrink-0">
+            📋 上課中（{running.length} / 共 {scope.length} 門）
+          </h2>
+          <div className="flex-1 overflow-auto bg-slate-900/40 rounded p-2 space-y-1 min-h-0">
+            {running.map((c) => {
+              // 本地 timer：把上次同步到的 readSec 加上經過的秒數，給使用者「動起來」的感覺。
+              const tickInfo = tickRef.current.get(c.cid);
+              const isReadingPhase = c.phase === "reading" || c.phase === "enrolled";
+              const localExtraSec = tickInfo && isReadingPhase
+                ? Math.max(0, Math.floor((Date.now() - tickInfo.lastSyncAt) / 1000))
+                : 0;
+              const displayReadSec = Math.min(
+                c.requiredSec,
+                Math.max(0, c.readSec + localExtraSec),
+              );
+              const pct = c.requiredSec > 0
+                ? Math.min(100, Math.round((displayReadSec / c.requiredSec) * 100))
+                : 0;
+              const readingDone = displayReadSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "verifying" || c.phase === "done";
+              const examDoneFlag = c.examDone || c.phase === "done";
+              const surveyDoneFlag = c.surveyDone || c.phase === "done";
+              const stepActive = (done: boolean, isCurrent: boolean) =>
+                done
+                  ? "bg-emerald-600 text-white"
+                  : isCurrent
+                  ? "bg-amber-500 text-white animate-pulse"
+                  : "bg-slate-700 text-slate-400";
+              const currentPhase = !readingDone
+                ? "reading"
+                : !examDoneFlag
+                ? "exam"
+                : !surveyDoneFlag
+                ? "survey"
+                : "done";
+              const verifying = c.phase === "verifying";
+              const remainingSec = Math.max(0, c.requiredSec - displayReadSec);
+              const remainingMin = Math.floor(remainingSec / 60);
+              const remainingS = remainingSec % 60;
+              return (
+                <div
+                  key={c.cid}
+                  className="text-sm px-2 py-1.5 rounded bg-slate-800/30"
+                >
+                  <div className="flex justify-between items-baseline gap-2">
+                    <span className="truncate flex-1">{c.name}</span>
+                    <span className="text-[10px] text-slate-500 whitespace-nowrap">#{c.cid}</span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
-                    {pct}% · {Math.floor(c.readSec / 60)}/{Math.floor(c.requiredSec / 60)} 分
-                  </span>
-                </div>
-                {/* Phase stepper: ✓ 閱讀 / ② 測驗 / ③ 問卷 (matches elearn) */}
-                <div className="flex items-center gap-1 mt-1 text-[10px]">
-                  <span className={`px-1.5 py-0.5 rounded ${stepActive(readingDone, currentPhase === "reading")}`}>
-                    {readingDone ? "✓" : "①"} 閱讀
-                  </span>
-                  <span className="text-slate-600">›</span>
-                  <span className={`px-1.5 py-0.5 rounded ${stepActive(examDoneFlag, currentPhase === "exam")}`}>
-                    {examDoneFlag ? "✓" : "②"} 測驗
-                  </span>
-                  <span className="text-slate-600">›</span>
-                  <span className={`px-1.5 py-0.5 rounded ${stepActive(surveyDoneFlag, currentPhase === "survey")}`}>
-                    {surveyDoneFlag ? "✓" : "③"} 問卷
-                  </span>
-                  {verifying && (
-                    <span className="ml-2 px-1.5 py-0.5 rounded bg-sky-700/40 text-sky-200 animate-pulse">
-                      等待 server 確認通過…
+                  <div className="flex justify-between items-center gap-2 mt-0.5">
+                    <div className="flex-1 h-1.5 bg-slate-900/60 rounded overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-500 transition-all"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
+                      {pct}% · 已上 {Math.floor(displayReadSec / 60)} 分 / 共 {Math.floor(c.requiredSec / 60)} 分
                     </span>
+                  </div>
+                  {isReadingPhase && remainingSec > 0 && (
+                    <div className="text-[11px] text-amber-200 mt-0.5 font-mono">
+                      ⏱ 還剩 {remainingMin} 分 {String(remainingS).padStart(2, "0")} 秒
+                    </div>
                   )}
+                  {/* 三步驟：上課 / 測驗 / 問卷 */}
+                  <div className="flex items-center gap-1 mt-1 text-[10px] flex-wrap">
+                    <span className={`px-1.5 py-0.5 rounded ${stepActive(readingDone, currentPhase === "reading")}`}>
+                      {readingDone ? "✓" : "①"} 上課
+                    </span>
+                    <span className="text-slate-600">›</span>
+                    <span className={`px-1.5 py-0.5 rounded ${stepActive(examDoneFlag, currentPhase === "exam")}`}>
+                      {examDoneFlag ? "✓" : "②"} 測驗
+                    </span>
+                    <span className="text-slate-600">›</span>
+                    <span className={`px-1.5 py-0.5 rounded ${stepActive(surveyDoneFlag, currentPhase === "survey")}`}>
+                      {surveyDoneFlag ? "✓" : "③"} 問卷
+                    </span>
+                    {verifying && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded bg-sky-700/40 text-sky-200 animate-pulse">
+                        等系統確認過關…
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-          {running.length === 0 && (
-            <div className="text-slate-500 text-sm">（沒有進行中項目）</div>
-          )}
-        </div>
-      </section>
+              );
+            })}
+            {running.length === 0 && (
+              <div className="text-slate-500 text-sm">（目前沒有正在上的課）</div>
+            )}
+          </div>
+        </section>
 
-      <section className="flex-1 flex flex-col min-h-0">
-        <h2 className="text-sm font-semibold mb-2 text-slate-300">📜 日誌</h2>
-        <div className="flex-1 bg-black/30 rounded p-2 text-xs font-mono overflow-auto space-y-0.5 min-h-0">
-          {state.logs.slice(-200).map((l, i) => (
-            <div
-              key={i}
-              className={
-                l.level === "error"
-                  ? "text-red-400"
-                  : l.level === "warn"
-                  ? "text-amber-400"
-                  : "text-slate-300"
-              }
-            >
-              [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
-            </div>
-          ))}
-        </div>
-      </section>
+        {/* 拖曳分隔條 */}
+        <div
+          className="h-1.5 my-2 rounded bg-slate-700 hover:bg-emerald-500 cursor-row-resize shrink-0 select-none"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            splitDragging.current = true;
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+          }}
+          title="上下拖曳，調整課程列表 / 系統訊息 的高度"
+        />
+
+        <section
+          className="flex flex-col min-h-0"
+          style={{ flex: `1 1 ${(1 - coursePanelRatio) * 100}%` }}
+        >
+          <h2 className="text-sm font-semibold mb-2 text-slate-300 shrink-0">📜 系統訊息</h2>
+          <div className="flex-1 bg-black/30 rounded p-2 text-xs font-mono overflow-auto space-y-0.5 min-h-0">
+            {state.logs.slice(-200).map((l, i) => (
+              <div
+                key={i}
+                className={
+                  l.level === "error"
+                    ? "text-red-400"
+                    : l.level === "warn"
+                    ? "text-amber-400"
+                    : "text-slate-300"
+                }
+              >
+                [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
@@ -1876,13 +2091,13 @@ function statusLabel(s: AppState["status"]): string {
     case "enrolling":
       return "🚀 報名中";
     case "running":
-      return "▶️  執行中";
+      return "▶️ 上課中";
     case "paused":
-      return "⏸ 暫停中";
+      return "⏸ 已暫停";
     case "done":
-      return "✅ 完成";
+      return "✅ 全部完成";
     case "aborted":
-      return "🛑 已中止";
+      return "🛑 已停止";
     default:
       return s;
   }
