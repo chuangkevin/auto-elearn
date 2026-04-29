@@ -225,6 +225,9 @@ elearn 各機關的測驗 row 版型差很多，原本 `closest('label')` / `clo
 - [ ] tag 已推（`git push --tags` 或 `git push origin v{version}`）
 - [ ] GitHub Actions 該 tag 的 run 為綠色
 - [ ] Release 頁面 zip 檔可下載且解壓出 `.exe`
+- [ ] **Release 頁面只能有一個 zip：`auto-elearn-{version}-win-portable.zip`**
+      若同時看到 `auto-elearn.zip` / `elevate.zip` 等多餘檔，那是 `release/win-unpacked/auto-elearn.exe`（沒帶 ffmpeg.dll 等附隨 DLL，使用者下載解壓會炸「找不到 ffmpeg.dll」）。
+      `release.yml` 已硬寫只 zip `*-win-portable.exe` 並只 upload `*-win-portable.zip`，禁止改回 `-Recurse` 或寬鬆 glob。
 
 ### Release 格式
 
