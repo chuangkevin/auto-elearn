@@ -526,7 +526,9 @@ function App() {
             : "手動輸入 e 等公務園的帳號密碼"
         }
       >
-        {credsStatus?.saved ? `🔑 已記得帳號` : "🔑 還沒記住帳號，點我設定"}
+        {credsStatus?.saved
+          ? `🔑 已儲存帳號：${credsStatus.maskedAccount ?? "（讀取中）"}（點我可改）`
+          : "🔑 還沒記住帳號，點我設定"}
       </button>
 
       {/* 第一次啟動時跳一次「Windows 第一次跑會跳警告」說明 */}
@@ -1335,11 +1337,8 @@ function Selecting({ state }: { state: AppState }) {
   const [hasSearched, setHasSearched] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toUnenroll, setToUnenroll] = useState<Set<string>>(new Set());
-  // Defaults: show everything. Filters are opt-in. Enrolled rows already get
-  // a "已報名" badge inline so the user can see status at a glance — silently
-  // hiding them was the cause of the "search returns nothing" confusion.
   const [onlyAnyone, setOnlyAnyone] = useState(false);
-  const [hideEnrolled, setHideEnrolled] = useState(false);
+  const [hideEnrolled, setHideEnrolled] = useState(true);
   // Site-style filter dropdowns (mirror elearn front-page widget)
   const [mainCategoryId, setMainCategoryId] = useState("");
   const [subCategoryId, setSubCategoryId] = useState("");
