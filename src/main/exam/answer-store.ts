@@ -88,50 +88,101 @@ export function normalizeQuestion(s: string): string {
 
 /**
  * Find candidate rows in the DB whose normalized 題目 matches the normalized query.
- * Returns up to `limit` matches. Uses SQLite LIKE with a normalized middle-string.
+ * Returns up to `limit` matches.
  *
  * Strategy progression (each only fires if the previous yielded zero):
  *   1. full normalized text — exact-prefix-style hit
- *   2. 90% prefix — recover from minor trailing differences (typos, extra
- *      "請選出最適合的答案" tail)
- *   3. shortest distinctive substring — when the DB lacks the exact question
- *      but contains a near-paraphrase, a 12-char window often catches it
- *      (e.g. "通風空調系統的設計" matches across rephrasings). Caps at 12
- *      chars so we don't return wildcard noise.
+ *   2. 90% prefix — minor trailing differences
+ *   3. mid-window scan — three 8-char windows from 25%/50%/75% of the question;
+ *      catches paraphrases where the prefix differs but body keywords overlap.
+ *      Earlier code only tried the first 12 chars which fails on rewordings
+ *      that change the lead-in (e.g. "下列關於X..." vs "X的描述...").
+ *   4. distinctive 4-gram OR — last-resort token search. We pull the rarest
+ *      4-grams (skipping generic ones like "下列何者") and OR them in a single
+ *      LIKE chain. Matcher.matchAgainstDb's dice floor still gates noise out.
  */
-export function lookupByLike(raw: string, limit = 5): DbRow[] {
+const NORM_EXPR = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(題目, ' ', ''), '　', ''), '?', ''), '？', ''), '，', '')`;
+
+const GENERIC_GRAMS = new Set([
+  "下列何", "列何者", "何者正", "何者錯", "何者非", "何者為", "下列關",
+  "列關於", "關於下", "為下列", "下列敘", "下列描", "下列選", "依據下",
+  "請問下", "請選出", "選出下", "正確的", "錯誤的", "為何者", "者正確",
+  "者錯誤", "者非為", "下列哪",
+]);
+
+function distinctiveGrams(s: string, n = 4, k = 3): string[] {
+  if (s.length < n) return [];
+  const grams = new Set<string>();
+  for (let i = 0; i + n <= s.length; i++) {
+    const g = s.slice(i, i + n);
+    if (!GENERIC_GRAMS.has(g)) grams.add(g);
+  }
+  // Spread picks across the question so we don't take 3 adjacent grams.
+  const list = Array.from(grams);
+  if (list.length <= k) return list;
+  const stride = Math.floor(list.length / k);
+  return Array.from({ length: k }, (_, i) => list[Math.min(i * stride, list.length - 1)]);
+}
+
+export function lookupByLike(raw: string, limit = 8): DbRow[] {
   const d = openDb();
   const norm = normalizeQuestion(raw);
   if (!norm) return [];
-  const strategies = [
-    norm,
-    norm.slice(0, Math.max(6, Math.floor(norm.length * 0.9))),
-    norm.length > 12 ? norm.slice(0, 12) : null,
-  ].filter((s): s is string => typeof s === "string" && s.length >= 4);
 
-  for (const s of strategies) {
-    const pat = `%${s}%`;
-    const stmt = d.prepare(
-      `SELECT 題目 AS question, 答案_1 AS correct, 答案_2 AS d2, 答案_3 AS d3, 答案_4 AS d4
-       FROM questions
-       WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(題目, ' ', ''), '　', ''), '?', ''), '？', ''), '，', '') LIKE ?
-       LIMIT ?`,
-    );
-    const rows = stmt.all(pat, limit) as Array<{
+  const runQuery = (sql: string, params: unknown[]): DbRow[] => {
+    const stmt = d.prepare(sql);
+    const rows = stmt.all(...params) as Array<{
       question: string;
       correct: string;
       d2: string | null;
       d3: string | null;
       d4: string | null;
     }>;
-    if (rows.length > 0) {
-      return rows.map((r) => ({
-        question: r.question,
-        correct: r.correct ?? "",
-        distractors: [r.d2, r.d3, r.d4].filter((x): x is string => typeof x === "string"),
-      }));
+    return rows.map((r) => ({
+      question: r.question,
+      correct: r.correct ?? "",
+      distractors: [r.d2, r.d3, r.d4].filter((x): x is string => typeof x === "string"),
+    }));
+  };
+
+  // Strategies 1-3: single-LIKE prefix/mid windows.
+  const singleStrategies: string[] = [];
+  singleStrategies.push(norm);
+  const ninetyPct = norm.slice(0, Math.max(6, Math.floor(norm.length * 0.9)));
+  if (ninetyPct !== norm) singleStrategies.push(ninetyPct);
+  if (norm.length >= 16) {
+    for (const frac of [0.25, 0.5, 0.75]) {
+      const start = Math.min(norm.length - 8, Math.floor(norm.length * frac));
+      singleStrategies.push(norm.slice(start, start + 8));
     }
+  } else if (norm.length > 8) {
+    singleStrategies.push(norm.slice(0, 8));
   }
+
+  for (const s of singleStrategies) {
+    if (s.length < 4) continue;
+    const rows = runQuery(
+      `SELECT 題目 AS question, 答案_1 AS correct, 答案_2 AS d2, 答案_3 AS d3, 答案_4 AS d4
+       FROM questions WHERE ${NORM_EXPR} LIKE ? LIMIT ?`,
+      [`%${s}%`, limit],
+    );
+    if (rows.length > 0) return rows;
+  }
+
+  // Strategy 4: distinctive-gram OR fallback. Catches paraphrases where no
+  // single contiguous window survives but rare phrases do.
+  const grams = distinctiveGrams(norm, 4, 3);
+  if (grams.length >= 2) {
+    const conds = grams.map(() => `${NORM_EXPR} LIKE ?`).join(" OR ");
+    const params = [...grams.map((g) => `%${g}%`), limit];
+    const rows = runQuery(
+      `SELECT 題目 AS question, 答案_1 AS correct, 答案_2 AS d2, 答案_3 AS d3, 答案_4 AS d4
+       FROM questions WHERE ${conds} LIMIT ?`,
+      params,
+    );
+    if (rows.length > 0) return rows;
+  }
+
   return [];
 }
 

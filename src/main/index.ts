@@ -998,7 +998,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           const readStr = res.readExamScore != null ? ` 閱讀:${res.readExamScore}分` : "";
           log(
             "info",
-            `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / random ${res.bySource.random}）`,
+            `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / LLM ${res.bySource.llm} / brute ${res.bySource.brute} / random ${res.bySource.random}）`,
           );
           if (card && res.passed) card.examDone = true;
           // total === 0 → no exam menu in sysbar (rare; reading-only courses)

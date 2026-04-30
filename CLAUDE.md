@@ -119,6 +119,19 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - 取出 `閱讀時數 / 測驗 / 問卷 / 通過狀態`
 - 覆蓋 local card.readSec → UI 跟 server 一致
 
+### 題庫匹配率調校（v0.7.0）
+v0.6.9 之前報的 `DB N / fuzzy 0 / random M` 看起來題庫匹配率超低，其實混了兩個問題：
+- **lookupByLike 只 prefix LIKE**：3 個 strategy 都從題目開頭抓 substring。命中時 dice 通常 ≥0.85（直接歸 db），沒命中就全砍掉 → fuzzy 永遠 0、random 暴增
+- **brute-force 探測階段把每題 stats 標 `random`**：`forcedAnswers` 路徑 hardcode `source = "random"`（solver.ts），導致暴力鎖定的 70-80% 題目全進 random 桶，看起來像在亂猜其實在對
+
+修法：
+1. `lookupByLike` 加 mid-window scan（25%/50%/75% 取 8-char window）+ distinctive 4-gram OR fallback（過濾「下列何者/關於下列」這類 generic gram）
+2. `matchAgainstDb` floor 0.35→0.25、db/fuzzy 切點 0.85→0.70
+3. `AnswerSource` 加 `"brute"`，暴力探測改標 brute；`bySource` 多一格、log 也補上 `LLM` 與 `brute` 兩欄
+4. **滿分自動學習**：score === 100 時把所有 picks（除了 random）寫進 `learned_answers`（source=`perfect-attempt`，conf=1.0）—— 第一次刷成功後下次直接命中
+5. LLM gate score≥60 改成「考完就存」（conf 0.85），讓 Gemini 答對的題目即使整場沒過也能累積；matcher 的 LLM confidence floor 也從 0.5 降到 0.4
+6. answer-store 預設 limit 從 5 加到 8（給 mid-window 多一點候選空間）
+
 ### 答題正解的取得（four-layer，從 v0.4.13 起重排）
 **Layer 0 — `history-solver`（最強，零測驗成本）**
 - chain 啟動時先呼叫 `solveExamFromHistory(session, cid)`：

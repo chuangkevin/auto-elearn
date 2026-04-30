@@ -1,7 +1,7 @@
 import { lookupByLike, lookupLearnedAnswer, normalizeQuestion, type DbRow } from "./answer-store";
 import { generateText, hasGeminiKey } from "../llm/gemini";
 
-export type AnswerSource = "db" | "fuzzy" | "llm" | "random";
+export type AnswerSource = "db" | "fuzzy" | "llm" | "random" | "brute";
 
 export interface MatchResult {
   /** The option text we believe is correct */
@@ -67,15 +67,20 @@ export function matchAgainstDb(questionText: string): MatchResult | null {
     if (!best || sim > best.sim) best = { row, sim };
   }
   if (!best) return null;
-  // Reject low-similarity hits — without a floor, the 12-char-prefix LIKE
-  // strategy in lookupByLike would happily return a wildly different
-  // question that just shares a domain phrase, and the solver would pick
-  // its (totally unrelated) "correct" answer with confidence 0.3. Better
-  // to fall through to LLM/brute than feed the bookkeeping a known-bad
-  // answer that learned_answers might then cache as ground truth.
-  if (best.sim < 0.35) return null;
+  // Reject low-similarity hits. With the broadened lookupByLike (mid-window
+  // + distinctive-gram OR fallback), we now see more candidates that share
+  // domain vocabulary but are genuinely different questions — the floor
+  // catches those. 0.25 is the sweet spot empirically: enough to admit
+  // paraphrased matches that score 0.30-0.45, strict enough to reject
+  // questions that only share a generic stem.
+  if (best.sim < 0.25) return null;
 
-  const source: AnswerSource = best.sim >= 0.85 ? "db" : "fuzzy";
+  // db: exact / near-exact text match (was 0.85 — but real elearn pages
+  // routinely add or trim a leading "下列" / trailing 配分 metadata that
+  // drops sim into 0.7x even when DB has the exact same question).
+  // fuzzy: 0.25-0.70 — paraphrase / partial overlap; trust the answer but
+  // log it under fuzzy so user can see DB recall is engaging.
+  const source: AnswerSource = best.sim >= 0.70 ? "db" : "fuzzy";
   return {
     correctText: best.row.correct,
     source,
@@ -157,7 +162,11 @@ ${optLines}
     const idx = letter.charCodeAt(0) - 65;
     if (idx < 0 || idx >= options.length) return null;
     const confidence = Math.max(0, Math.min(1, parsed.confidence ?? 0.7));
-    if (confidence < 0.5) return null;
+    // 0.4 floor (was 0.5): Gemini self-reports confidence conservatively for
+    // multi-step reasoning questions where it's *probably* right but won't
+    // claim certainty. Better to take a 0.45-confident pick than fall to
+    // pure random; brute-force probe will correct it if wrong.
+    if (confidence < 0.4) return null;
     return { pickedIdx: idx, confidence };
   } catch {
     return null;

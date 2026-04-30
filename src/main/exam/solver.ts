@@ -563,6 +563,7 @@ async function runOneAttempt(
   );
 
   const llmAnswered: Array<{ question: string; answer: string }> = [];
+  const allPicks: Array<{ question: string; answer: string; source: AnswerSource }> = [];
   const picksByIdx: number[] = new Array(questions.length).fill(0);
 
   for (const q of questions) {
@@ -574,7 +575,10 @@ async function runOneAttempt(
     const forcedIdx = opts.forcedAnswers?.get(forcedKey);
     if (typeof forcedIdx === "number" && forcedIdx >= 0 && forcedIdx < q.options.length) {
       pickedIdx = forcedIdx;
-      source = "random"; // brute-force probe — bookkept under "random" for stats
+      // Brute-force probe path: tag as "brute" (was "random" — that inflated
+      // the random count to look like the matcher had failed everywhere when
+      // really the brute-force loop was just locking in known-good picks).
+      source = "brute";
       confidence = 0;
     } else {
       const r = await findBestAnswer(q.text, q.options, { skipMixedDb: opts.skipMixedDb });
@@ -589,8 +593,12 @@ async function runOneAttempt(
     const value = q.values[pickedIdx] ?? String(pickedIdx + 1);
     onProgress(`  Q${q.index + 1} [${source} ${confidence.toFixed(2)}] → ${q.options[pickedIdx]?.slice(0, 30) ?? value}`);
 
+    const answerText = q.options[pickedIdx] ?? "";
     if (source === "llm") {
-      llmAnswered.push({ question: q.text, answer: q.options[pickedIdx] ?? "" });
+      llmAnswered.push({ question: q.text, answer: answerText });
+    }
+    if (answerText) {
+      allPicks.push({ question: q.text, answer: answerText, source });
     }
 
     await selectOption(win, q.inputName, value);
@@ -599,12 +607,38 @@ async function runOneAttempt(
   const score = await submitAndParseScore(win);
   onProgress(`[${label}] 分數：${score ?? "?"}`);
 
-  // Persist LLM answers if exam passed (kept the old 60 floor here — it's
-  // about whether the LLM choice was reliable enough to remember, not the
-  // course's pass threshold).
-  if (score !== null && score >= 60) {
-    for (const { question, answer } of llmAnswered) {
-      saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.9, courseId: cid });
+  // Persistence policy (revised v0.7.0):
+  //
+  //   • score === 100: every pick is provably correct. Save ALL picks
+  //     (even random / brute-force ones) as "perfect-attempt" — this is
+  //     the highest-value backfill path: questions the matcher couldn't
+  //     handle this round get cached for next time.
+  //
+  //   • score >= passingScore (and < 100): only save LLM picks. Random
+  //     and DB picks at <100 might include wrong answers; we can't tell
+  //     which without per-Q score deltas (that's brute-force's job).
+  //
+  //   • score < passingScore: save LLM picks anyway (was gated at >=60).
+  //     The matcher already filters Gemini at confidence>=0.4 — those
+  //     answers carry information even if the exam as a whole fell short.
+  //     They get re-validated on subsequent attempts via the brute-force
+  //     loop so wrong LLM picks do get corrected.
+  if (score !== null) {
+    if (score === 100) {
+      for (const { question, answer, source: src } of allPicks) {
+        if (src === "random") continue; // never persist a literal coin-flip
+        saveLearnedAnswer({
+          question,
+          answer,
+          source: src === "llm" ? "llm" : "perfect-attempt",
+          confidence: src === "llm" ? 0.95 : 1.0,
+          courseId: cid,
+        });
+      }
+    } else {
+      for (const { question, answer } of llmAnswered) {
+        saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.85, courseId: cid });
+      }
     }
   }
 
@@ -940,7 +974,7 @@ export async function solveExam(
   const result: SolveResult = {
     ok: false,
     total: 0,
-    bySource: { db: 0, fuzzy: 0, llm: 0, random: 0 },
+    bySource: { db: 0, fuzzy: 0, llm: 0, random: 0, brute: 0 },
   };
 
   // disableDialogs kills alert/prompt at Chromium level. confirm() is
@@ -1006,7 +1040,7 @@ export async function solveExam(
         passingScore,
       );
       result.score = score ?? undefined;
-      result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random;
+      result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute;
       result.passed = (score ?? 0) >= passingScore;
       result.ok = true;
     }
@@ -1025,7 +1059,7 @@ export async function solveExam(
       );
       result.readExamScore = rScore ?? undefined;
       if (!hasMainExam) {
-        result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random;
+        result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute;
         result.score = rScore ?? undefined;
         result.passed = (rScore ?? 0) >= passingScore;
         result.ok = true;
