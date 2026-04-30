@@ -110,9 +110,25 @@ Mirror locations (`.claude/skills/`, `.gemini/skills/`, `.opencode/skills/`, `.g
 - 修法：複製後 `chmodSync(dbPath, 0o644)`
 
 ### Per-course chain pipeline
-- 每門課 heartbeat 完成立刻 fire 自己的 exam→survey→reflection chain，不等其他課
+- 每門課 heartbeat 完成立刻 fire 自己的 exam→survey chain，不等其他課
 - `chainPromises` 收集所有 chain promise，pipeline 最後 `Promise.allSettled` 等全部完成
 - skipRead 課（已過閱讀）的 chain 在 pipeline 啟動時立即 fire
+
+### 50% halfway 並行啟動 chain（v0.7.3 起）
+- 之前邏輯：heartbeat 跑滿（readSec ≥ requiredSec）才 fire chain → 60 分鐘的課要等整整 60 分鐘才開始考試
+- 新邏輯：cumulative 閱讀時數（`t.readSec + elapsedSec`）達 `requiredSec / 2` 時，engine fire 一次 `onHalfway(cid)`，caller 立即啟動 chain，**心跳繼續跑直到 100%**
+- chain 流程：`history-solve → solveExam → fillSurvey → 等心跳完成 → 確認 server 通過`
+- 為什麼要等心跳完成：server 不會在閱讀 50% 就 flip 通過狀態；chain 在 30 分鐘交完問卷後直接 poll 30 秒只會看到「尚未刷新」，不算數。改成在 chain 末端 `await heartbeatDonePromises.get(cid)`，等 heartbeat 自然結束（讀滿 100% / detail-poll 確認達標）才做最終 30 秒通過 poll
+- 雙路徑去重：`startChainOnce(cid, name, awaitHeartbeat)` + `chainStarted: Set<string>`；halfway 路徑帶 `awaitHeartbeat=true`，heartbeat-done 路徑帶 `false`（fallback：很短的課 halfway 沒先 fire）
+- skipRead 課直接 `awaitHeartbeat=false`，沒 heartbeat 可等
+- error 路徑（no_ticket / 5 連敗）：engine 仍會走到尾端 `opts.onProgress(cid, "done", ...)` → `markHeartbeatDone()` 解鎖任何在等的 chain；只有 ticket 拿不到的 early return 不會 fire chain（這跟舊行為一致）
+
+### Halfway gate 在 engine 怎麼算
+- `halfwaySec = t.requiredSec / 2`（注意：不是 `(requiredSec - readSec) / 2`，是絕對值）
+- 入 loop 前如果 `t.readSec >= halfwaySec` 直接 fire（避免等一個 interval）
+- loop 內每次成功 tick 後檢查 `t.readSec + elapsedSec >= halfwaySec`
+- detail-poll 也檢查 `detail.readSec >= halfwaySec`（server 真實時數可能比 local 快）
+- `halfwayFired` flag 鎖一次性，loop 不會中斷，繼續跑到 100% 才 break
 
 ### Detail-page poll 同步 server 真實閱讀時數
 - 每 2 分鐘 (`detailPollIntervalMs`) 抓 `/info/{cid}` 用 cheerio 解 `.majorstatus` 區塊

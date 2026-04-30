@@ -951,11 +951,42 @@ async function runPipelineFor(cids: string[]): Promise<void> {
   // doesn't have to wait for the slowest one in the batch to finish heartbeat
   // before progressing through its remaining phases.
   const chainPromises: Promise<void>[] = [];
+  // Tracks which courses have already had their chain fired, so the halfway
+  // hook (early-fire path) and the heartbeat-done hook (fallback path) don't
+  // both push the chain twice for the same course.
+  const chainStarted = new Set<string>();
+  // Resolved when a course's heartbeat has fully finished. Used by chains
+  // started early (at 50% reading) to defer their final 通過-confirmation poll
+  // until the rest of the reading credit lands — otherwise a chain that
+  // wraps up exam+survey at the 30-min mark would never see 通過 flip in its
+  // 30-second poll window because reading is still ticking towards 60 min.
+  const heartbeatDoneResolvers = new Map<string, () => void>();
+  const heartbeatDonePromises = new Map<string, Promise<void>>();
+  const ensureHeartbeatDonePromise = (cid: string) => {
+    if (heartbeatDonePromises.has(cid)) return;
+    heartbeatDonePromises.set(
+      cid,
+      new Promise<void>((resolve) => heartbeatDoneResolvers.set(cid, resolve)),
+    );
+  };
+  const markHeartbeatDone = (cid: string) => {
+    const r = heartbeatDoneResolvers.get(cid);
+    if (r) {
+      r();
+      heartbeatDoneResolvers.delete(cid);
+    }
+  };
+  const startChainOnce = (cid: string, name: string, awaitHeartbeat: boolean) => {
+    if (chainStarted.has(cid)) return;
+    chainStarted.add(cid);
+    chainPromises.push(runFinishChain(cid, name, awaitHeartbeat));
+  };
 
-  // Pure async chain that runs for ONE course once its heartbeat is done (or
-  // skipped because it was already past reading). Re-discovers the latest
-  // detail snapshot inside so the gating decisions match current server state.
-  const runFinishChain = async (cid: string, name: string): Promise<void> => {
+  // Pure async chain that runs for ONE course. Fires either when the course
+  // has crossed 50% reading (halfway path) or when its heartbeat fully
+  // finishes (fallback path / skipRead courses with no heartbeat). Re-fetches
+  // detail inside so gating matches current server state.
+  const runFinishChain = async (cid: string, name: string, awaitHeartbeat: boolean): Promise<void> => {
     if (abortSignal.aborted) return;
     const card = state.courses.find((c) => c.cid === cid);
     try {
@@ -1054,6 +1085,21 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         pushState();
       }
 
+      // If this chain was started early (at 50% reading), the rest of the
+      // reading time is still being credited by an active heartbeat. The
+      // server will not flip 通過狀態 until reading credit reaches the full
+      // requiredSec, so block on heartbeat completion before doing the
+      // 通過-confirmation poll. Without this, an early chain finishes its
+      // exam+survey, polls for 30 s while heartbeat still has 25 min to go,
+      // and falsely concludes "尚未刷新".
+      if (awaitHeartbeat) {
+        const wait = heartbeatDonePromises.get(cid);
+        if (wait) {
+          log("info", `[${name}] 測驗+問卷已交，等待閱讀心跳完成後確認通過狀態...`);
+          await wait;
+        }
+      }
+
       // Only mark phase=done when SERVER confirms 通過狀態 == 通過. That
       // can lag behind 問卷 submission by a few seconds while elearn
       // finalises the credit. Poll detail up to 30 s before giving up.
@@ -1082,14 +1128,19 @@ async function runPipelineFor(cids: string[]): Promise<void> {
     }
   };
 
-  // Fire chains for skipRead courses immediately — they've nothing to wait for.
+  // Fire chains for skipRead courses immediately — they've nothing to wait for
+  // and no heartbeat will run for them.
   for (const t of skipRead) {
-    chainPromises.push(runFinishChain(t.course.cid, t.course.caption));
+    startChainOnce(t.course.cid, t.course.caption, false);
   }
 
   const needReading = tracked.filter(
     (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
   );
+
+  // Pre-create the heartbeat-done promise for every reading course so the
+  // halfway hook can await it without race conditions.
+  for (const t of needReading) ensureHeartbeatDonePromise(t.course.cid);
 
   if (needReading.length === 0) {
     log("info", "沒有需要閱讀的課程");
@@ -1202,18 +1253,30 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           const serverConfirmed = (extra as { serverConfirmed?: boolean })?.serverConfirmed ?? false;
           log("info", `閱讀結束：${card.name} (${pings} pings, ${serverConfirmed ? "伺服器確認達標" : "計時到期"})`);
           completedHeartbeat.add(cid);
-          card.phase = "exam";
+          if (card.phase !== "verifying") card.phase = "exam";
           runningCids.delete(cid);
           if (focusedCid === cid) focusNextCourse();
-          // Per-course chain — fire the moment heartbeat finishes for THIS
-          // course, regardless of whether other courses in the batch are still
-          // ticking. Fire-and-forget; runPipelineFor awaits all chains at the end.
-          chainPromises.push(runFinishChain(cid, card.name));
+          // Unblock any chain that fired at 50% and is waiting on heartbeat
+          // completion before doing its 通過-confirmation poll.
+          markHeartbeatDone(cid);
+          // Fallback: chain wasn't started early (e.g. very short course where
+          // halfway never fired before heartbeat finished). Start it now.
+          // Once-only — the early-fire path also goes through startChainOnce.
+          startChainOnce(cid, card.name, false);
         } else if (stage === "error") {
           log("warn", `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`);
           runningCids.delete(cid);
           if (focusedCid === cid) focusNextCourse();
         }
+      },
+      onHalfway: (cid) => {
+        const card = state.courses.find((c) => c.cid === cid);
+        if (!card) return;
+        // Fire 測驗+問卷 chain in parallel with the remaining reading. The
+        // chain awaits heartbeat completion before its final 通過-confirm
+        // poll so it doesn't bail prematurely while reading is still ticking.
+        log("info", `[${card.name}] 📖 閱讀已過半，並行啟動測驗+問卷`);
+        startChainOnce(cid, card.name, true);
         pushState();
       },
       onTick: (cid, pings, elapsedSec) => {

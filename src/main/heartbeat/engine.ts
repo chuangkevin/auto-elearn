@@ -39,6 +39,12 @@ export interface HeartbeatOptions {
   onDetailPoll?: (cid: string, data: { readSec: number | null }) => void;
   /** How often to fetch detail page (ms). Default 120 000 (2 min). */
   detailPollIntervalMs?: number;
+  /** Fired ONCE per course as soon as cumulative reading credit reaches half
+   *  of requiredSec. Lets the caller fire 測驗+問卷 in parallel with the
+   *  remaining reading — exam_start.php and survey endpoints don't gate on
+   *  full reading credit, so we can save ~half the wall-clock time. The
+   *  heartbeat keeps ticking afterwards until reading is fully credited. */
+  onHalfway?: (cid: string) => void;
   /** Abort signal (checked between ticks). */
   signal?: { aborted: boolean };
 }
@@ -151,6 +157,21 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   const pollInterval = opts.pollIntervalMs ?? 30_000;
   const detailPollInterval = opts.detailPollIntervalMs ?? 120_000;
 
+  // Halfway gate — fire the caller's hook the first time cumulative credit
+  // (server-confirmed readSec at start + locally-elapsed seconds since) reaches
+  // requiredSec / 2. Caller uses this to start 測驗+問卷 in parallel with the
+  // remaining reading. Once-only; the loop keeps running afterwards.
+  const halfwaySec = t.requiredSec / 2;
+  let halfwayFired = false;
+  const fireHalfway = () => {
+    if (halfwayFired) return;
+    halfwayFired = true;
+    try { opts.onHalfway?.(cid); } catch { /* caller mistakes shouldn't kill heartbeat */ }
+  };
+  // Course already past 50% credit before we even tick — fire immediately so
+  // the chain doesn't wait one full interval.
+  if (t.readSec >= halfwaySec) fireHalfway();
+
   // CRITICAL: the server validates elapsed >= period before crediting reading time.
   // Sleep one full interval BEFORE the first heartbeat so the server sees the
   // correct time delta (bt → current_server_time ≈ period).
@@ -179,6 +200,13 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
         pings++;
         failures = 0;
         opts.onTick?.(cid, pings, elapsedSec);
+        // Halfway check after each successful tick: cumulative credit ≈
+        // initial t.readSec (server-confirmed at pipeline start) + elapsedSec
+        // (locally ticked since). Once that crosses requiredSec/2, fire the
+        // halfway hook so caller can start 測驗+問卷 in parallel.
+        if (!halfwayFired && t.readSec + elapsedSec >= halfwaySec) {
+          fireHalfway();
+        }
         // Log response on first tick and every ~60s so we can verify timediff
         // is advancing (= server is crediting time).
         if (pings === 1 || pings % 12 === 0) {
@@ -230,6 +258,13 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
         const detail = await opts.detailPollFn(cid);
         if (detail) {
           opts.onDetailPoll?.(cid, detail);
+          // Authoritative server credit may already be past halfway even
+          // when local elapsedSec hasn't caught up yet (e.g. course had
+          // partial credit from a previous run that t.readSec didn't fully
+          // capture). Use it to advance the halfway gate too.
+          if (!halfwayFired && detail.readSec !== null && detail.readSec >= halfwaySec) {
+            fireHalfway();
+          }
           // Once server has credited the full required time, every extra
           // ping is wasted and the chain wants to advance to exam ASAP.
           // Earlier code only broke on isReadDones=1 (永遠不會來) or
