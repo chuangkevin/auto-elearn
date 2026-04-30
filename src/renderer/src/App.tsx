@@ -2238,9 +2238,14 @@ function Monitor({ state }: { state: AppState }) {
                 c.requiredSec,
                 Math.max(0, c.readSec + localExtraSec),
               );
-              const pct = c.requiredSec > 0
-                ? Math.min(100, Math.round((displayReadSec / c.requiredSec) * 100))
+              // 1 位小數的百分比 → 60 分鐘的課每秒會跳一格，使用者看得到「動」。
+              const pctNum = c.requiredSec > 0
+                ? Math.min(100, (displayReadSec / c.requiredSec) * 100)
                 : 0;
+              const pct = Math.round(pctNum * 10) / 10;
+              const doneMin = Math.floor(displayReadSec / 60);
+              const doneSec = displayReadSec % 60;
+              const totalMin = Math.floor(c.requiredSec / 60);
               const readingDone = displayReadSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "verifying" || c.phase === "done";
               const examDoneFlag = c.examDone || c.phase === "done";
               const surveyDoneFlag = c.surveyDone || c.phase === "done";
@@ -2274,11 +2279,11 @@ function Monitor({ state }: { state: AppState }) {
                     <div className="flex-1 h-1.5 bg-slate-900/60 rounded overflow-hidden">
                       <div
                         className="h-full bg-emerald-500 transition-all"
-                        style={{ width: `${pct}%` }}
+                        style={{ width: `${pctNum}%` }}
                       />
                     </div>
                     <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
-                      {pct}% · 已上 {Math.floor(displayReadSec / 60)} 分 / 共 {Math.floor(c.requiredSec / 60)} 分
+                      {pct.toFixed(1)}% · 已上 {doneMin}:{String(doneSec).padStart(2, "0")} / 共 {totalMin} 分
                     </span>
                   </div>
                   {isReadingPhase && remainingSec > 0 && (
