@@ -2220,7 +2220,11 @@ function Monitor({ state }: { state: AppState }) {
           style={{ flex: `1 1 ${coursePanelRatio * 100}%` }}
         >
           <h2 className="text-sm font-semibold mb-2 text-slate-300 shrink-0">
-            📋 上課中（{running.length} / 共 {scope.length} 門）
+            {scope.length === 0
+              ? "📋 上課中（0 門）"
+              : running.length === 0
+              ? `✅ 全部完成（共 ${scope.length} 門）`
+              : `📋 上課中（${running.length} 門 / 全部 ${scope.length} 門）`}
           </h2>
           <div className="flex-1 overflow-auto bg-slate-900/40 rounded p-2 space-y-1 min-h-0">
             {running.map((c) => {

@@ -55,8 +55,22 @@ import {
 } from "./stealth/stealth";
 import { maskAccount, maskName, maskSecretsInString } from "../shared/mask";
 import { existsSync, mkdirSync, writeFileSync as fsWriteFileSync } from "node:fs";
-import { appendLogLine, getLogsDir, installCrashHandlers } from "./log/file-logger";
+import { appendLogLine, getLogsDir, installCrashHandlers, rebindLogsDirToUserData } from "./log/file-logger";
 import { migrateFromOldUserDataIfNeeded } from "./persist/migrate-userdata";
+
+// 必須在 app.whenReady 之前 install — 模組載入階段就可能因為 native 模組
+// （better-sqlite3 / bindings 等）打不開或被防毒砍掉而炸 "Cannot find module"，
+// 沒早 install 的話那種噴在 dialog 上的 error 不會留下任何 log，使用者只能截圖。
+// file-logger 在 app 還沒 ready 時會把 log 寫到 OS 暫存目錄；ready 之後再切到
+// userData/logs/。
+installCrashHandlers((s) => {
+  // 早期 install 時 _logSecrets 還沒填，maskLog 等於 identity；之後會逐步累積。
+  try {
+    return maskLog(s);
+  } catch {
+    return s;
+  }
+});
 
 /**
  * In-memory cache of sensitive strings (real account / real user name)
@@ -1778,9 +1792,9 @@ if (!gotLock) {
     // 否則升級的使用者會被當成「全新使用者」，要重設帳密 + 偽裝密碼。
     const mig = migrateFromOldUserDataIfNeeded();
 
-    // 安裝 process 級別的 crash handler 並把後續 main process log 寫到檔。
-    // 必須在 createWindow 之前 install — createWindow 內部會丟例外的話我們也想記下來。
-    installCrashHandlers((s) => maskLog(s));
+    // crash handler 已在模組載入時 install；現在 app ready 了，把 log 路徑
+    // 從 OS 暫存目錄切回正規的 userData/logs/。
+    rebindLogsDirToUserData();
 
     if (mig.ranThisLaunch) {
       log(

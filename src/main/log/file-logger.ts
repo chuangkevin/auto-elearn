@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 /**
  * 把 main process 的 log 同步寫到 userData/logs/main-YYYY-MM-DD.log。
@@ -23,7 +24,19 @@ let _logsDir: string | null = null;
  * 不會跳「位置無法使用」的 File Explorer 錯誤對話框（v0.6.7 災情）。
  */
 export function getLogsDir(): string {
-  if (!_logsDir) _logsDir = join(app.getPath("userData"), "logs");
+  if (!_logsDir) {
+    // 優先 userData/logs；但 app 還沒 ready 時 getPath 會丟，此時退回 OS 暫存資料夾。
+    // 這條路徑對 module-load 階段就 install 的 crash handler 很關鍵 — 那階段
+    // app 尚未 ready，但若沒退路，crash handler 自己就會在寫 log 時拋例外，
+    // 把原本想記錄的錯誤吃掉。寫一次 userData 後再切回正規路徑。
+    let primary: string | null = null;
+    try {
+      primary = join(app.getPath("userData"), "logs");
+    } catch {
+      primary = null;
+    }
+    _logsDir = primary ?? join(tmpdir(), "auto-elearn-logs");
+  }
   // 每次呼叫都做一次 existsSync + mkdir：成本是一次 stat，極低；好處是 logger
   // 可以容錯使用者中途刪資料夾。寫不進去（disk full / 權限怪異）就吃掉，後續
   // appendFileSync 也會自己 catch。
@@ -33,6 +46,20 @@ export function getLogsDir(): string {
     /* 寫不進去就放掉，後續 append 也會被 catch */
   }
   return _logsDir;
+}
+
+/**
+ * app.whenReady 後呼叫一次，把 log 路徑從暫存目錄切到 userData/logs/。
+ * 早期 install 的 crash handler 在 module-load 階段先寫 tmpdir，避免
+ * getPath('userData') 在那時段拋；ready 之後才能用正式路徑。
+ */
+export function rebindLogsDirToUserData(): void {
+  try {
+    _logsDir = join(app.getPath("userData"), "logs");
+    if (!existsSync(_logsDir)) mkdirSync(_logsDir, { recursive: true });
+  } catch {
+    /* 拿不到就維持原狀 */
+  }
 }
 
 function todayStamp(): string {

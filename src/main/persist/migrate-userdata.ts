@@ -71,6 +71,23 @@ export function migrateFromOldUserDataIfNeeded(): MigrationResult {
     return result;
   }
 
+  // package.json 的 `name` 仍然是 "auto-elearn"（electron-builder.yml 的 productName
+  // 只影響 .exe 檔名 / 視窗 metadata，沒影響 app.getName）。所以 newDir == oldDir，
+  // 沒事可遷 — 直接寫 sentinel 結束。
+  if (newDir === oldDir) {
+    try {
+      if (!existsSync(newDir)) mkdirSync(newDir, { recursive: true });
+      writeFileSync(
+        sentinelPath(newDir),
+        JSON.stringify({ at: new Date().toISOString(), reason: "newDir==oldDir" }),
+        "utf8",
+      );
+    } catch {
+      /* 寫不進就算了 */
+    }
+    return result;
+  }
+
   // 沒舊資料夾 → 寫個空 sentinel 表示「我看過了沒東西要遷」，下次省 stat
   if (!existsSync(oldDir)) {
     try {
