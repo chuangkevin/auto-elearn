@@ -512,9 +512,12 @@ function App() {
         </button>
       )}
 
-      {/* 帳密管理按鈕 — 永遠出現在左下角。點開可改 / 清除。 */}
+      {/* Credentials chip — always shown in bottom-left (stacked above the
+          🫥/⚙ button row at bottom-3). bottom-14 (was bottom-11) keeps a
+          visible gap above the row; the bottom row now also has 收起左邊
+          taking left-44, so the chip can't touch any of them. */}
       <button
-        className={`fixed left-3 bottom-11 z-40 px-2 py-1 rounded text-xs border backdrop-blur shadow-lg ${
+        className={`fixed left-3 bottom-14 z-40 px-2 py-1 rounded text-xs border backdrop-blur shadow-lg ${
           credsStatus?.saved
             ? "bg-slate-800/90 border-slate-600 text-emerald-300 hover:bg-slate-700"
             : "bg-slate-800/90 border-slate-600 text-slate-400 hover:bg-slate-700 hover:text-emerald-300"
@@ -2229,9 +2232,13 @@ function Monitor({ state }: { state: AppState }) {
           <div className="flex-1 overflow-auto bg-slate-900/40 rounded p-2 space-y-1 min-h-0">
             {running.map((c) => {
               // 本地 timer：把上次同步到的 readSec 加上經過的秒數，給使用者「動起來」的感覺。
+              // 注意：halfway 觸發後 phase 會跳到 "exam" / "survey"，但 reading
+              // 心跳還在背景跑。tick 必須持續累加，否則倒數計時器會凍結，UI
+              // 看起來像 reading 已經停了（其實沒有）。所以條件改成「還沒到
+              // 100%」而不是「phase 還在 reading」。
               const tickInfo = tickRef.current.get(c.cid);
-              const isReadingPhase = c.phase === "reading" || c.phase === "enrolled";
-              const localExtraSec = tickInfo && isReadingPhase
+              const stillReading = c.readSec < c.requiredSec;
+              const localExtraSec = tickInfo && stillReading
                 ? Math.max(0, Math.floor((Date.now() - tickInfo.lastSyncAt) / 1000))
                 : 0;
               const displayReadSec = Math.min(
@@ -2246,22 +2253,35 @@ function Monitor({ state }: { state: AppState }) {
               const doneMin = Math.floor(displayReadSec / 60);
               const doneSec = displayReadSec % 60;
               const totalMin = Math.floor(c.requiredSec / 60);
-              const readingDone = displayReadSec >= c.requiredSec || c.phase === "exam" || c.phase === "survey" || c.phase === "verifying" || c.phase === "done";
+              // ① 上課: ✓ ONLY when server-credited reading reaches the
+              // requirement. The earlier OR-chain treated reading as done the
+              // moment phase advanced to "exam"/"survey" via the halfway
+              // trigger — that lied to the user about course completion when
+              // ~50% of reading time still owed.
+              const readingDone = displayReadSec >= c.requiredSec;
               const examDoneFlag = c.examDone || c.phase === "done";
               const surveyDoneFlag = c.surveyDone || c.phase === "done";
-              const stepActive = (done: boolean, isCurrent: boolean) =>
+              // After halfway, the chain fires exam + survey concurrently
+              // while reading keeps accruing in the background — all three
+              // steps can be simultaneously "active" (pulsing). chainStarted
+              // = phase has moved past plain "reading" / pre-pipeline states.
+              const chainStarted =
+                c.phase === "exam" ||
+                c.phase === "survey" ||
+                c.phase === "verifying" ||
+                c.phase === "done";
+              const stepClass = (done: boolean, active: boolean) =>
                 done
                   ? "bg-emerald-600 text-white"
-                  : isCurrent
+                  : active
                   ? "bg-amber-500 text-white animate-pulse"
                   : "bg-slate-700 text-slate-400";
-              const currentPhase = !readingDone
-                ? "reading"
-                : !examDoneFlag
-                ? "exam"
-                : !surveyDoneFlag
-                ? "survey"
-                : "done";
+              // Reading is "active" whenever it isn't done (heartbeat starts
+              // the moment the course enters the run). Exam/survey light up
+              // once the chain has fired, even if reading hasn't hit 100% yet.
+              const readingActive = !readingDone;
+              const examActive = !examDoneFlag && (chainStarted || readingDone);
+              const surveyActive = !surveyDoneFlag && (chainStarted || readingDone);
               const verifying = c.phase === "verifying";
               const remainingSec = Math.max(0, c.requiredSec - displayReadSec);
               const remainingMin = Math.floor(remainingSec / 60);
@@ -2286,22 +2306,25 @@ function Monitor({ state }: { state: AppState }) {
                       {pct.toFixed(1)}% · 已上 {doneMin}:{String(doneSec).padStart(2, "0")} / 共 {totalMin} 分
                     </span>
                   </div>
-                  {isReadingPhase && remainingSec > 0 && (
+                  {/* Countdown stays visible until reading really hits 100%,
+                      even after halfway has flipped phase past "reading". */}
+                  {!readingDone && (
                     <div className="text-[11px] text-amber-200 mt-0.5 font-mono">
                       ⏱ 還剩 {remainingMin} 分 {String(remainingS).padStart(2, "0")} 秒
                     </div>
                   )}
-                  {/* 三步驟：上課 / 測驗 / 問卷 */}
+                  {/* 三步驟：上課 / 測驗 / 問卷 — 各自獨立的 done/active 狀態，
+                      halfway 觸發後可以三個同時 active（黃色閃爍）。 */}
                   <div className="flex items-center gap-1 mt-1 text-[10px] flex-wrap">
-                    <span className={`px-1.5 py-0.5 rounded ${stepActive(readingDone, currentPhase === "reading")}`}>
+                    <span className={`px-1.5 py-0.5 rounded ${stepClass(readingDone, readingActive)}`}>
                       {readingDone ? "✓" : "①"} 上課
                     </span>
                     <span className="text-slate-600">›</span>
-                    <span className={`px-1.5 py-0.5 rounded ${stepActive(examDoneFlag, currentPhase === "exam")}`}>
+                    <span className={`px-1.5 py-0.5 rounded ${stepClass(examDoneFlag, examActive)}`}>
                       {examDoneFlag ? "✓" : "②"} 測驗
                     </span>
                     <span className="text-slate-600">›</span>
-                    <span className={`px-1.5 py-0.5 rounded ${stepActive(surveyDoneFlag, currentPhase === "survey")}`}>
+                    <span className={`px-1.5 py-0.5 rounded ${stepClass(surveyDoneFlag, surveyActive)}`}>
                       {surveyDoneFlag ? "✓" : "③"} 問卷
                     </span>
                     {verifying && (

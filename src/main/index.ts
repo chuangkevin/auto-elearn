@@ -1,4 +1,4 @@
-import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu, screen, type Session } from "electron";
+import { app, BrowserWindow, BrowserView, ipcMain, shell, Menu, Tray, nativeImage, screen, type Session } from "electron";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
@@ -143,6 +143,11 @@ const HOMEPAGE = "https://elearn.hrd.gov.tw/mooc/index.php";
 
 let mainWindow: BrowserWindow | null = null;
 let elearnView: BrowserView | null = null;
+let tray: Tray | null = null;
+// Set true once we *really* want the process to exit (tray "結束" / ACTION_ABORT
+// / second-instance shutdown). The window close handler reads this to decide
+// whether to hide-to-tray or let the close proceed.
+let isQuittingForReal = false;
 const bus = createBus();
 
 // Credentials sniffed during the current login; held in-memory until the user answers
@@ -264,6 +269,37 @@ function requestRendererGeminiDialog(): void {
   mainWindow?.webContents.send(IPC.GEMINI_DIALOG_REQUEST);
 }
 
+// Tray icon presents the app as "記事本" so a casual onlooker sees a Notepad
+// system-tray entry, matching the disguise. Double-click restores the window;
+// right-click → 結束 is the only path that actually exits the process.
+function setupTray(iconPath: string): void {
+  if (tray) return;
+  const image = nativeImage.createFromPath(iconPath);
+  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray.setToolTip("記事本");
+
+  const showWindow = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+  };
+
+  const menu = Menu.buildFromTemplate([
+    { label: "開啟", click: showWindow },
+    { type: "separator" },
+    {
+      label: "結束",
+      click: () => {
+        isQuittingForReal = true;
+        app.quit();
+      },
+    },
+  ]);
+  tray.setContextMenu(menu);
+  tray.on("double-click", showWindow);
+}
+
 function buildAppMenu(): void {
   const menu = Menu.buildFromTemplate([
     {
@@ -334,6 +370,19 @@ function createWindow() {
   });
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
+
+  // Hide-to-tray on user-initiated close. Only let the close proceed when the
+  // app is genuinely shutting down (tray "結束" / ACTION_ABORT / before-quit
+  // already fired). Without this, the X button kills the heartbeat pipeline
+  // mid-run and the user has to relaunch + re-login.
+  mainWindow.on("close", (e) => {
+    if (isQuittingForReal) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    e.preventDefault();
+    mainWindow.hide();
+  });
+
+  setupTray(iconPath);
   buildAppMenu();
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
@@ -999,30 +1048,20 @@ async function runPipelineFor(cids: string[]): Promise<void> {
       const surveyDone = fresh?.surveyDone === true;
       const passed = fresh?.passed === true;
 
-      // 1. 測驗 — re-run unless 通過狀態 == 通過. Skipping on examScore != null
-      //    silently ignored courses showing "測驗 0 分" (= attempted, failed,
-      //    needs retake to pass).
-      // Pass threshold: trust each course's declared 課程測驗 value (parsed
-      // by course-detail.ts; defaults to 80 when the page omits it). The
-      // earlier global floor of 80 forced the solver to over-attempt 60-pass
-      // courses (extra exam attempts looked suspicious server-side); the
-      // earlier 60 default caused 80-pass courses to stop short and never
-      // flip 通過狀態.
-      // examOK gates the survey step below. Starts true if the course is
-      // already passed OR doesn't have an exam to run; flips false if our
-      // attempt scored below the passing threshold so we don't fake-submit
-      // a 問卷 on a course the server is never going to credit anyway
-      // (and an exam record sitting at e.g. 70 followed by a fresh 問卷
-      // submission is a textbook auto-cheat fingerprint).
+      // 1. 測驗 + 問卷 — run in parallel, per the user's spec for the halfway
+      //    chain: 「halfway 觸發後，測驗跟問卷要同時並行，不是串行」. 問卷 is
+      //    no longer gated by examOK — failing the exam used to skip the
+      //    survey to avoid a suspicious "failed exam → fresh 問卷" trail,
+      //    but in practice the survey runs invisibly and waiting on a flaky
+      //    exam wastes minutes the user doesn't have. The exam path retries
+      //    up to 3 rounds internally; the survey path fires once and reports.
       let examOK = passed;
       if (!passed && !abortSignal.aborted) {
-        // History-based pre-solve: if the course already has past attempt
-        // records on /learn/exam/view_result.php, mathematically derive the
-        // answer key BEFORE submitting any new exam attempt. learned_answers
-        // gets populated with the locked Qs, so the very first attempt
-        // typically scores 80–100. Cheap (~5–25s for fetches) and zero
-        // exam attempts consumed. Skips silently when there's no eid
-        // (course has never been attempted).
+        // History-based pre-solve runs first (synchronously) so both the
+        // exam task AND any later attempts benefit from the freshly-saved
+        // learned_answers. solveExamFromHistory mathematically derives the
+        // answer key from past view_result.php pages without submitting any
+        // new exam attempt — cheap (~5-25 s) and zero exam attempts consumed.
         try {
           const { solveExamFromHistory } = await import("./exam/history-solver");
           const r = await solveExamFromHistory(session, cid, (msg) => log("info", `  [${name}] ${msg}`));
@@ -1033,44 +1072,84 @@ async function runPipelineFor(cids: string[]): Promise<void> {
         }
 
         const threshold = fresh?.passingScore ?? 80;
-        log("info", `開始測驗：${name}（門檻 ${threshold} 分）`);
-        const res = await solveExam(cid, session, {
-          onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-          passingScore: threshold,
-        });
-        if (res.ok) {
-          const scoreStr = res.score != null ? `${res.score}分` : "?";
-          const readStr = res.readExamScore != null ? ` 閱讀:${res.readExamScore}分` : "";
-          log(
-            "info",
-            `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / LLM ${res.bySource.llm} / brute ${res.bySource.brute} / random ${res.bySource.random}）`,
-          );
-          if (card && res.passed) card.examDone = true;
-          // total === 0 → no exam menu in sysbar (rare; reading-only courses)
-          // → treat as OK so survey/done can proceed.
-          examOK = res.passed === true || res.total === 0;
-        } else {
-          log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
-          examOK = false;
-        }
-      }
 
-      // 2. 問卷 — gate by examOK, not by passed alone. Earlier code only
-      // checked `!passed && !surveyDone`, which fired the survey filler
-      // even on courses where the exam just failed (e.g. 70/80) — pointless
-      // because the server won't flip 通過狀態 without a passing exam, and
-      // it leaves a suspicious "failed exam → fresh 問卷" trail.
-      if (examOK && !passed && !surveyDone && !abortSignal.aborted) {
-        log("info", `問卷：${name}`);
-        const sr = await fillSurvey(cid, session, {
-          onProgress: (msg) => log("info", `  [${name}] ${msg}`),
-        });
-        if (sr.ok) {
-          log("info", `問卷完成 ${name}：勾選 ${sr.filled} 題 + 繳交`);
-          if (card) card.surveyDone = true;
-        } else {
-          log("warn", `問卷失敗 ${name}：${sr.error ?? "unknown"}`);
-        }
+        // ── Exam task — up to 3 outer rounds of solveExam, retry-on-fail. ──
+        // solveExam internally retries up to ~30 attempts (brute-force probe
+        // + LLM fallback) but exits early once its bfQueue is exhausted, even
+        // when score < passing — intentional, to avoid spinning forever, but
+        // it leaves the course stuck if a single round can't find a passing
+        // combo. Re-running solveExam re-seeds bfStates from the now-updated
+        // learned_answers (brute saves with confidence 0.95), giving the next
+        // round a higher baseline. Capped at 3 rounds to avoid suspicious
+        // attempt counts on the server side.
+        const examTask = (async (): Promise<boolean> => {
+          const EXAM_ROUNDS = 3;
+          let res: Awaited<ReturnType<typeof solveExam>> | null = null;
+          for (let round = 1; round <= EXAM_ROUNDS; round++) {
+            if (abortSignal.aborted) break;
+            if (round === 1) {
+              log("info", `開始測驗：${name}（門檻 ${threshold} 分）`);
+            } else {
+              const prev = res?.score != null ? `${res.score}分` : "?";
+              log(
+                "info",
+                `[${name}] 上一輪 ${prev} < ${threshold}，第 ${round}/${EXAM_ROUNDS} 輪重考；先重跑歷次反推`,
+              );
+              try {
+                const { solveExamFromHistory } = await import("./exam/history-solver");
+                const hr = await solveExamFromHistory(session, cid, (msg) => log("info", `  [${name}] ${msg}`));
+                if (hr.ok && hr.learned > 0) {
+                  log("info", `📚 [${name}] 第 ${round} 輪歷史反推學到 ${hr.learned} 題`);
+                }
+              } catch (e) {
+                log("warn", `  [${name}] 第 ${round} 輪歷史反推例外：${(e as Error)?.message ?? e}`);
+              }
+              await new Promise((r) => setTimeout(r, 5000));
+            }
+            res = await solveExam(cid, session, {
+              onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+              passingScore: threshold,
+            });
+            if (!res.ok) {
+              log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
+              return false; // setup failure won't be fixed by another round
+            }
+            if (res.passed === true || res.total === 0) break;
+          }
+          if (res && res.ok) {
+            const scoreStr = res.score != null ? `${res.score}分` : "?";
+            const readStr = res.readExamScore != null ? ` 閱讀:${res.readExamScore}分` : "";
+            log(
+              "info",
+              `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / LLM ${res.bySource.llm} / brute ${res.bySource.brute} / random ${res.bySource.random}）`,
+            );
+            if (card && res.passed) card.examDone = true;
+            // total === 0 → no exam menu in sysbar (rare; reading-only courses)
+            // → treat as OK so the done-poll can proceed.
+            return res.passed === true || res.total === 0;
+          }
+          return false;
+        })();
+
+        // ── Survey task — fires once, in parallel with exam. Independent of
+        //    exam outcome per user spec; even if exam fails the survey gets
+        //    submitted so the course is half-credited rather than fully stuck.
+        const surveyTask = (async (): Promise<void> => {
+          if (surveyDone || abortSignal.aborted) return;
+          log("info", `問卷：${name}`);
+          const sr = await fillSurvey(cid, session, {
+            onProgress: (msg) => log("info", `  [${name}] ${msg}`),
+          });
+          if (sr.ok) {
+            log("info", `問卷完成 ${name}：勾選 ${sr.filled} 題 + 繳交`);
+            if (card) card.surveyDone = true;
+          } else {
+            log("warn", `問卷失敗 ${name}：${sr.error ?? "unknown"}`);
+          }
+        })();
+
+        const [examResult] = await Promise.all([examTask, surveyTask]);
+        examOK = examResult;
       }
 
       // No more "心得" step — elearn's actual flow is reading/exam/survey only.
@@ -1847,6 +1926,20 @@ if (!gotLock) {
     setTimeout(() => mainWindow?.flashFrame(false), 2000);
   });
 
+  // Any path that calls app.quit() (tray "結束", ACTION_ABORT, OS shutdown)
+  // routes through before-quit. Setting the flag here lets the close handler
+  // fall through instead of hiding the window again.
+  app.on("before-quit", () => {
+    isQuittingForReal = true;
+  });
+
+  app.on("will-quit", () => {
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+  });
+
   app.whenReady().then(() => {
     electronApp.setAppUserModelId("tw.kevin.auto-elearn");
 
@@ -1887,5 +1980,9 @@ if (!gotLock) {
 }
 
 app.on("window-all-closed", () => {
+  // We hide-to-tray instead of closing on the X button, so window-all-closed
+  // only fires when the app is genuinely shutting down (tray "結束" / ACTION_ABORT).
+  // Quit only when isQuittingForReal is set; otherwise stay alive in the tray.
+  if (!isQuittingForReal) return;
   if (process.platform !== "darwin") app.quit();
 });
