@@ -395,7 +395,13 @@ function createWindow() {
     mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
-  elearnView = attachElearnView(mainWindow, HOMEPAGE);
+  elearnView = attachElearnView(mainWindow, HOMEPAGE, (reason) => {
+    // BrowserView 上偵測到使用者登出（不論是 click 登出、還是登出後 server
+    // 回了 text/css 之類非 HTML 內容讓 Chromium 顯示原始碼）。
+    // 直接導回 eCPA 登入頁；如果還記得帳密就走 auto-login，否則就讓使用者
+    // 看到登入畫面（而不是滿版原始碼）。
+    void handleBrowserViewLogout(reason).catch(() => void 0);
+  });
   // Initial bounds = 0x0. The renderer owns layout; it pushes real bounds from the
   // `#browserview-mount` div as soon as it mounts. If renderer ever fails to push,
   // we stay at 0x0 which means all clicks fall through to the dashboard — much
@@ -676,6 +682,49 @@ async function showPrefilledEcpaLogin(creds: SavedCredentials): Promise<void> {
   wc.on("did-finish-load", onLoad);
   wc.loadURL(ECPA_URL).catch(() => void 0);
   log("info", "已將瀏覽器導到 eCPA 登入頁，帳密已幫你填好，點橘框的「登入」即可");
+}
+
+/**
+ * Called when the BrowserView detected the user logged out (URL pattern OR
+ * post-logout response coming back as raw CSS/JS source). The fix is the same:
+ * stop showing whatever Chromium is rendering now (raw text or eCPA goodbye
+ * page), and either auto-relogin or send the user to the eCPA login form.
+ */
+let logoutHandlingInFlight = false;
+async function handleBrowserViewLogout(reason: "url" | "raw-source"): Promise<void> {
+  if (logoutHandlingInFlight) return;
+  if (!elearnView) return;
+  // Don't handle if we're already navigating during auto-login / pre-fill —
+  // those flows briefly touch logout-shaped URLs in the SSO redirect chain.
+  if (autoLoginInFlight || reloginInFlight) return;
+  logoutHandlingInFlight = true;
+  try {
+    log(
+      "warn",
+      reason === "raw-source"
+        ? "BrowserView 顯示成原始碼（可能是 eCPA 登出後 server 回的非 HTML 回應），自動導回登入頁"
+        : "BrowserView 偵測到登出網址，自動導回登入頁",
+    );
+    // 標記 session 為失效，UI 會顯示對應狀態
+    state.loginStatus = "failed";
+    state.user = undefined;
+    pushState();
+
+    if (hasSavedCredentials()) {
+      // 有存帳密 → 走完整 auto-login 流程；tryAutoLogin 內會先 clear
+      // ECPA 端的 stale session cookie 再跑 SSO chain。
+      await tryAutoLogin();
+    } else {
+      // 沒存帳密 → 把 BrowserView 帶回 eCPA 登入頁，讓使用者手動登入；
+      // 同時把 left-panel 切回 await_login，免得停在 selecting 顯示空課表。
+      state.status = "await_login";
+      pushState();
+      const ECPA_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
+      await elearnView.webContents.loadURL(ECPA_URL).catch(() => void 0);
+    }
+  } finally {
+    logoutHandlingInFlight = false;
+  }
 }
 
 // ── Discovery helpers ─────────────────────────────────────────
@@ -1856,6 +1905,58 @@ ipcMain.on(IPC.CREDS_SAVE_ANSWER, (_evt, save: boolean) => {
 ipcMain.on(IPC.CREDS_FORGET, () => {
   clearCredentials();
   log("info", "已清除儲存的帳密");
+});
+
+ipcMain.handle(IPC.CREDS_SWITCH_ACCOUNT, async () => {
+  // 切換帳號 = 清掉本機帳密 + 把 BrowserView 從現有 session 登出，
+  // 然後把 UI 切回 setup 狀態，讓使用者重新輸入帳密。
+  // 跑到一半的 pipeline 直接中止 —— 用別的帳號繼續沒意義（cookie 會被換掉）。
+  log("info", "使用者要求切換帳號，清除本機帳密並重新登入");
+  abortSignal.aborted = true;
+  stopSessionWatchdog();
+  stopLoginWatchdog();
+  runningCids.clear();
+  focusedCid = null;
+  clearRun();
+  clearCredentials();
+  pendingSniffed = null;
+
+  // 把 BrowserView 的 session cookie 清乾淨，不然下次 auto-login 會撞到舊
+  // session 直接被 SSO 視為「已登入」、走不到 GetApTicketV2 那一步。
+  if (elearnView) {
+    await elearnView.webContents.session
+      .clearStorageData({
+        origin: "https://ecpa.dgpa.gov.tw",
+        storages: ["cookies"],
+      })
+      .catch(() => void 0);
+    await elearnView.webContents.session
+      .clearStorageData({
+        origin: "https://elearn.hrd.gov.tw",
+        storages: ["cookies"],
+      })
+      .catch(() => void 0);
+  }
+
+  // 重置整個 app state，回到第一次使用的畫面
+  state.status = "setup";
+  state.loginStatus = undefined;
+  state.user = undefined;
+  state.pipelineCids = undefined;
+  state.pauseReason = undefined;
+  state.now = { action: "idle" };
+  state.courses = [];
+  pushState();
+
+  // BrowserView 帶回 eCPA 登入頁；abortSignal.aborted = true 已防掉 in-flight
+  // pipeline，但 abortSignal 是個 mutable singleton，得在 setup 完之後 reset，
+  // 不然下次 PIPELINE_START 一進去就直接 abort。
+  if (elearnView) {
+    const ECPA_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
+    await elearnView.webContents.loadURL(ECPA_URL).catch(() => void 0);
+  }
+  abortSignal.aborted = false;
+  return { ok: true };
 });
 
 ipcMain.handle(

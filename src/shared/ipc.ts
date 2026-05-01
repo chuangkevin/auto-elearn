@@ -119,6 +119,9 @@ export const IPC = {
   CREDS_SAVE_ANSWER: "creds:save-answer",
   /** renderer → main: forget the stored credentials */
   CREDS_FORGET: "creds:forget",
+  /** renderer → main: log out from BrowserView, clear stored creds, and
+   *  return UI to first-run setup so user can enter a different account. */
+  CREDS_SWITCH_ACCOUNT: "creds:switch-account",
   /** renderer → main: query current saved-credentials state */
   CREDS_STATUS: "creds:status",
   /** renderer → main: manually save credentials without the sniffer flow */

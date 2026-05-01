@@ -145,10 +145,74 @@ export async function autoLoginInView(
 }
 
 /**
+ * Detect if a navigation URL looks like a logout endpoint.
+ * eCPA / elearn 各機關的登出按鈕導去的網址五花八門，但通常網址裡會帶
+ * `logout` / `signout` / `wlLogOut` / `Logout.aspx` 之類的字眼。
+ *
+ * 為什麼要偵測：使用者點 eCPA 的「登出」後，elearn 端有些版型會回 `text/css`
+ * 或 `application/javascript` content-type 的回應頁，BrowserView 不會 render
+ * 成 HTML，會直接顯示成「raw 原始碼」。我們攔下 logout 網址直接導回 eCPA 登入頁，
+ * 配合 saved credentials 自動重登。
+ */
+function looksLikeLogoutUrl(url: string): boolean {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return (
+    lower.includes("logout") ||
+    lower.includes("signout") ||
+    lower.includes("sign_out") ||
+    lower.includes("wllogout") ||
+    lower.includes("/clogout") ||
+    lower.includes("uiam/logout")
+  );
+}
+
+/**
+ * Some logout responses arrive as `text/css` / `application/javascript` (server
+ * mistakenly serves a JS/CSS asset path as the post-logout landing page) and
+ * Chromium renders them as plain text — that's the "登出後變原始碼" symptom.
+ * Catch via mainFrame.url + a small DOM probe and treat as a logout.
+ */
+async function isShowingRawSource(wc: WebContents): Promise<boolean> {
+  try {
+    return await wc.executeJavaScript(
+      `(() => {
+        // Chromium 對 text/css / text/javascript / text/plain 等非 HTML
+        // content-type 會直接以 <pre>...</pre> 把整段原始碼塞進 body。
+        // 這時 documentElement 結構是 <html><body><pre>...</pre></body></html>，
+        // 沒有任何站台正常會有的 head/link/script 等元素。
+        const ct = (document.contentType || '').toLowerCase();
+        if (ct && !ct.startsWith('text/html') && !ct.startsWith('application/xhtml')) {
+          return true;
+        }
+        const body = document.body;
+        if (!body) return false;
+        const onlyPre =
+          body.children.length === 1 &&
+          body.firstElementChild &&
+          body.firstElementChild.tagName === 'PRE';
+        return !!onlyPre;
+      })()`,
+      true,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Mount an elearn-only BrowserView onto the main window.
  * Caller is responsible for setBounds().
+ *
+ * `onLogoutDetected` fires when we detect the user clicked logout on the
+ * embedded site (URL pattern OR raw-source response). The caller decides what
+ * to do — usually navigate back to eCPA login + trigger auto-login.
  */
-export function attachElearnView(win: BrowserWindow, url: string): BrowserView {
+export function attachElearnView(
+  win: BrowserWindow,
+  url: string,
+  onLogoutDetected?: (reason: "url" | "raw-source") => void,
+): BrowserView {
   const view = new BrowserView({
     webPreferences: {
       contextIsolation: true,
@@ -186,6 +250,31 @@ export function attachElearnView(win: BrowserWindow, url: string): BrowserView {
   view.webContents.on("did-finish-load", () => {
     dismissNuisancePopups(view.webContents).catch(() => void 0);
   });
+
+  // Logout detection: fire callback when we see a logout URL OR a non-HTML
+  // raw-source response. De-bounced via `lastFiredAt` so we don't spam the
+  // caller during the redirect chain that follows logout.
+  if (onLogoutDetected) {
+    let lastFiredAt = 0;
+    const fire = (reason: "url" | "raw-source") => {
+      const now = Date.now();
+      if (now - lastFiredAt < 5000) return;
+      lastFiredAt = now;
+      onLogoutDetected(reason);
+    };
+    view.webContents.on("did-navigate", (_e, navUrl) => {
+      if (looksLikeLogoutUrl(navUrl)) fire("url");
+    });
+    view.webContents.on("did-navigate-in-page", (_e, navUrl) => {
+      if (looksLikeLogoutUrl(navUrl)) fire("url");
+    });
+    view.webContents.on("did-finish-load", () => {
+      // 0.4 s grace so the page actually commits + DOM is queryable
+      setTimeout(async () => {
+        if (await isShowingRawSource(view.webContents)) fire("raw-source");
+      }, 400);
+    });
+  }
   return view;
 }
 

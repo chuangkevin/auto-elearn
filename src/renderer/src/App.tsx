@@ -33,6 +33,7 @@ declare global {
       unenrollCourse: (cid: string) => Promise<{ ok: boolean; error?: string }>;
       getCredsStatus: () => Promise<CredentialsStatus>;
       forgetCredentials: () => void;
+      switchAccount: () => Promise<{ ok: boolean }>;
       saveCredentialsManual: (
         payload: { account: string; password: string },
       ) => Promise<{ ok: boolean; reason?: string }>;
@@ -234,6 +235,17 @@ function App() {
     setCredsStatus({ saved: false });
   }
 
+  async function switchAccount() {
+    if (
+      !confirm(
+        "要登出目前帳號、換另一個帳號嗎？\n\n會做這幾件事：\n• 把網頁端目前這個帳號的 session 清掉\n• 把這台電腦記得的帳號清掉\n• 回到第一次使用的畫面，讓你輸入新帳號\n\n（如果有正在跑的課，會被中止）",
+      )
+    )
+      return;
+    await window.api.switchAccount();
+    setCredsStatus({ saved: false });
+  }
+
   // State-aware default: shrink the BrowserView during Monitor, unless the
   // user has explicitly resized the divider this session.
   useEffect(() => {
@@ -401,6 +413,10 @@ function App() {
                 onClose={() => setCredsModalOpen(false)}
                 onClear={() => {
                   forgetCreds();
+                  setCredsModalOpen(false);
+                }}
+                onSwitch={() => {
+                  void switchAccount();
                   setCredsModalOpen(false);
                 }}
                 onSave={async (account, password) => {
@@ -1011,11 +1027,13 @@ function CredsManageCard({
   status,
   onClose,
   onClear,
+  onSwitch,
   onSave,
 }: {
   status: CredentialsStatus | null;
   onClose: () => void;
   onClear: () => void;
+  onSwitch: () => void;
   onSave: (account: string, password: string) => Promise<{ ok: boolean; reason?: string }>;
 }) {
   const [account, setAccount] = useState("");
@@ -1084,15 +1102,26 @@ function CredsManageCard({
         帳號用 Windows 內建加密保管，只存在這台電腦上，不會傳到網路。
       </p>
 
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center flex-wrap gap-2">
         {status?.saved ? (
-          <button
-            className="px-3 py-2 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 text-sm"
-            onClick={onClear}
-            disabled={busy}
-          >
-            🗑 忘記帳號
-          </button>
+          <div className="flex gap-2">
+            <button
+              className="px-3 py-2 rounded bg-amber-700 hover:bg-amber-600 text-amber-50 text-sm"
+              onClick={onSwitch}
+              disabled={busy}
+              title="把目前登入的帳號從網頁登出，並清掉本機記得的帳號，回到第一次使用的畫面讓你輸入新帳號"
+            >
+              🚪 登出 / 換帳號
+            </button>
+            <button
+              className="px-3 py-2 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 text-sm"
+              onClick={onClear}
+              disabled={busy}
+              title="只清除本機記得的帳號，網頁端 session 不動"
+            >
+              🗑 忘記帳號
+            </button>
+          </div>
         ) : (
           <span />
         )}

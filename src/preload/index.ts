@@ -37,6 +37,8 @@ const api = {
     ipcRenderer.invoke(IPC.UNENROLL_COURSE, cid),
   getCredsStatus: (): Promise<CredentialsStatus> => ipcRenderer.invoke(IPC.CREDS_STATUS),
   forgetCredentials: () => ipcRenderer.send(IPC.CREDS_FORGET),
+  switchAccount: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.CREDS_SWITCH_ACCOUNT),
   saveCredentialsManual: (
     payload: { account: string; password: string },
   ): Promise<{ ok: boolean; reason?: string }> =>
