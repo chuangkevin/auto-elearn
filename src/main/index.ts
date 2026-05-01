@@ -1180,20 +1180,48 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           return false;
         })();
 
-        // ── Survey task — fires once, in parallel with exam. Independent of
+        // ── Survey task — runs in parallel with exam. Independent of
         //    exam outcome per user spec; even if exam fails the survey gets
         //    submitted so the course is half-credited rather than fully stuck.
+        //
+        //    fillSurvey internally retries 3× with backoff and verifies
+        //    server-side surveyDone after submit, so a single transient
+        //    failure (sysbar starved by parallel enterLC, popup timeout)
+        //    no longer leaves the course with 問卷 unfilled. If all 3 inner
+        //    attempts fail, we wait 30 s and run ONE outer retry from a
+        //    completely fresh BrowserWindow — primarily to recover from
+        //    cases where the LC slot was held by the exam for the entire
+        //    duration of the inner attempts.
         const surveyTask = (async (): Promise<void> => {
           if (surveyDone || abortSignal.aborted) return;
-          log("info", `問卷：${name}`);
-          const sr = await fillSurvey(cid, session, {
+          log("info", `[${name}] 開始填問卷`);
+          let sr = await fillSurvey(cid, session, {
             onProgress: (msg) => log("info", `  [${name}] ${msg}`),
           });
+          if (!sr.ok && !abortSignal.aborted) {
+            log(
+              "warn",
+              `[${name}] 問卷三次內部重試皆失敗 (${sr.error ?? "unknown"})，30s 後再做一次外層重試`,
+            );
+            await new Promise((r) => setTimeout(r, 30_000));
+            if (!abortSignal.aborted) {
+              sr = await fillSurvey(cid, session, {
+                onProgress: (msg) => log("info", `  [${name}] (外層重試) ${msg}`),
+              });
+            }
+          }
           if (sr.ok) {
-            log("info", `問卷完成 ${name}：勾選 ${sr.filled} 題 + 繳交`);
-            if (card) card.surveyDone = true;
+            const tag = sr.serverConfirmed ? "✅ server 確認" : "⚠ 未驗證";
+            log(
+              "info",
+              `問卷完成 ${name}：${tag}，attempt=${sr.attempts} filled=${sr.filled} submitted=${sr.submitted}`,
+            );
+            if (card && sr.serverConfirmed) card.surveyDone = true;
           } else {
-            log("warn", `問卷失敗 ${name}：${sr.error ?? "unknown"}`);
+            log(
+              "warn",
+              `❌ 問卷最終失敗 ${name}：attempt=${sr.attempts} ${sr.error ?? "unknown"} — server 不會自動 flip 通過狀態`,
+            );
           }
         })();
 
