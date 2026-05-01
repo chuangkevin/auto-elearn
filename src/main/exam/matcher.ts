@@ -90,8 +90,18 @@ export function matchAgainstDb(questionText: string): MatchResult | null {
 }
 
 /**
- * Three-layer async answer lookup: learned_answers → questions DB → Gemini LLM.
- * Returns the best answer with source label and 0-based option index.
+ * High-confidence cutoff for accepting a DB hit without consulting the LLM.
+ * Below this we still keep the DB row as a fallback in case the LLM call
+ * fails (no key / quota / network), but we prefer the LLM's pick when it
+ * succeeds — the 98K bank ages quickly and a 0.30-0.70 fuzzy match is
+ * usually a near-miss on a different question that shares vocabulary.
+ */
+const LLM_GATE_CONFIDENCE = 0.8;
+
+/**
+ * Pipeline: learned_answers → DB (high-conf only) → Gemini LLM → DB (low-conf
+ * fallback) → random. Returns the best answer with source label and 0-based
+ * option index.
  *
  * `skipMixedDb` skips the read-only 98K bank and goes straight to LLM. The
  * solver flips this on after a retry where mixed.db gave a confidence-1.0
@@ -110,23 +120,34 @@ export async function findBestAnswer(
     return { source: "db", pickedIdx: pickOptionIndex(learned.correct, options), confidence: 1.0 };
   }
 
-  // Layer 2: 98K question bank (exact then fuzzy) — skipped on forced-LLM retries
+  // Layer 2a: 98K question bank — accept immediately only at high confidence.
+  // Below the gate, hold onto the row but try the LLM first since fuzzy
+  // 0.25-0.79 matches are frequently the wrong question with overlapping
+  // vocabulary (this used to lock answers to bad picks and never let the
+  // LLM run, see CLAUDE.md note on v0.7.0).
+  let dbFallback: { source: AnswerSource; pickedIdx: number; confidence: number } | null = null;
   if (!opts.skipMixedDb) {
     const dbMatch = matchAgainstDb(questionText);
     if (dbMatch) {
-      return {
-        source: dbMatch.source,
-        pickedIdx: pickOptionIndex(dbMatch.correctText, options),
-        confidence: dbMatch.confidence,
-      };
+      const pickedIdx = pickOptionIndex(dbMatch.correctText, options);
+      if (dbMatch.confidence >= LLM_GATE_CONFIDENCE) {
+        return { source: dbMatch.source, pickedIdx, confidence: dbMatch.confidence };
+      }
+      dbFallback = { source: dbMatch.source, pickedIdx, confidence: dbMatch.confidence };
     }
   }
 
-  // Layer 3: Gemini LLM fallback
+  // Layer 3: Gemini LLM
   const llmMatch = await matchWithLlm(questionText, options);
   if (llmMatch) {
     return { source: "llm", pickedIdx: llmMatch.pickedIdx, confidence: llmMatch.confidence };
   }
+
+  // Layer 2b: low-confidence DB fallback — better than coin flip when the
+  // LLM is unavailable (no API key) or failed (quota / timeout / parse).
+  // Brute-force probe at the runExamLoop level will still correct it if
+  // wrong, just like before.
+  if (dbFallback) return dbFallback;
 
   // Random guess as last resort
   return {
