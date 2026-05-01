@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   IPC,
+  type AccountMismatchPayload,
   type AppState,
   type AutoLoginProgress,
   type CourseCandidate,
@@ -9,6 +10,8 @@ import {
   type ResumePrompt,
   type SearchOptions,
   type StealthState,
+  type SwitchAccountPayload,
+  type SwitchAccountResult,
   type ViewBounds,
 } from "../shared/ipc";
 
@@ -41,6 +44,13 @@ const api = {
     payload: { account: string; password: string },
   ): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke(IPC.CREDS_SAVE_MANUAL, payload),
+  switchAccount: (payload?: SwitchAccountPayload): Promise<SwitchAccountResult> =>
+    ipcRenderer.invoke(IPC.CREDS_SWITCH_ACCOUNT, payload ?? {}),
+  onAccountMismatch: (cb: (p: AccountMismatchPayload) => void) => {
+    const listener = (_evt: Electron.IpcRendererEvent, p: AccountMismatchPayload) => cb(p);
+    ipcRenderer.on(IPC.CREDS_ACCOUNT_MISMATCH, listener);
+    return () => ipcRenderer.off(IPC.CREDS_ACCOUNT_MISMATCH, listener);
+  },
   answerCredsPrompt: (save: boolean) => ipcRenderer.send(IPC.CREDS_SAVE_ANSWER, save),
   onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => {
     const listener = (_evt: Electron.IpcRendererEvent, p: CredsPromptPayload) => cb(p);

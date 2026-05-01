@@ -123,6 +123,20 @@ export const IPC = {
   CREDS_STATUS: "creds:status",
   /** renderer → main: manually save credentials without the sniffer flow */
   CREDS_SAVE_MANUAL: "creds:save-manual",
+  /**
+   * renderer → main: full account switch. Aborts any running pipeline,
+   * stops watchdogs, wipes BrowserView session storage, clears stored creds,
+   * resets in-memory state, and (if creds supplied) saves them and kicks
+   * autologin. With no payload it returns the user to the setup / await_login
+   * screen with a clean slate.
+   */
+  CREDS_SWITCH_ACCOUNT: "creds:switch-account",
+  /**
+   * main → renderer: the BrowserView captured a login form submission whose
+   * account differs from the saved one (or differs from `state.user`). The
+   * UI shows a toast asking whether to switch.
+   */
+  CREDS_ACCOUNT_MISMATCH: "creds:account-mismatch",
   /** main → renderer: auto-login in progress / result */
   AUTOLOGIN_PROGRESS: "autologin:progress",
   /** main → renderer: previous run exists, offer to resume */
@@ -191,6 +205,47 @@ export interface CredentialsStatus {
 export interface CredsPromptPayload {
   /** Masked account for the UI. Server never receives the plain value back. */
   maskedAccount: string;
+}
+
+/**
+ * Payload for `CREDS_SWITCH_ACCOUNT`.
+ *
+ * - With `account` + `password`: clears everything for the OLD account and
+ *   immediately saves the NEW credentials. If `wipeSession !== false`, the
+ *   BrowserView's cookies/storage are wiped and autologin runs from a clean
+ *   slate. If `wipeSession === false` (sync-from-browser case), the
+ *   BrowserView is left as-is — used when the user already manually logged
+ *   in to the new account in the BrowserView and we just need to sync state.
+ * - With no fields (or `wipeSession: true` only): hard reset. Stops the
+ *   pipeline, wipes BrowserView session, clears stored creds, drops state
+ *   back to `setup` so the user can start over without restarting the app.
+ */
+export interface SwitchAccountPayload {
+  account?: string;
+  password?: string;
+  /**
+   * Default true. Set false when the user is acknowledging a `CREDS_ACCOUNT_MISMATCH`
+   * — they already logged in to the new account in the BrowserView and want
+   * us to sync to it without logging them out.
+   */
+  wipeSession?: boolean;
+}
+
+export interface SwitchAccountResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/** Payload for `CREDS_ACCOUNT_MISMATCH`. */
+export interface AccountMismatchPayload {
+  /**
+   * Masked saved account ("F*****8271"). May be empty when no creds were
+   * saved (e.g., user manually logged in but we already had a different
+   * `state.user` from a previous session).
+   */
+  savedMasked: string;
+  /** Masked account that just submitted the login form. */
+  newMasked: string;
 }
 
 export interface AutoLoginProgress {

@@ -5,6 +5,7 @@ import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 
 import {
   IPC,
+  type AccountMismatchPayload,
   type AppState,
   type AutoLoginProgress,
   type CourseCandidate,
@@ -13,6 +14,8 @@ import {
   type CredsPromptPayload,
   type ResumePrompt,
   type SearchOptions,
+  type SwitchAccountPayload,
+  type SwitchAccountResult,
   type ViewBounds,
 } from "../shared/ipc";
 import { createBus } from "./bus";
@@ -405,10 +408,30 @@ function createWindow() {
   // on every window resize event than have Electron grow the view out of sync.
   elearnView.setAutoResize({ width: false, height: false });
 
-  // Sniff login POST so we can offer "remember me" after manual login succeeds.
+  // Sniff login POST so we can offer "remember me" after manual login succeeds
+  // AND detect when a different account is logging in (account-switch flow).
   attachLoginSniffer(elearnView.webContents.session, (creds) => {
     pendingSniffed = creds;
-    log("info", "已偵測到 eCPA 登入表單，待登入成功後會詢問是否儲存帳密");
+    const saved = loadCredentials();
+    if (saved && saved.account !== creds.account) {
+      // Different account just submitted the login form — surface a toast so
+      // the user can decide whether to switch (clears old creds + state) or
+      // keep the saved account (in which case the BrowserView is currently
+      // out of sync with state.user, but we don't auto-overwrite anything).
+      const payload: AccountMismatchPayload = {
+        savedMasked: maskAccount(saved.account),
+        newMasked: maskAccount(creds.account),
+      };
+      mainWindow?.webContents.send(IPC.CREDS_ACCOUNT_MISMATCH, payload);
+      log(
+        "warn",
+        `偵測到不同帳號登入：原儲存 ${payload.savedMasked} → 新登入 ${payload.newMasked}`,
+      );
+    } else if (state.user && saved && saved.account === creds.account) {
+      // Same account re-logging in (session expired, manual re-login). No-op.
+    } else {
+      log("info", "已偵測到 eCPA 登入表單，待登入成功後會詢問是否儲存帳密");
+    }
   });
 
   if (hasSavedCredentials()) {
@@ -425,6 +448,21 @@ function createWindow() {
   state.isFirstRun = isFirstRun();
   pushState();
 
+  attachDetectLoginOnce();
+}
+
+/**
+ * Single-flight detectLogin runner. Re-entrant calls while one is already
+ * pending are no-ops. After a successful detection it transitions
+ * `state.status` to `selecting`, runs the post-login bookkeeping (refresh
+ * courses, prompt save-creds / resume-run) and clears its own guard so a
+ * later account switch can run it again from scratch.
+ */
+let detectLoginInFlight = false;
+function attachDetectLoginOnce(): void {
+  if (detectLoginInFlight) return;
+  if (!elearnView) return;
+  detectLoginInFlight = true;
   detectLogin(elearnView.webContents)
     .then(async (user) => {
       // 真名只出現在 main process 的記憶體裡，UI 拿到的永遠是隱碼版。
@@ -433,7 +471,7 @@ function createWindow() {
       state.loginStatus = "ok";
       log("info", `已成功登入`);
       startLoginWatchdog();
-      await dismissNuisancePopups(elearnView!.webContents);
+      if (elearnView) await dismissNuisancePopups(elearnView.webContents);
       await refreshCourses();
 
       // Optional one-shot debug scraper (LC frame walker, slower).
@@ -467,11 +505,6 @@ function createWindow() {
           }
         };
         if (solveCid.toUpperCase() === "ALL") {
-          // Pick courses likely to have submitted attempts: caption "尚未通過"
-          // / "已通過" both indicate the user has interacted; "未報名" /
-          // "未開課" are skipped. We process them sequentially so the
-          // hidden BrowserWindow churn never breaches the elearn 多重視窗
-          // protection.
           // Skip pending (not enrolled) and done (already passed) — neither
           // has past-attempt data worth solving from. Anything in
           // {enrolled, reading, exam, survey, verifying} is fair game.
@@ -500,18 +533,23 @@ function createWindow() {
       } else if (pendingSniffed && hasSavedCredentials()) {
         // Creds already saved; transparently refresh password in case user changed it.
         const existing = loadCredentials();
-        if (existing && existing.password !== pendingSniffed.password) {
-          saveCredentials({
-            account: pendingSniffed.account,
-            password: pendingSniffed.password,
-            alias: existing.alias,
-            savedAt: existing.savedAt,
-            lastUsedAt: new Date().toISOString(),
-          });
-          log("info", "偵測到密碼已變更，已更新儲存");
-        } else {
-          touchCredentials();
+        if (existing && existing.account === pendingSniffed.account) {
+          // Same account, password may have been rotated.
+          if (existing.password !== pendingSniffed.password) {
+            saveCredentials({
+              account: pendingSniffed.account,
+              password: pendingSniffed.password,
+              alias: existing.alias,
+              savedAt: existing.savedAt,
+              lastUsedAt: new Date().toISOString(),
+            });
+            log("info", "偵測到密碼已變更，已更新儲存");
+          } else {
+            touchCredentials();
+          }
         }
+        // Different account → mismatch event was already emitted by the
+        // sniffer hook. We don't silently overwrite saved creds here.
       }
 
       state.status = "selecting";
@@ -529,7 +567,10 @@ function createWindow() {
         mainWindow?.webContents.send(IPC.RESUME_PROMPT, payload);
       }
     })
-    .catch((err) => log("error", `登入偵測失敗：${err}`));
+    .catch((err) => log("error", `登入偵測失敗：${err}`))
+    .finally(() => {
+      detectLoginInFlight = false;
+    });
 }
 
 async function tryAutoLogin(): Promise<boolean> {
@@ -614,21 +655,10 @@ async function showPrefilledEcpaLogin(creds: SavedCredentials): Promise<void> {
   state.now = { action: "idle" };
   pushState();
   log("info", "等候登入中（自動登入失敗，請點橘框登入）");
-  // Fire-and-forget: this runs in parallel with the navigate below.
-  detectLogin(wc)
-    .then(async (user) => {
-      pushSecretToMaskList(user, maskName(user));
-      state.user = { name: maskName(user) };
-      state.loginStatus = "ok";
-      log("info", `已成功登入`);
-      startLoginWatchdog();
-      await dismissNuisancePopups(wc);
-      await refreshCourses();
-      state.status = "selecting";
-      log("info", "請在上方搜尋 / 勾選要刷的課程，按「確認操作」即可");
-      pushState();
-    })
-    .catch((err) => log("error", `登入偵測失敗：${err}`));
+  // Single-flight: if the original createWindow detectLogin is still running
+  // it'll catch the login. Otherwise this kicks a fresh one. Either way no
+  // double-fires can transition state twice.
+  attachDetectLoginOnce();
 
   const onLoad = () => {
     const url = wc.getURL();
@@ -865,6 +895,138 @@ function stopLoginWatchdog() {
     clearInterval(loginWatchdogTimer);
     loginWatchdogTimer = null;
   }
+}
+
+/**
+ * Drop every piece of in-memory + on-disk state that belongs to the currently
+ * logged-in account: pipeline, watchdogs, persisted run, sniffed creds, the
+ * UI's notion of who is logged in. Optionally wipes the BrowserView's session
+ * storage (cookies/localStorage/...) so the next navigation behaves as if the
+ * app had just been launched for the first time.
+ *
+ * Does NOT touch `state.status` — caller decides where to land (`setup`,
+ * `await_login`, `selecting`).
+ */
+async function resetForAccountSwitch(opts: { wipeSession: boolean }): Promise<void> {
+  // Stop all background work that depends on the old account.
+  abortSignal.aborted = true;
+  stopSessionWatchdog();
+  stopLoginWatchdog();
+  consecutiveDeadChecks = 0;
+  loginMissCount = 0;
+  reloginInFlight = false;
+  // autoLoginInFlight is intentionally NOT cleared — if a fresh autologin is
+  // running it will set its own flag in its finally block. Forcing it false
+  // here would let two concurrent autologins race.
+
+  // In-memory pipeline state.
+  runningCids.clear();
+  focusedCid = null;
+  pendingSniffed = null;
+
+  // Persisted run on disk so a leftover paused run can't auto-resume into a
+  // different account.
+  clearRun();
+  clearCredentials();
+
+  // Reset UI state to a clean shell. Caller flips status afterwards.
+  state.user = undefined;
+  state.loginStatus = undefined;
+  state.pauseReason = undefined;
+  state.pipelineCids = undefined;
+  state.returnedToSelect = undefined;
+  state.courses = [];
+  state.now = { action: "idle" };
+  state.stats = { done: 0, total: 0, quizzes: 0, llmCalls: 0, progressPct: 0 };
+
+  if (opts.wipeSession && elearnView) {
+    try {
+      await elearnView.webContents.session.clearStorageData({
+        storages: [
+          "cookies",
+          "localstorage",
+          "indexdb",
+          "websql",
+          "shadercache",
+          "filesystem",
+          "cachestorage",
+        ],
+      });
+    } catch (e) {
+      log("warn", `清除 BrowserView session 失敗：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Drop the cached server-progress map; it belongs to the old account.
+  _pollCache = null;
+}
+
+/**
+ * Execute a user-requested account switch end-to-end.
+ *
+ * Caller decides whether the new credentials are passed in (eager autologin)
+ * or whether we land on the setup screen (let the user log in manually).
+ * Either way the OLD account's state is fully cleared first.
+ */
+async function performAccountSwitch(payload: SwitchAccountPayload): Promise<SwitchAccountResult> {
+  const account = (payload.account ?? "").trim();
+  const password = payload.password ?? "";
+  const wipeSession = payload.wipeSession !== false;
+
+  if (account || password) {
+    if (!account || !password) {
+      return { ok: false, reason: "帳號或密碼為空" };
+    }
+  }
+
+  log("info", "🔄 切換帳號：清除上一組帳號的所有狀態...");
+  await resetForAccountSwitch({ wipeSession });
+
+  if (account && password) {
+    const toSave: SavedCredentials = {
+      account,
+      password,
+      savedAt: new Date().toISOString(),
+    };
+    const res = saveCredentials(toSave);
+    if (!res.ok) {
+      // Land on setup so the user isn't stuck — they can retry from the form.
+      state.status = "setup";
+      pushState();
+      return { ok: false, reason: res.reason ?? "存帳密失敗" };
+    }
+    pushSecretToMaskList(account, maskAccount(account));
+    log("info", `已儲存新帳號（${maskAccount(account)}），背景登入中...`);
+
+    if (wipeSession) {
+      // Clean slate: load homepage so detectLogin / autologin start from a
+      // known state. detectLogin is fired below and stays watching the view.
+      state.status = "await_login";
+      pushState();
+      if (elearnView) {
+        elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
+      }
+      // Re-attach detectLogin so the new account's name flows back into UI.
+      attachDetectLoginOnce();
+      void tryAutoLogin().catch(() => void 0);
+    } else {
+      // Sync-from-browser: BrowserView is already logged in as the new user.
+      // Just re-detect to refresh state.user, then scan courses.
+      state.status = "await_login";
+      pushState();
+      attachDetectLoginOnce();
+    }
+    return { ok: true };
+  }
+
+  // No new creds → leave the user on the setup screen.
+  state.status = "setup";
+  pushState();
+  if (wipeSession && elearnView) {
+    elearnView.webContents.loadURL(HOMEPAGE).catch(() => void 0);
+  }
+  log("info", "已清除帳號，請重新輸入要切換的帳號");
+  return { ok: true };
 }
 
 // ── Pipeline ──────────────────────────────────────────────────
@@ -1853,10 +2015,31 @@ ipcMain.on(IPC.CREDS_SAVE_ANSWER, (_evt, save: boolean) => {
   pendingSniffed = null;
 });
 
-ipcMain.on(IPC.CREDS_FORGET, () => {
-  clearCredentials();
+ipcMain.on(IPC.CREDS_FORGET, async () => {
+  // 「忘記帳號」現在等於一次完整切換到「沒帳號」狀態：把 pipeline / watchdog /
+  // BrowserView session 一起清掉，回到 setup 畫面。沒做這件事 → 上次的
+  // pipeline 還在背景跑、BrowserView cookies 還是舊帳號 → UI 顯示「登入」
+  // 但點不動的鎖死狀況（v0.7.5 修法）。
+  await performAccountSwitch({ wipeSession: true });
   log("info", "已清除儲存的帳密");
 });
+
+ipcMain.handle(
+  IPC.CREDS_SWITCH_ACCOUNT,
+  async (_evt, payload?: SwitchAccountPayload): Promise<SwitchAccountResult> => {
+    try {
+      return await performAccountSwitch(payload ?? {});
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      log("error", `切換帳號失敗：${reason}`);
+      // Don't leave state mid-transition: drop to setup so the user has a
+      // working entry point even on failure.
+      state.status = "setup";
+      pushState();
+      return { ok: false, reason };
+    }
+  },
+);
 
 ipcMain.handle(
   IPC.CREDS_SAVE_MANUAL,

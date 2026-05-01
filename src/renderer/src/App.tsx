@@ -2,6 +2,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Noteqad from "./Noteqad";
 import type {
+  AccountMismatchPayload,
   AppState,
   AutoLoginProgress,
   CourseCandidate,
@@ -10,6 +11,8 @@ import type {
   ResumePrompt,
   SearchOptions,
   StealthState,
+  SwitchAccountPayload,
+  SwitchAccountResult,
   ViewBounds,
 } from "@shared/ipc";
 import { AFFILIATED_SCHOOLS, MAIN_CATEGORIES } from "@shared/elearn-catalog";
@@ -36,6 +39,10 @@ declare global {
       saveCredentialsManual: (
         payload: { account: string; password: string },
       ) => Promise<{ ok: boolean; reason?: string }>;
+      switchAccount: (
+        payload?: SwitchAccountPayload,
+      ) => Promise<SwitchAccountResult>;
+      onAccountMismatch: (cb: (p: AccountMismatchPayload) => void) => () => void;
       answerCredsPrompt: (save: boolean) => void;
       onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => () => void;
       onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => () => void;
@@ -195,6 +202,7 @@ function App() {
   const [credsModalOpen, setCredsModalOpen] = useState(false);
   const [autoLogin, setAutoLogin] = useState<AutoLoginProgress | null>(null);
   const [resumePrompt, setResumePrompt] = useState<ResumePrompt | null>(null);
+  const [accountMismatch, setAccountMismatch] = useState<AccountMismatchPayload | null>(null);
 
   useEffect(() => {
     window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
@@ -208,10 +216,12 @@ function App() {
       }
     });
     const offResume = window.api.onResumePrompt((p) => setResumePrompt(p));
+    const offMismatch = window.api.onAccountMismatch?.((p) => setAccountMismatch(p));
     return () => {
       offPrompt();
       offAuto();
       offResume();
+      offMismatch?.();
     };
   }, []);
 
@@ -232,6 +242,39 @@ function App() {
     if (!confirm("確定要忘記已記住的帳號嗎？之後斷線就要手動再登一次。")) return;
     window.api.forgetCredentials();
     setCredsStatus({ saved: false });
+  }
+
+  /**
+   * Hard-switch to a brand-new account. Wipes BrowserView session, aborts any
+   * running pipeline, clears state. If `account`/`password` are supplied,
+   * the new creds are saved and autologin runs immediately. Without them,
+   * the user lands on the setup screen.
+   */
+  async function switchAccount(
+    payload?: SwitchAccountPayload,
+  ): Promise<SwitchAccountResult> {
+    try {
+      const res = await window.api.switchAccount(payload);
+      // Refresh creds chip + close any modal that initiated the switch.
+      window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
+      return res;
+    } catch (e) {
+      return {
+        ok: false,
+        reason: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+
+  async function answerAccountMismatch(action: "switch" | "ignore") {
+    if (!accountMismatch) return;
+    setAccountMismatch(null);
+    if (action === "ignore") return;
+    // Sync-from-browser: BrowserView is already logged in as the new
+    // account, so we keep the session and ask the user to type the
+    // password into the creds modal so we can save it. Simpler than
+    // re-running autologin from scratch.
+    setCredsModalOpen(true);
   }
 
   // State-aware default: shrink the BrowserView during Monitor, unless the
@@ -411,7 +454,44 @@ function App() {
                   }
                   return res;
                 }}
+                onSwitch={async (account, password) => {
+                  const res = await switchAccount({ account, password, wipeSession: true });
+                  if (res.ok) setCredsModalOpen(false);
+                  return res;
+                }}
               />
+            </ModalGuard>
+          </div>
+        )}
+        {accountMismatch && (
+          <div className="absolute inset-0 z-[65] flex items-center justify-center bg-black/60">
+            <ModalGuard>
+              <div className="bg-slate-900 border border-amber-600 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
+                <h2 className="text-lg font-semibold text-amber-300 mb-2">⚠ 偵測到不同帳號</h2>
+                <p className="text-sm text-slate-300 mb-2 leading-relaxed">
+                  右邊瀏覽器剛剛用 <span className="font-mono text-emerald-300">{accountMismatch.newMasked}</span> 登入，
+                  跟原本記住的帳號 <span className="font-mono text-slate-200">{accountMismatch.savedMasked || "（未儲存）"}</span> 不同。
+                </p>
+                <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                  要切換到新的帳號嗎？切換會清掉舊帳號的進度並改用新帳號繼續。
+                  按「忽略」會留下原本記住的帳號，但右邊瀏覽器目前是另一個人的 session，
+                  操作可能會異常。
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                    onClick={() => answerAccountMismatch("ignore")}
+                  >
+                    忽略
+                  </button>
+                  <button
+                    className="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold"
+                    onClick={() => answerAccountMismatch("switch")}
+                  >
+                    切換到新帳號
+                  </button>
+                </div>
+              </div>
             </ModalGuard>
           </div>
         )}
@@ -1012,27 +1092,58 @@ function CredsManageCard({
   onClose,
   onClear,
   onSave,
+  onSwitch,
 }: {
   status: CredentialsStatus | null;
   onClose: () => void;
   onClear: () => void;
   onSave: (account: string, password: string) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * Hard-switch: clears old creds + BrowserView session + pipeline state,
+   * then saves the new credentials and kicks autologin. Use this when the
+   * user wants to actually log in as a different person.
+   */
+  onSwitch: (account: string, password: string) => Promise<{ ok: boolean; reason?: string }>;
 }) {
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function submit() {
+  function validate(): boolean {
     setErr(null);
     if (!account.trim() || !password) {
       setErr("帳號和密碼都要填");
-      return;
+      return false;
     }
+    return true;
+  }
+
+  async function submitSave() {
+    if (!validate()) return;
     setBusy(true);
     try {
       const res = await onSave(account.trim(), password);
       if (!res.ok) setErr(res.reason ?? "存不起來");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitSwitch() {
+    if (!validate()) return;
+    if (
+      !confirm(
+        "切換帳號會清除上一個帳號的所有進度（包含正在跑的 pipeline），" +
+          "並把右邊瀏覽器登出再用新帳號重新登入。確定要切換？",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await onSwitch(account.trim(), password);
+      if (!res.ok) setErr(res.reason ?? "切換失敗");
     } finally {
       setBusy(false);
     }
@@ -1061,7 +1172,7 @@ function CredsManageCard({
       <div className="space-y-2 mb-3">
         <input
           className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
-          placeholder={status?.saved ? "新的帳號（會蓋掉舊的）" : "帳號（身分證字號）"}
+          placeholder={status?.saved ? "新的帳號" : "帳號（身分證字號）"}
           value={account}
           onChange={(e) => setAccount(e.target.value)}
           autoFocus
@@ -1073,7 +1184,7 @@ function CredsManageCard({
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
+          onKeyDown={(e) => e.key === "Enter" && (status?.saved ? submitSwitch() : submitSave())}
           disabled={busy}
         />
       </div>
@@ -1084,19 +1195,20 @@ function CredsManageCard({
         帳號用 Windows 內建加密保管，只存在這台電腦上，不會傳到網路。
       </p>
 
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap justify-between items-center gap-2">
         {status?.saved ? (
           <button
-            className="px-3 py-2 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 text-sm"
+            className="px-3 py-2 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 text-sm disabled:opacity-50"
             onClick={onClear}
             disabled={busy}
+            title="清除已儲存的帳號並回到設定畫面"
           >
             🗑 忘記帳號
           </button>
         ) : (
           <span />
         )}
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button
             className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
             onClick={onClose}
@@ -1104,13 +1216,34 @@ function CredsManageCard({
           >
             取消
           </button>
-          <button
-            className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
-            onClick={submit}
-            disabled={busy}
-          >
-            {busy ? "存中…" : status?.saved ? "蓋掉舊的" : "記起來"}
-          </button>
+          {status?.saved ? (
+            <>
+              <button
+                className="px-3 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm disabled:opacity-50"
+                onClick={submitSave}
+                disabled={busy}
+                title="只更新存在電腦上的帳密；不重設 pipeline / 不重新登入"
+              >
+                {busy ? "存中…" : "只更新密碼"}
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold disabled:opacity-50"
+                onClick={submitSwitch}
+                disabled={busy}
+                title="清除上個帳號全部狀態並登入新帳號"
+              >
+                {busy ? "切換中…" : "🔄 切換帳號"}
+              </button>
+            </>
+          ) : (
+            <button
+              className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+              onClick={submitSave}
+              disabled={busy}
+            >
+              {busy ? "存中…" : "記起來"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1286,6 +1419,25 @@ function CredentialsSetup() {
 }
 
 function AwaitingLogin({ state }: { state: AppState }) {
+  // Hard-reset escape hatch: if the user gets stuck (e.g. BrowserView session
+  // is wedged after a manual logout, or autologin keeps failing silently)
+  // they can always fall back to the setup screen via this button. Without
+  // this, "登入" appears clickable in spirit but every interactive control
+  // lives inside the BrowserView — and if that view is in a bad state, the
+  // dashboard looks frozen ("登入但按了沒反應"). The button calls switchAccount
+  // with no payload, which fully resets everything and lands on setup.
+  const [resetting, setResetting] = useState(false);
+  async function hardReset() {
+    if (resetting) return;
+    if (!confirm("重設會清掉現在的登入狀態（包含右邊瀏覽器的 session），回到輸入帳密的畫面。確定？")) return;
+    setResetting(true);
+    try {
+      await window.api.switchAccount({ wipeSession: true });
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div className="h-full flex flex-col px-6 py-6 gap-4 overflow-hidden">
       <div className="text-center space-y-2">
@@ -1318,6 +1470,17 @@ function AwaitingLogin({ state }: { state: AppState }) {
             <div className="text-slate-500">（還沒有訊息）</div>
           )}
         </div>
+      </div>
+
+      <div className="flex justify-center">
+        <button
+          className="text-xs text-slate-400 hover:text-rose-300 underline disabled:opacity-50"
+          onClick={hardReset}
+          disabled={resetting}
+          title="如果右邊瀏覽器卡住或自動登入一直失敗，可以從這裡完全重設回輸入帳密的畫面"
+        >
+          {resetting ? "重設中…" : "卡住了？點我重設並重新輸入帳密"}
+        </button>
       </div>
     </div>
   );
