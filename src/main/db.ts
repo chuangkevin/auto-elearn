@@ -2,6 +2,7 @@ import { app } from "electron";
 import { existsSync, copyFileSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { getStorageDir } from "./persist/storage-paths";
 
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS learned_answers (
@@ -34,9 +35,9 @@ let _db: Database.Database | null = null;
 export function getDb(): Database.Database {
   if (_db) return _db;
 
-  const userDataDir = app.getPath("userData");
-  mkdirSync(userDataDir, { recursive: true });
-  const dbPath = join(userDataDir, "auto-elearn.db");
+  const storageDir = getStorageDir();
+  mkdirSync(storageDir, { recursive: true });
+  const dbPath = join(storageDir, "auto-elearn.db");
 
   // On first run, seed the 98K questions table from resources/mixed.db.
   // Packaged layout (electron-builder.yml asarUnpack: resources/**/*):

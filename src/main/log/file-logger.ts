@@ -1,7 +1,7 @@
-import { app } from "electron";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { getStorageDir } from "../persist/storage-paths";
 
 /**
  * 把 main process 的 log 同步寫到 userData/logs/main-YYYY-MM-DD.log。
@@ -31,7 +31,10 @@ export function getLogsDir(): string {
     // 把原本想記錄的錯誤吃掉。寫一次 userData 後再切回正規路徑。
     let primary: string | null = null;
     try {
-      primary = join(app.getPath("userData"), "logs");
+      // app ready 後 getStorageDir 會回傳 portable-mode 資料夾；
+      // 早期（app 還沒 ready）storage-paths 內部用到 app.getPath / app.isPackaged
+      // 也會炸，這條 try/catch 把它擋掉，讓 crash handler 退回 tmpdir。
+      primary = join(getStorageDir(), "logs");
     } catch {
       primary = null;
     }
@@ -49,13 +52,13 @@ export function getLogsDir(): string {
 }
 
 /**
- * app.whenReady 後呼叫一次，把 log 路徑從暫存目錄切到 userData/logs/。
+ * app.whenReady 後呼叫一次，把 log 路徑從暫存目錄切到 portable storage dir/logs/。
  * 早期 install 的 crash handler 在 module-load 階段先寫 tmpdir，避免
- * getPath('userData') 在那時段拋；ready 之後才能用正式路徑。
+ * getStorageDir() 在那時段（app 尚未 ready）拋；ready 之後才能用正式路徑。
  */
 export function rebindLogsDirToUserData(): void {
   try {
-    _logsDir = join(app.getPath("userData"), "logs");
+    _logsDir = join(getStorageDir(), "logs");
     if (!existsSync(_logsDir)) mkdirSync(_logsDir, { recursive: true });
   } catch {
     /* 拿不到就維持原狀 */

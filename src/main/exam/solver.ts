@@ -545,6 +545,8 @@ async function runOneAttempt(
     passingScore: number;
     /** key = normalised question text → forced option idx (skips matcher). */
     forcedAnswers?: Map<string, number>;
+    /** Course name forwarded to LLM matcher for domain context. */
+    courseName?: string;
   },
 ): Promise<AttemptResult> {
   await win.loadURL(examUrl);
@@ -581,7 +583,10 @@ async function runOneAttempt(
       source = "brute";
       confidence = 0;
     } else {
-      const r = await findBestAnswer(q.text, q.options, { skipMixedDb: opts.skipMixedDb });
+      const r = await findBestAnswer(q.text, q.options, {
+        skipMixedDb: opts.skipMixedDb,
+        courseName: opts.courseName,
+      });
       pickedIdx = r.pickedIdx;
       source = r.source;
       confidence = r.confidence;
@@ -670,6 +675,7 @@ async function runExamLoop(
   bySource: Record<AnswerSource, number>,
   onProgress: (msg: string) => void,
   passingScore = 80,
+  courseName?: string,
 ): Promise<number | null> {
   let best: number | null = null;
 
@@ -806,7 +812,7 @@ async function runExamLoop(
       `${label} #${attempt}`,
       bySource,
       onProgress,
-      { skipMixedDb, passingScore, forcedAnswers },
+      { skipMixedDb, passingScore, forcedAnswers, courseName },
     );
 
     // NOTE: do NOT update `best` here yet — the brute-force compare below
@@ -968,6 +974,10 @@ export async function solveExam(
      *  couldn't read the threshold. Caller (chain pipeline) usually passes
      *  the parsed per-course value. */
     passingScore?: number;
+    /** Course name (caption) — passed to the LLM so it can apply domain
+     *  knowledge about that specific course. Adds noticeable accuracy on
+     *  topical exams (e.g. 「資訊安全責任分級」 vs. generic 知識題). */
+    courseName?: string;
   } = {},
 ): Promise<SolveResult> {
   const onProgress = opts.onProgress ?? (() => void 0);
@@ -1038,6 +1048,7 @@ export async function solveExam(
         result.bySource,
         onProgress,
         passingScore,
+        opts.courseName,
       );
       result.score = score ?? undefined;
       result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute;
@@ -1056,6 +1067,7 @@ export async function solveExam(
         result.bySource,
         onProgress,
         passingScore,
+        opts.courseName,
       );
       result.readExamScore = rScore ?? undefined;
       if (!hasMainExam) {

@@ -1,10 +1,9 @@
-import { app } from "electron";
 import { request } from "undici";
 import fs from "node:fs";
-import path from "node:path";
+import { storagePath } from "../persist/storage-paths";
 
 /**
- * Minimal Gemini client. The API key lives in `userData/config.json` under
+ * Minimal Gemini client. The API key lives in `<storage-dir>/config.json` under
  * `geminiApiKey`. If the file or key is absent, every call returns null so the
  * caller can fall back to a generic string / skip.
  */
@@ -17,7 +16,7 @@ interface LocalConfig {
 }
 
 function configPath(): string {
-  return path.join(app.getPath("userData"), "config.json");
+  return storagePath("config.json");
 }
 
 export function loadConfig(): LocalConfig {

@@ -1245,17 +1245,45 @@ function CredentialsSetup() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [hardResetting, setHardResetting] = useState(false);
 
   async function submit() {
     setErr(null);
     if (!account.trim() || !password) { setErr("帳號和密碼都要填"); return; }
     setBusy(true);
+    // 10 秒 timeout：有時 saveCredentialsManual 看似 resolve 但 main 端 tryAutoLogin
+    // 卡在 SSO chain，state 不翻 → 使用者按了沒反應。明確顯示「重試」按鈕。
+    const timeout = window.setTimeout(() => {
+      setBusy(false);
+      setErr("登入超時，請再試一次（如果一直失敗，請按下方「完全重置」）");
+    }, 10_000);
     try {
       const res = await window.api.saveCredentialsManual({ account: account.trim(), password });
-      if (!res.ok) { setErr(res.reason ?? "儲存失敗"); return; }
+      window.clearTimeout(timeout);
+      if (!res.ok) { setErr(res.reason ?? "儲存失敗"); setBusy(false); return; }
       setSaved(true);
-    } finally {
+      // saved=true 時 busy 已不重要；不再 setBusy(false) 以免閃爍。
+    } catch (e) {
+      window.clearTimeout(timeout);
+      setErr(e instanceof Error ? e.message : String(e));
       setBusy(false);
+    }
+  }
+
+  async function hardReset() {
+    if (hardResetting) return;
+    setHardResetting(true);
+    try {
+      // switchAccount 會 destroy + 重建 BrowserView、清掉本機帳密、重置 state。
+      // 對「卡在中間狀態」是萬靈丹級的 nuke。
+      await window.api.switchAccount();
+    } finally {
+      setHardResetting(false);
+      setErr(null);
+      setBusy(false);
+      setSaved(false);
+      setAccount("");
+      setPassword("");
     }
   }
 
@@ -1283,7 +1311,7 @@ function CredentialsSetup() {
       <div className="w-full max-w-sm space-y-3">
         <input
           className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-          placeholder="帳號（身分證字號）"
+          placeholder="帳號"
           value={account}
           onChange={(e) => setAccount(e.target.value)}
           disabled={busy}
@@ -1300,21 +1328,45 @@ function CredentialsSetup() {
         />
         {err && <p className="text-red-400 text-sm">{err}</p>}
         <button
-          className="w-full py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 font-semibold"
+          className="w-full py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 font-semibold flex items-center justify-center gap-2"
           disabled={busy}
           onClick={submit}
         >
-          {busy ? "記住中…" : "記住帳號並登入"}
+          {busy && (
+            <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+          )}
+          {busy ? "登入中…" : "記住帳號並登入"}
         </button>
         <p className="text-slate-500 text-xs text-center">
           也可以直接在右邊網頁裡自己登入
         </p>
+        <button
+          className="w-full py-1.5 mt-4 rounded text-xs text-slate-400 border border-slate-700 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-40"
+          disabled={hardResetting}
+          onClick={hardReset}
+          title="把右邊瀏覽器整個重新建立、清掉本機帳密、回到第一次使用畫面 — 卡住時的萬用解法"
+        >
+          {hardResetting ? "重置中…" : "完全重置"}
+        </button>
       </div>
     </div>
   );
 }
 
 function AwaitingLogin({ state }: { state: AppState }) {
+  const [hardResetting, setHardResetting] = useState(false);
+
+  async function hardReset() {
+    if (hardResetting) return;
+    if (!window.confirm("完全重置會：\n\n• 重新建立右邊瀏覽器\n• 清掉這台電腦記得的帳密\n• 回到第一次使用畫面\n\n確定要重置嗎？")) return;
+    setHardResetting(true);
+    try {
+      await window.api.switchAccount();
+    } finally {
+      setHardResetting(false);
+    }
+  }
+
   return (
     <div className="h-full flex flex-col px-6 py-6 gap-4 overflow-hidden">
       <div className="text-center space-y-2">
@@ -1348,6 +1400,15 @@ function AwaitingLogin({ state }: { state: AppState }) {
           )}
         </div>
       </div>
+
+      <button
+        className="w-full py-1.5 rounded text-xs text-slate-400 border border-slate-700 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-40"
+        disabled={hardResetting}
+        onClick={hardReset}
+        title="把右邊瀏覽器整個重新建立、清掉本機帳密、回到第一次使用畫面 — 卡住時的萬用解法"
+      >
+        {hardResetting ? "重置中…" : "卡住沒反應？點這裡完全重置"}
+      </button>
     </div>
   );
 }

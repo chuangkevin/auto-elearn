@@ -112,7 +112,7 @@ const LLM_GATE_CONFIDENCE = 0.8;
 export async function findBestAnswer(
   questionText: string,
   options: string[],
-  opts: { skipMixedDb?: boolean } = {},
+  opts: { skipMixedDb?: boolean; courseName?: string } = {},
 ): Promise<{ source: AnswerSource; pickedIdx: number; confidence: number }> {
   // Layer 1: learned_answers (highest priority — we observed this correct before)
   const learned = lookupLearnedAnswer(questionText);
@@ -137,8 +137,8 @@ export async function findBestAnswer(
     }
   }
 
-  // Layer 3: Gemini LLM
-  const llmMatch = await matchWithLlm(questionText, options);
+  // Layer 3: Gemini LLM with course-name context (when available)
+  const llmMatch = await matchWithLlm(questionText, options, opts.courseName);
   if (llmMatch) {
     return { source: "llm", pickedIdx: llmMatch.pickedIdx, confidence: llmMatch.confidence };
   }
@@ -159,15 +159,23 @@ export async function findBestAnswer(
 
 /**
  * Ask Gemini to pick the correct option. Returns null if no key, request fails,
- * or confidence too low.
+ * or confidence too low. `courseName`（若提供）會放進 prompt 當主題提示，讓
+ * Gemini 用該課程的領域知識作答 — 這是 v0.7.9 起取代「真的去 web search」
+ * 的輕量方案：Gemini 對台灣公務員訓練常見科目（資安、人權、淨零、家庭教育、
+ * AI 應用…）的內容掌握度高，給上下文就能顯著拉高命中率，而且不需要
+ * Google Search API quota 跟 grounding 配置。
  */
 export async function matchWithLlm(
   questionText: string,
   options: string[],
+  courseName?: string,
 ): Promise<{ pickedIdx: number; confidence: number } | null> {
   if (!hasGeminiKey() || options.length === 0) return null;
   const optLines = options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("\n");
-  const prompt = `你是台灣公務員訓練題目解題助手。請從以下選項挑出正確答案。
+  const courseLine = courseName?.trim()
+    ? `\n課程主題：${courseName.trim()}（請依此主題的常識選擇最符合的答案）`
+    : "";
+  const prompt = `你是台灣公務員訓練題目解題助手。請依該題的領域知識選出正確答案。${courseLine}
 題目：${questionText}
 選項：
 ${optLines}

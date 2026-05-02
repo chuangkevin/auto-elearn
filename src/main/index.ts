@@ -16,7 +16,7 @@ import {
   type ViewBounds,
 } from "../shared/ipc";
 import { createBus } from "./bus";
-import { attachElearnView, autoLoginInView, detectLogin, dismissNuisancePopups } from "./browser/view";
+import { attachElearnView, autoLoginInView, detachElearnView, detectLogin, dismissNuisancePopups } from "./browser/view";
 import { loadConfig, saveConfig, setGeminiLogger } from "./llm/gemini";
 import { discover } from "./course/discovery";
 import { enrollMany } from "./course/enrollment";
@@ -57,6 +57,8 @@ import { maskAccount, maskName, maskSecretsInString } from "../shared/mask";
 import { existsSync, mkdirSync, writeFileSync as fsWriteFileSync } from "node:fs";
 import { appendLogLine, getLogsDir, installCrashHandlers, rebindLogsDirToUserData } from "./log/file-logger";
 import { migrateFromOldUserDataIfNeeded } from "./persist/migrate-userdata";
+import { getStorageDir, storagePath } from "./persist/storage-paths";
+import { migrateUserDataToPortableIfNeeded } from "./persist/migrate-portable";
 
 // 必須在 app.whenReady 之前 install — 模組載入階段就可能因為 native 模組
 // （better-sqlite3 / bindings 等）打不開或被防毒砍掉而炸 "Cannot find module"，
@@ -88,11 +90,11 @@ function maskLog(msg: string): string {
 }
 
 /**
- * 首次執行旗標 — 寫在 userData 下的 .first-run-acked。
+ * 首次執行旗標 — 寫在 portable storage dir 下的 .first-run-acked。
  * 沒這個檔 = 第一次跑，UI 會在啟動時跳出「Windows 首次封鎖怎麼處理」說明。
  */
 function firstRunFlagPath(): string {
-  return join(app.getPath("userData"), ".first-run-acked");
+  return storagePath(".first-run-acked");
 }
 function isFirstRun(): boolean {
   try {
@@ -103,7 +105,7 @@ function isFirstRun(): boolean {
 }
 function ackFirstRun(): void {
   try {
-    const dir = app.getPath("userData");
+    const dir = getStorageDir();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     fsWriteFileSync(firstRunFlagPath(), new Date().toISOString(), "utf8");
   } catch {
@@ -371,15 +373,19 @@ function createWindow() {
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 
-  // Hide-to-tray on user-initiated close. Only let the close proceed when the
-  // app is genuinely shutting down (tray "結束" / ACTION_ABORT / before-quit
-  // already fired). Without this, the X button kills the heartbeat pipeline
-  // mid-run and the user has to relaunch + re-login.
-  mainWindow.on("close", (e) => {
-    if (isQuittingForReal) return;
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    e.preventDefault();
-    mainWindow.hide();
+  // X 按鈕直接結束整個 process（v0.7.9 修法）。
+  //
+  // 之前的邏輯是 hide-to-tray —— 設計初衷是讓 heartbeat 在背景繼續跑。但實務
+  // 災情：使用者反覆遇到「state machine 卡在中間狀態，X 又關不乾淨」（背景還
+  // 留一個半死的 process，下次再開撞 single-instance lock 或 state 殘留）。
+  // tray 「結束」也常常沒人會點。
+  //
+  // 改成直接 quit。仍然保留 tray 圖示（雙擊把已開的視窗叫回來），但 X 一按
+  // 整個 process 就退場 —— 沒有半死狀態、沒有「我已經關了怎麼還在背景跑」的疑問。
+  // 失去的功能：背景刷課，但 v0.7.9 之後使用者可以放著主視窗開著、最小化即可。
+  mainWindow.on("close", () => {
+    isQuittingForReal = true;
+    // 不 preventDefault；讓 close 正常進行，window-all-closed 會走 app.quit()
   });
 
   setupTray(iconPath);
@@ -395,7 +401,125 @@ function createWindow() {
     mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
-  elearnView = attachElearnView(mainWindow, HOMEPAGE, (reason) => {
+  buildElearnView(HOMEPAGE);
+
+  if (hasSavedCredentials()) {
+    // 預先把帳號加進隱碼名單；之後若 log 不慎打到原始帳號也會自動換成隱碼版。
+    const c = loadCredentials();
+    if (c?.account) pushSecretToMaskList(c.account, maskAccount(c.account));
+    state.status = "await_login";
+    log("info", "已記得你的帳號，背景幫你登入中…");
+    void tryAutoLogin().catch(() => void 0);
+  } else {
+    state.status = "setup";
+    log("info", "第一次使用：請輸入人事服務網（e 等公務園）的帳號密碼");
+    // 即便 state=setup（沒存帳密），使用者還是可以直接在右邊 BrowserView
+    // 自己登入；30 秒後若仍卡在 setup 但 BrowserView 已登入，就 fallback 翻
+    // 過去 selecting 狀態，不要逼使用者再到左邊填一次。
+    startSetupFallbackTimer();
+  }
+  state.isFirstRun = isFirstRun();
+  pushState();
+  startStuckStateWatchdog();
+}
+
+/**
+ * Stuck-state watchdog：每 15 秒檢查 state 有沒有「不正常的中間狀態」並超時。
+ * - status=await_login 連續超過 5 分鐘沒翻到 selecting → BrowserView 大概率掛了，
+ *   提示使用者按完全重置（log）並把 status 強拉回 setup（讓使用者重新輸入）。
+ * - status=enrolling 連續超過 3 分鐘 → 同上，pipeline 起步卡住。
+ * 不會在 status=running 觸發（heartbeat 階段時數很長是合理的）。
+ */
+let stuckWatchdogTimer: NodeJS.Timeout | null = null;
+let lastStatusChangeAt = Date.now();
+let lastObservedStatus: AppState["status"] = "boot";
+function startStuckStateWatchdog() {
+  if (stuckWatchdogTimer) return;
+  stuckWatchdogTimer = setInterval(() => {
+    if (state.status !== lastObservedStatus) {
+      lastObservedStatus = state.status;
+      lastStatusChangeAt = Date.now();
+      return;
+    }
+    const stuckMs = Date.now() - lastStatusChangeAt;
+    const status = state.status;
+    if (status === "await_login" && stuckMs > 5 * 60_000) {
+      log(
+        "warn",
+        "登入流程卡住超過 5 分鐘，自動回到「第一次使用」畫面（請按「完全重置」徹底清掉狀態）",
+      );
+      state.status = "setup";
+      state.loginStatus = undefined;
+      pushState();
+      startSetupFallbackTimer();
+      lastStatusChangeAt = Date.now();
+    } else if (status === "enrolling" && stuckMs > 3 * 60_000) {
+      log("warn", "選課流程卡住超過 3 分鐘，自動回到課程列表（請按「完全重置」嘗試）");
+      state.status = "selecting";
+      pushState();
+      lastStatusChangeAt = Date.now();
+    }
+  }, 15_000);
+}
+
+/**
+ * 30 秒 fallback：state=setup 但右邊 BrowserView 其實已經登入了 → 直接翻到
+ * detectLogin 路徑（refreshCourses + state=selecting），免得使用者卡住按按鈕沒反應。
+ * 任何 state 不再是 setup 就 cancel。
+ */
+let setupFallbackTimer: NodeJS.Timeout | null = null;
+function clearSetupFallbackTimer() {
+  if (setupFallbackTimer) {
+    clearTimeout(setupFallbackTimer);
+    setupFallbackTimer = null;
+  }
+}
+function startSetupFallbackTimer() {
+  clearSetupFallbackTimer();
+  setupFallbackTimer = setTimeout(async () => {
+    setupFallbackTimer = null;
+    if (state.status !== "setup") return;
+    if (!elearnView) return;
+    const loggedIn = await isBrowserViewLoggedIn().catch(() => null);
+    if (loggedIn !== true) return;
+    log(
+      "info",
+      "偵測到右邊 BrowserView 已登入，但左邊還在「第一次使用」畫面 — 自動切換到操作畫面",
+    );
+    // detectLogin 同時也會 fire（polling），race 也 OK：兩邊都會走到 selecting，
+    // pushState 是 idempotent。但這裡先把 status 翻過去，至少 UI 不會卡。
+    state.status = "selecting";
+    pushState();
+    try {
+      await dismissNuisancePopups(elearnView.webContents);
+      await refreshCourses();
+    } catch (e) {
+      log("warn", `fallback 後刷新課程失敗：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 30_000);
+}
+
+/**
+ * Build (or rebuild) the embedded BrowserView. Idempotent — destroys the old
+ * view first so 切換帳號 / 完全重置 can call this to wipe any stale state
+ * (including ServiceWorker / partition data only Chromium itself can flush).
+ *
+ * Re-wires:
+ *  - logout-detected callback
+ *  - login sniffer
+ *  - detectLogin polling → refreshCourses → state=selecting
+ *  - bounds reset (renderer pushes real bounds via VIEW_BOUNDS)
+ */
+function buildElearnView(initialUrl: string): void {
+  if (!mainWindow) return;
+
+  // Tear down any existing view first so we never have two attached.
+  if (elearnView) {
+    detachElearnView(mainWindow, elearnView);
+    elearnView = null;
+  }
+
+  elearnView = attachElearnView(mainWindow, initialUrl, (reason) => {
     // BrowserView 上偵測到使用者登出（不論是 click 登出、還是登出後 server
     // 回了 text/css 之類非 HTML 內容讓 Chromium 顯示原始碼）。
     // 直接導回 eCPA 登入頁；如果還記得帳密就走 auto-login，否則就讓使用者
@@ -416,20 +540,6 @@ function createWindow() {
     pendingSniffed = creds;
     log("info", "已偵測到 eCPA 登入表單，待登入成功後會詢問是否儲存帳密");
   });
-
-  if (hasSavedCredentials()) {
-    // 預先把帳號加進隱碼名單；之後若 log 不慎打到原始帳號也會自動換成隱碼版。
-    const c = loadCredentials();
-    if (c?.account) pushSecretToMaskList(c.account, maskAccount(c.account));
-    state.status = "await_login";
-    log("info", "已記得你的帳號，背景幫你登入中…");
-    void tryAutoLogin().catch(() => void 0);
-  } else {
-    state.status = "setup";
-    log("info", "第一次使用：請輸入人事服務網（e 等公務園）的帳號密碼");
-  }
-  state.isFirstRun = isFirstRun();
-  pushState();
 
   detectLogin(elearnView.webContents)
     .then(async (user) => {
@@ -1158,6 +1268,7 @@ async function runPipelineFor(cids: string[]): Promise<void> {
             res = await solveExam(cid, session, {
               onProgress: (msg) => log("info", `  [${name}] ${msg}`),
               passingScore: threshold,
+              courseName: name,
             });
             if (!res.ok) {
               log("warn", `測驗失敗 ${name}：${res.error ?? "unknown"}`);
@@ -1258,14 +1369,30 @@ async function runPipelineFor(cids: string[]): Promise<void> {
 
       // Only mark phase=done when SERVER confirms 通過狀態 == 通過. That
       // can lag behind 問卷 submission by a few seconds while elearn
-      // finalises the credit. Poll detail up to 30 s before giving up.
+      // finalises the credit. Poll detail up to ~120 s (was 30 s — too tight
+      // for some agencies whose server batches the credit roll-up). Also
+      // explicitly verify both 測驗 and 問卷 are credited per server detail
+      // page; if either is missing we DON'T silently hold the card at
+      // "verifying" — we log the specific gap and reset the per-card flag so
+      // the UI no longer shows that sub-step as ✓. Lying with a green check
+      // is worse than honestly saying「測驗 server 端未顯示通過」.
       if (card && card.phase !== "done") {
-        for (let i = 0; i < 6; i++) {
+        const passingScore = fresh?.passingScore ?? 80;
+        let lastDetail: Awaited<ReturnType<typeof fetchCourseDetail>> | null = null;
+        for (let i = 0; i < 12; i++) {
           if (abortSignal.aborted) break;
-          await new Promise((r) => setTimeout(r, 5000));
+          await new Promise((r) => setTimeout(r, 10_000));
           const final = await fetchCourseDetail(session, cid).catch(() => null);
+          lastDetail = final;
           if (final?.passed === true) {
             card.phase = "done";
+            // Re-affirm the sub-flags from server detail so UI matches truth
+            // (some early-set client flags could stay true when server
+            // wouldn't actually count it — re-set from authoritative source).
+            if (final.examScore != null) {
+              card.examDone = final.examScore >= passingScore;
+            }
+            if (final.surveyDone != null) card.surveyDone = final.surveyDone;
             updateStats();
             pushState();
             log("info", `[${name}] ✅ server 已確認通過`);
@@ -1273,10 +1400,38 @@ async function runPipelineFor(cids: string[]): Promise<void> {
           }
         }
         if (card.phase !== "done") {
-          log(
-            "info",
-            `[${name}] 問卷已交但 server 通過狀態尚未刷新；保持「等待通過確認」狀態，server 應會自動更新`,
-          );
+          // Surface exactly what server thinks is missing so user can act.
+          // Common cases:
+          //  - examScore < passingScore : exam未真的通過（chain 標 examOK 是
+          //    依本機 res.passed，但 server 端的閱卷有時 lag / 翻盤 → 真實未通過）
+          //  - surveyDone === false : 問卷 server 端沒記
+          //  - 兩個都 OK 但 passed === false : 還在 server 處理中
+          const gaps: string[] = [];
+          if (lastDetail?.examScore != null && lastDetail.examScore < passingScore) {
+            gaps.push(`測驗 ${lastDetail.examScore}/${passingScore} 分（未通過）`);
+            if (card.examDone) {
+              card.examDone = false;
+              pushState();
+            }
+          }
+          if (lastDetail?.surveyDone === false) {
+            gaps.push("問卷 server 端未記");
+            if (card.surveyDone) {
+              card.surveyDone = false;
+              pushState();
+            }
+          }
+          if (gaps.length > 0) {
+            log(
+              "warn",
+              `[${name}] ❌ server 沒記到：${gaps.join("、")}；UI 已同步取消勾選，請點該課重跑或按完全重置`,
+            );
+          } else {
+            log(
+              "info",
+              `[${name}] 問卷已交但 server 通過狀態尚未刷新（120s 內未翻為「通過」）；保持「等待通過確認」狀態，下次 refresh 應會自動更新`,
+            );
+          }
         }
       }
     } catch (e) {
@@ -1641,7 +1796,7 @@ ipcMain.handle(IPC.STEALTH_STATUS, () => stealthCurrentState());
 ipcMain.handle(IPC.STEALTH_UNLOCK, (_evt, secret: string) => stealthTryUnlock(secret));
 ipcMain.handle(IPC.STEALTH_SET_SECRET, (_evt, secret: string) => stealthSetSecret(secret));
 ipcMain.on(IPC.STEALTH_LOCK, () => stealthLock());
-ipcMain.handle(IPC.STEALTH_CONFIG_PATH, () => join(app.getPath("userData"), "config.json"));
+ipcMain.handle(IPC.STEALTH_CONFIG_PATH, () => storagePath("config.json"));
 
 ipcMain.handle(IPC.GEMINI_KEY_GET, () => loadConfig().geminiApiKey ?? "");
 ipcMain.handle(IPC.GEMINI_KEY_SET, (_evt, key: string) => {
@@ -1951,6 +2106,8 @@ ipcMain.handle(IPC.CREDS_SWITCH_ACCOUNT, async () => {
 
   // 把 BrowserView 的 session cookie 清乾淨，不然下次 auto-login 會撞到舊
   // session 直接被 SSO 視為「已登入」、走不到 GetApTicketV2 那一步。
+  // 即使等下會 destroy 整個 view，先清 cookies 是雙重保險（cookie 寫在 session
+  // 上，destroy view 不一定會把 default session 的 cookie 一起清）。
   if (elearnView) {
     await elearnView.webContents.session
       .clearStorageData({
@@ -1976,13 +2133,26 @@ ipcMain.handle(IPC.CREDS_SWITCH_ACCOUNT, async () => {
   state.courses = [];
   pushState();
 
-  // BrowserView 帶回 eCPA 登入頁；abortSignal.aborted = true 已防掉 in-flight
-  // pipeline，但 abortSignal 是個 mutable singleton，得在 setup 完之後 reset，
-  // 不然下次 PIPELINE_START 一進去就直接 abort。
-  if (elearnView) {
-    const ECPA_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
-    await elearnView.webContents.loadURL(ECPA_URL).catch(() => void 0);
+  // 直接 destroy + 重建整顆 BrowserView，導到 eCPA 登入頁。
+  // 為什麼要重建：v0.7.6/v0.7.8 之前只 reload URL + 清 cookies，但有三個觀察到的後遺症：
+  //  (1) detectLogin polling 在前一輪登入時就已 resolve；新一輪登入沒人偵測，
+  //      狀態卡在 setup，左邊操作區顯示「第一次使用」但右邊 BrowserView 已登入。
+  //  (2) 部分使用者回報 BrowserView 在切換後變成「原始碼/亂碼」畫面 —— 跟 logout
+  //      response 用 text/css content-type 有關，舊 view 上殘留的 listener 跟新 nav
+  //      的 race 條件會讓 hard-redirect 失效。
+  //  (3) 切換後左邊 input 框點不到 / 打不進字 —— BrowserView 即使縮到 0×0 也會
+  //      搶到 keyboard focus（Electron 設計）。destroy 它再把 focus 拉回 mainWindow
+  //      就解了；只 reload URL 不會 release focus。
+  // 整顆 view 重建：fresh webContents、fresh listeners、fresh detectLogin polling、
+  // 永遠不會繼承上一輪的奇怪中間狀態。
+  buildElearnView("https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD");
+  // destroy + rebuild 後 keyboard focus 仍卡在「已 destroy 的 view」遺址，新 view
+  // 還沒接到游標前，左邊 React input 也打不進字。明確把 focus 拉回主視窗。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+    mainWindow.webContents.focus();
   }
+  startSetupFallbackTimer();
   abortSignal.aborted = false;
   return { ok: true };
 });
@@ -2072,10 +2242,13 @@ if (!gotLock) {
   app.whenReady().then(() => {
     electronApp.setAppUserModelId("tw.kevin.auto-elearn");
 
-    // 必須在任何讀寫 userData 的程式碼（hasSavedCredentials / loadConfig /
-    // db.ts / loadRun 等）之前跑：v0.5.x 的舊資料夾複製到 v0.6.x 的新位置。
+    // 必須在任何讀寫資料的程式碼（hasSavedCredentials / loadConfig /
+    // db.ts / loadRun 等）之前跑：兩道遷移依序執行 ——
+    //  1. v0.5.x → v0.6.x：%APPDATA%/auto-elearn/ → %APPDATA%/Noteqad/
+    //  2. v0.7.8 → v0.7.9：%APPDATA%/Noteqad/    → portable folder (.exe 旁)
     // 否則升級的使用者會被當成「全新使用者」，要重設帳密 + 偽裝密碼。
     const mig = migrateFromOldUserDataIfNeeded();
+    const portMig = migrateUserDataToPortableIfNeeded();
 
     // crash handler 已在模組載入時 install；現在 app ready 了，把 log 路徑
     // 從 OS 暫存目錄切回正規的 userData/logs/。
@@ -2094,9 +2267,27 @@ if (!gotLock) {
       for (const f of mig.failed) {
         log("warn", `搬家失敗：${f.file} — ${f.reason}`);
       }
-    } else {
-      // 不是從 v0.5.x 升上來，或之前已經遷移過 — 不洗版，輕量記一筆方便除錯
-      appendLogLine("info", `userData 路徑：${app.getPath("userData")}（無需遷移）`);
+    }
+    if (portMig.ranThisLaunch) {
+      log(
+        "info",
+        `已切換為 portable 模式：把 %APPDATA% 的資料搬到 .exe 旁邊的資料夾：` +
+          `成功 ${portMig.migrated.length} 個（${portMig.migrated.join(", ") || "—"}）` +
+          (portMig.skippedAlreadyExists.length
+            ? `；跳過已存在 ${portMig.skippedAlreadyExists.length} 個`
+            : "") +
+          (portMig.failed.length ? `；失敗 ${portMig.failed.length} 個` : ""),
+      );
+      for (const f of portMig.failed) {
+        log("warn", `portable 搬家失敗：${f.file} — ${f.reason}`);
+      }
+    }
+    if (!mig.ranThisLaunch && !portMig.ranThisLaunch) {
+      // 全新環境或之前已遷移過 — 不洗版，輕量記一筆方便除錯
+      appendLogLine(
+        "info",
+        `資料夾：${getStorageDir()}（portable 模式：${app.isPackaged ? "是" : "否（dev）"}）`,
+      );
     }
 
     app.on("browser-window-created", (_, w) => optimizer.watchWindowShortcuts(w));

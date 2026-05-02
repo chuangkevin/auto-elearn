@@ -1,6 +1,5 @@
-import { app } from "electron";
 import fs from "node:fs";
-import path from "node:path";
+import { storagePath } from "./storage-paths";
 
 export interface PersistedRun {
   pipelineCids: string[];
@@ -10,7 +9,7 @@ export interface PersistedRun {
 }
 
 function filePath(): string {
-  return path.join(app.getPath("userData"), "run-state.json");
+  return storagePath("run-state.json");
 }
 
 export function saveRun(run: PersistedRun): void {

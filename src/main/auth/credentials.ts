@@ -1,6 +1,6 @@
-import { app, safeStorage } from "electron";
+import { safeStorage } from "electron";
 import fs from "node:fs";
-import path from "node:path";
+import { storagePath } from "../persist/storage-paths";
 
 export interface SavedCredentials {
   /** Full ID captured from GetApTicketV2 (身分證字號 format) */
@@ -13,7 +13,7 @@ export interface SavedCredentials {
 }
 
 function filePath(): string {
-  return path.join(app.getPath("userData"), "credentials.bin");
+  return storagePath("credentials.bin");
 }
 
 export function credentialsAvailable(): boolean {

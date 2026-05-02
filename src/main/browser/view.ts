@@ -201,6 +201,35 @@ async function isShowingRawSource(wc: WebContents): Promise<boolean> {
 }
 
 /**
+ * Tear down a BrowserView attached to a window — symmetric counterpart to
+ * `attachElearnView`. Accept any view (current or stale) so callers can rebuild
+ * fresh ones for "切換帳號" / 「完全重置」 flows where reusing the cookie jar
+ * has caused weird intermediate states (raw-source render, dead handlers).
+ */
+export function detachElearnView(win: BrowserWindow, view: BrowserView | null): void {
+  if (!view) return;
+  try {
+    win.removeBrowserView(view);
+  } catch {
+    /* main window 已 destroy / view 已 detach — 沒事 */
+  }
+  try {
+    view.webContents.removeAllListeners();
+  } catch {
+    /* webContents already destroyed */
+  }
+  // BrowserView 沒 destroy() — 把 webContents 關掉 GC 自然回收。
+  // 用 close() 而非 destroy() 是因為 destroy 在某些 Electron 版本上會 throw。
+  try {
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.close();
+    }
+  } catch {
+    /* 已 destroy */
+  }
+}
+
+/**
  * Mount an elearn-only BrowserView onto the main window.
  * Caller is responsible for setBounds().
  *
@@ -254,6 +283,12 @@ export function attachElearnView(
   // Logout detection: fire callback when we see a logout URL OR a non-HTML
   // raw-source response. De-bounced via `lastFiredAt` so we don't spam the
   // caller during the redirect chain that follows logout.
+  //
+  // 強化版（v0.7.9）：raw-source 命中時除了通知 caller 外，也直接把 view 導
+  // 回 eCPA 登入頁。原本「只通知 caller」的問題是 caller 處理 race（auto-login
+  // 在跑時直接 return）會留下原始碼畫面 → 使用者看到亂碼一直到下次 navigate。
+  // 直接內建一道強制 reload 確保不會有「畫面一直是亂碼」的中間狀態。
+  const ECPA_LOGIN_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
   if (onLogoutDetected) {
     let lastFiredAt = 0;
     const fire = (reason: "url" | "raw-source") => {
@@ -271,7 +306,30 @@ export function attachElearnView(
     view.webContents.on("did-finish-load", () => {
       // 0.4 s grace so the page actually commits + DOM is queryable
       setTimeout(async () => {
-        if (await isShowingRawSource(view.webContents)) fire("raw-source");
+        if (await isShowingRawSource(view.webContents)) {
+          fire("raw-source");
+          // Hard-redirect to eCPA login so the BrowserView never sits on a
+          // raw-source page even if caller's logout handler is throttled out.
+          try {
+            await view.webContents.loadURL(ECPA_LOGIN_URL);
+          } catch {
+            /* nav races are fine — caller's handler will retry */
+          }
+        }
+      }, 400);
+    });
+  } else {
+    // No caller-side logout handling — still hard-redirect raw-source pages
+    // so the user never stares at gibberish.
+    view.webContents.on("did-finish-load", () => {
+      setTimeout(async () => {
+        if (await isShowingRawSource(view.webContents)) {
+          try {
+            await view.webContents.loadURL(ECPA_LOGIN_URL);
+          } catch {
+            /* swallow */
+          }
+        }
       }, 400);
     });
   }
