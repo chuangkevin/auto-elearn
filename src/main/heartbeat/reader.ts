@@ -156,13 +156,16 @@ export async function extractTicket(
    *  Without it we fall back to "first non-env-check" which can pick the
    *  wrong lesson and silently send heartbeats that never credit. */
   caption?: string,
+  /** v0.8.0 多帳號：必須帶該帳號的 partition session，不然這個 hidden window
+   *  會用 default session、沒有任何 cookie，server 直接踢回登入頁。 */
+  session?: Electron.Session,
 ): Promise<TicketInfo | null> {
   // Throttle parallel extraction so elearn's 多重視窗 guard doesn't shunt
   // half the batch into /mooc/warning.php. After this slot is released the
   // pure-HTTP heartbeat still runs at full parallelism.
   await acquireElearnWindowSlot();
   try {
-    return await _extractTicketImpl(cid, timeoutMs, caption);
+    return await _extractTicketImpl(cid, timeoutMs, caption, session);
   } finally {
     releaseElearnWindowSlot();
   }
@@ -172,6 +175,7 @@ async function _extractTicketImpl(
   cid: string,
   timeoutMs = 30_000,
   caption?: string,
+  session?: Electron.Session,
 ): Promise<TicketInfo | null> {
   void cid; // referenced inside dump filename below
   const win = new BrowserWindow({
@@ -179,6 +183,7 @@ async function _extractTicketImpl(
     width: 1280,
     height: 800,
     webPreferences: {
+      ...(session ? { session } : {}),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -602,12 +607,22 @@ async function _extractTicketImpl(
  * Returns true if the API was found and the finish calls fired.  Returns
  * false gracefully for video-only courses that have no SCORM API.
  */
-export async function executeScormFinish(cid: string, timeoutMs = 45_000): Promise<boolean> {
+export async function executeScormFinish(
+  cid: string,
+  timeoutMs = 45_000,
+  /** v0.8.0 多帳號：傳該帳號的 partition session，不然此 hidden window 跑空 cookie。 */
+  session?: Electron.Session,
+): Promise<boolean> {
   const win = new BrowserWindow({
     show: false,
     width: 1280,
     height: 800,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: {
+      ...(session ? { session } : {}),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
   });
 
   try {

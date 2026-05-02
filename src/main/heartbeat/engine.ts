@@ -90,7 +90,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   // 查客 series) need this to grab THEIR lesson rather than a sibling's.
   let ticket: Awaited<ReturnType<typeof extractTicket>> = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    ticket = await extractTicket(cid, 30_000, caption);
+    ticket = await extractTicket(cid, 30_000, caption, session);
     if (ticket) break;
     if (attempt < 3) await sleep(5000 + Math.random() * 3000);
   }
@@ -345,7 +345,7 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   // Only needed when the HTTP finish didn't already confirm completion.
   if (!serverConfirmed) {
     try {
-      const scormDone = await executeScormFinish(cid);
+      const scormDone = await executeScormFinish(cid, 45_000, session);
       opts.onProgress?.(cid, "tick", { scormFinish: scormDone });
     } catch (e) {
       opts.onProgress?.(cid, "error", {

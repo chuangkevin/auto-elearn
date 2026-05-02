@@ -230,6 +230,20 @@ export function detachElearnView(win: BrowserWindow, view: BrowserView | null): 
 }
 
 /**
+ * 把 view 暫時藏起來（移到視窗外的 0×0 bounds），但保持 attach + listeners + cookies +
+ * heartbeat 仍在跑。v0.8.0 多帳號用：tab bar 切換時，非 active 帳號的 view 用這條
+ * 而不是 detach，這樣 pipeline 可以繼續在背景跑。
+ */
+export function hideElearnView(view: BrowserView | null): void {
+  if (!view) return;
+  try {
+    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  } catch {
+    /* view destroyed already — caller mistake but harmless */
+  }
+}
+
+/**
  * Mount an elearn-only BrowserView onto the main window.
  * Caller is responsible for setBounds().
  *
@@ -241,12 +255,17 @@ export function attachElearnView(
   win: BrowserWindow,
   url: string,
   onLogoutDetected?: (reason: "url" | "raw-source") => void,
+  opts: { partition?: string } = {},
 ): BrowserView {
   const view = new BrowserView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // 多帳號模式必備：每個帳號各自一條 cookie jar（persist:elearn-<id>），
+      // 不同帳號之間不會 cookie 互相污染、auto-login 也不會被另一個帳號的 idx
+      // cookie 短路掉。沒帶就用 default session（v0.7.x 行為）。
+      ...(opts.partition ? { partition: opts.partition } : {}),
       // Chromium-level kill switch for JS alert/confirm/prompt — much
       // earlier than any frame-created / dom-ready hook because it
       // intercepts at the renderer process level. SCORM player's
@@ -255,7 +274,10 @@ export function attachElearnView(
       disableDialogs: true,
     },
   });
-  win.setBrowserView(view);
+  // v0.8.0：多帳號用 addBrowserView，每個帳號各自掛一個 view。setBrowserView 會
+  // 把現有的 view 全替換掉（單帳號模式合理），但多帳號要的是「全部 attach、靠
+  // bounds 控制誰可見」，必須用 add 系列 API。
+  win.addBrowserView(view);
   // 預設把 BrowserView 整個靜音 —— 課程影片自動播放會炸出聲音，使用者在公司
   // 上班放著刷課很尷尬。Electron 的 webContents.setAudioMuted 是分頁等級的控制，
   // 不會影響系統音量、不會 mute 整個 app，純粹只 silence elearn 那塊嵌入畫面。

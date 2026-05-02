@@ -2,11 +2,10 @@ import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Noteqad from "./Noteqad";
 import type {
+  AccountOpResult,
   AppState,
   AutoLoginProgress,
   CourseCandidate,
-  CredentialsStatus,
-  CredsPromptPayload,
   ResumePrompt,
   SearchOptions,
   StealthState,
@@ -31,14 +30,6 @@ declare global {
       getCategoryChildren: (parentId: string) => Promise<Array<{ id: string; label: string }>>;
       startPipeline: (cids: string[]) => void;
       unenrollCourse: (cid: string) => Promise<{ ok: boolean; error?: string }>;
-      getCredsStatus: () => Promise<CredentialsStatus>;
-      forgetCredentials: () => void;
-      switchAccount: () => Promise<{ ok: boolean }>;
-      saveCredentialsManual: (
-        payload: { account: string; password: string },
-      ) => Promise<{ ok: boolean; reason?: string }>;
-      answerCredsPrompt: (save: boolean) => void;
-      onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => () => void;
       onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => () => void;
       onResumePrompt: (cb: (p: ResumePrompt) => void) => () => void;
       answerResumePrompt: (resume: boolean) => void;
@@ -56,6 +47,35 @@ declare global {
       rendererLog: (level: "info" | "warn" | "error", msg: string) => void;
       openLogsFolder: () => void;
       getAppVersion: () => Promise<string>;
+      // ── 多帳號 (v0.8.0) ──
+      beginUnlock: (id: string) => void;
+      verifyPin: (id: string, pin: string) => Promise<AccountOpResult>;
+      cancelUnlock: () => void;
+      switchActiveAccount: (id: string) => void;
+      closeTab: (id: string) => Promise<AccountOpResult>;
+      goPicker: () => void;
+      addAccountBegin: () => Promise<AccountOpResult>;
+      addAccountCancel: () => void;
+      finishNewAccount: (
+        payload: { nickname: string; pin: string },
+      ) => Promise<AccountOpResult>;
+      setAccountNickname: (
+        payload: { id: string; nickname: string },
+      ) => Promise<AccountOpResult>;
+      setAccountPin: (
+        payload: { id: string; oldPin: string; newPin: string },
+      ) => Promise<AccountOpResult>;
+      resetPinBegin: (id: string) => void;
+      resetPinVerify: (
+        payload: { id: string; password: string },
+      ) => Promise<AccountOpResult>;
+      resetPinComplete: (
+        payload: { id: string; newPin: string },
+      ) => Promise<AccountOpResult>;
+      resetPinCancel: () => void;
+      removeAccount: (id: string) => Promise<AccountOpResult>;
+      logoutActiveAccount: () => Promise<AccountOpResult>;
+      clearAllAccounts: () => Promise<AccountOpResult>;
     };
   }
 }
@@ -163,8 +183,6 @@ function App() {
   const prevStatus = useRef<string | null>(null);
   const dragging = useRef(false);
 
-  // 解鎖狀態的右鍵 context menu — 跟 Noteqad 偽裝畫面一樣可以一鍵打開 log 資料夾。
-  // 沒打開偽裝模式的使用者也能找到 log 給管理員（v0.6.5 caveat 修法）。
   const [appCtxMenu, setAppCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
   useEffect(() => {
@@ -191,27 +209,21 @@ function App() {
     if (state?.isFirstRun) setShowFirstRunHelp(true);
   }, [state?.isFirstRun]);
 
-  // Credentials + auto-login UI state
-  const [credsPrompt, setCredsPrompt] = useState<CredsPromptPayload | null>(null);
-  const [credsStatus, setCredsStatus] = useState<CredentialsStatus | null>(null);
-  const [credsModalOpen, setCredsModalOpen] = useState(false);
   const [autoLogin, setAutoLogin] = useState<AutoLoginProgress | null>(null);
   const [resumePrompt, setResumePrompt] = useState<ResumePrompt | null>(null);
 
   useEffect(() => {
-    window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
-    const offPrompt = window.api.onCredsPrompt((p) => setCredsPrompt(p));
     const offAuto = window.api.onAutoLoginProgress((p) => {
       setAutoLogin(p);
       if (p.stage === "success" || p.stage === "failed") {
-        // Refresh status; dismiss banner after a short delay
-        window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
-        setTimeout(() => setAutoLogin((prev) => (prev?.stage === p.stage ? null : prev)), 3500);
+        setTimeout(
+          () => setAutoLogin((prev) => (prev?.stage === p.stage ? null : prev)),
+          3500,
+        );
       }
     });
     const offResume = window.api.onResumePrompt((p) => setResumePrompt(p));
     return () => {
-      offPrompt();
       offAuto();
       offResume();
     };
@@ -220,31 +232,6 @@ function App() {
   function answerResume(resume: boolean) {
     window.api.answerResumePrompt(resume);
     setResumePrompt(null);
-  }
-
-  function answerCredsPrompt(save: boolean) {
-    window.api.answerCredsPrompt(save);
-    setCredsPrompt(null);
-    if (save) {
-      setTimeout(() => window.api.getCredsStatus().then(setCredsStatus), 250);
-    }
-  }
-
-  function forgetCreds() {
-    if (!confirm("確定要忘記已記住的帳號嗎？之後斷線就要手動再登一次。")) return;
-    window.api.forgetCredentials();
-    setCredsStatus({ saved: false });
-  }
-
-  async function switchAccount() {
-    if (
-      !confirm(
-        "要登出目前帳號、換另一個帳號嗎？\n\n會做這幾件事：\n• 把網頁端目前這個帳號的 session 清掉\n• 把這台電腦記得的帳號清掉\n• 回到第一次使用的畫面，讓你輸入新帳號\n\n（如果有正在跑的課，會被中止）",
-      )
-    )
-      return;
-    await window.api.switchAccount();
-    setCredsStatus({ saved: false });
   }
 
   // State-aware default: shrink the BrowserView during Monitor, unless the
@@ -335,6 +322,23 @@ function App() {
     );
   }
 
+  const mode = state.multi.mode;
+
+  // mode = picker / pin / reset_pin / boot：顯示 tile picker（無 BrowserView）
+  if (mode === "boot" || mode === "picker" || mode === "pin" || mode === "reset_pin") {
+    return (
+      <PickerLayout
+        state={state}
+        showFirstRunHelp={showFirstRunHelp}
+        onCloseFirstRunHelp={() => {
+          setShowFirstRunHelp(false);
+          window.api.ackFirstRun();
+        }}
+      />
+    );
+  }
+
+  // mode = active / post_login：顯示 tab bar + 主畫面（包含 BrowserView）
   // 三種版面：
   //   leftCollapsed → 左邊縮成窄條、瀏覽器吃滿（看影片用）
   //   collapsed     → 右邊縮成窄條、操作區吃滿（看 log 用）
@@ -352,206 +356,161 @@ function App() {
 
   return (
     <div
-      className="h-screen flex flex-row relative"
+      className="h-screen flex flex-col relative"
       onContextMenu={(e) => {
-        // 攔掉 Electron 預設的 webview context menu（「重新整理 / 檢查」這些
-        // 一看就 Chromium 風）；改顯示我們自己的 mini menu，最重要的是讓使用者
-        // 拿得到 log 資料夾。注意：BrowserView 是 native overlay，蓋住的區域
-        // 這個 React onContextMenu 不會 fire（native 自己處理），所以這條
-        // listener 只在 dashboard / 操作區那塊作用，符合預期。
         e.preventDefault();
         e.stopPropagation();
         setAppCtxMenu({ x: e.clientX, y: e.clientY });
       }}
     >
-      {/* Left panel: relative+overflow-hidden so absolute-positioned modals
-          are clipped to this column and never spill onto the BrowserView. */}
-      <div
-        ref={leftRef}
-        className="relative overflow-hidden"
-        style={{ flex: leftFlex, minWidth: 0 }}
-      >
-        {leftCollapsed ? (
-          <button
-            className="h-full w-full flex items-center justify-center text-xs text-slate-300 bg-slate-800 hover:bg-slate-700"
-            onClick={() => setLeftCollapsed(false)}
-            title="重新展開操作區"
-            style={{ writingMode: "vertical-rl" }}
-          >
-            操作區已收起，點我展開
-          </button>
-        ) : (
-        <div className="overflow-auto h-full">
-          <TopPanel state={state} />
+      <TabBar state={state} />
+      <div className="flex-1 flex flex-row relative min-h-0">
+        <div
+          ref={leftRef}
+          className="relative overflow-hidden"
+          style={{ flex: leftFlex, minWidth: 0 }}
+        >
+          {leftCollapsed ? (
+            <button
+              className="h-full w-full flex items-center justify-center text-xs text-slate-300 bg-slate-800 hover:bg-slate-700"
+              onClick={() => setLeftCollapsed(false)}
+              title="重新展開操作區"
+              style={{ writingMode: "vertical-rl" }}
+            >
+              操作區已收起，點我展開
+            </button>
+          ) : (
+            <div className="overflow-auto h-full">
+              <TopPanel state={state} />
+            </div>
+          )}
+
+          {autoLogin && (
+            <div
+              className={`absolute left-1/2 -translate-x-1/2 top-3 z-50 px-4 py-2 rounded text-sm shadow-lg border backdrop-blur ${
+                autoLogin.stage === "success"
+                  ? "bg-emerald-600/90 border-emerald-400 text-white"
+                  : autoLogin.stage === "failed"
+                    ? "bg-rose-600/90 border-rose-400 text-white"
+                    : "bg-slate-800/90 border-slate-600 text-slate-100"
+              }`}
+            >
+              {autoLogin.stage === "start" && "🔐 幫你登入中…"}
+              {autoLogin.stage === "filling" && "🔐 正在輸入帳號密碼…"}
+              {autoLogin.stage === "submitted" && "🔐 等網站確認中…"}
+              {autoLogin.stage === "success" && "✅ 登入成功"}
+              {autoLogin.stage === "failed" &&
+                `❌ 登入失敗：${autoLogin.error ?? "請自己登入一次"}`}
+            </div>
+          )}
+
+          {resumePrompt && (
+            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
+              <ModalGuard>
+                <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
+                  <h2 className="text-lg font-semibold text-slate-100 mb-2">
+                    上次有沒上完的課
+                  </h2>
+                  <p className="text-sm text-slate-300 mb-1">
+                    上次停下來的時間：
+                    <span className="text-slate-400">
+                      {" "}
+                      {new Date(resumePrompt.startedAt).toLocaleString()}
+                    </span>
+                  </p>
+                  <p className="text-sm text-slate-300 mb-4">
+                    還有{" "}
+                    <span className="font-bold text-emerald-300">
+                      {resumePrompt.pipelineCids.length}
+                    </span>{" "}
+                    門課還沒上完，要不要繼續？
+                  </p>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                      onClick={() => answerResume(false)}
+                    >
+                      不要，重新選
+                    </button>
+                    <button
+                      className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+                      onClick={() => answerResume(true)}
+                    >
+                      繼續上次
+                    </button>
+                  </div>
+                </div>
+              </ModalGuard>
+            </div>
+          )}
+
+          {/* mode === "post_login"：剛新登入，請使用者設定暱稱 + PIN */}
+          {state.multi.mode === "post_login" && state.multi.postLogin && (
+            <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/70">
+              <ModalGuard>
+                <PostLoginCard accountId={state.multi.postLogin.id} />
+              </ModalGuard>
+            </div>
+          )}
+
+          {/* Portal target for ConfirmBatchModal (rendered deep in Selecting tree) */}
+          <div id="left-modal-root" />
         </div>
-        )}
-
-        {/* Auto-login status toast — inside left panel so it stays left */}
-        {autoLogin && (
-          <div
-            className={`absolute left-1/2 -translate-x-1/2 top-3 z-50 px-4 py-2 rounded text-sm shadow-lg border backdrop-blur ${
-              autoLogin.stage === "success"
-                ? "bg-emerald-600/90 border-emerald-400 text-white"
-                : autoLogin.stage === "failed"
-                ? "bg-rose-600/90 border-rose-400 text-white"
-                : "bg-slate-800/90 border-slate-600 text-slate-100"
-            }`}
-          >
-            {autoLogin.stage === "start" && "🔐 幫你登入中…"}
-            {autoLogin.stage === "filling" && "🔐 正在輸入帳號密碼…"}
-            {autoLogin.stage === "submitted" && "🔐 等網站確認中…"}
-            {autoLogin.stage === "success" && "✅ 登入成功"}
-            {autoLogin.stage === "failed" && `❌ 登入失敗：${autoLogin.error ?? "請自己登入一次"}`}
-          </div>
-        )}
-
-        {/* Modal overlays — absolute inset-0 so they cover only the left panel */}
-        {credsModalOpen && (
-          <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/60">
-            <ModalGuard>
-              <CredsManageCard
-                status={credsStatus}
-                onClose={() => setCredsModalOpen(false)}
-                onClear={() => {
-                  forgetCreds();
-                  setCredsModalOpen(false);
-                }}
-                onSwitch={() => {
-                  void switchAccount();
-                  setCredsModalOpen(false);
-                }}
-                onSave={async (account, password) => {
-                  const res = await window.api.saveCredentialsManual({ account, password });
-                  if (res.ok) {
-                    await window.api.getCredsStatus().then(setCredsStatus).catch(() => void 0);
-                    setCredsModalOpen(false);
-                  }
-                  return res;
-                }}
-              />
-            </ModalGuard>
-          </div>
-        )}
-        {resumePrompt && (
-          <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
-            <ModalGuard>
-              <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
-                <h2 className="text-lg font-semibold text-slate-100 mb-2">上次有沒上完的課</h2>
-                <p className="text-sm text-slate-300 mb-1">
-                  上次停下來的時間：<span className="text-slate-400"> {new Date(resumePrompt.startedAt).toLocaleString()}</span>
-                </p>
-                <p className="text-sm text-slate-300 mb-4">
-                  還有 <span className="font-bold text-emerald-300">{resumePrompt.pipelineCids.length}</span>{" "}
-                  門課還沒上完，要不要繼續？
-                </p>
-                <div className="flex justify-end gap-2">
-                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerResume(false)}>不要，重新選</button>
-                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold" onClick={() => answerResume(true)}>繼續上次</button>
-                </div>
-              </div>
-            </ModalGuard>
-          </div>
-        )}
-        {credsPrompt && (
-          <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60">
-            <ModalGuard>
-              <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90%] p-6 shadow-2xl">
-                <h2 className="text-lg font-semibold text-slate-100 mb-2">要把帳號記起來嗎？</h2>
-                <p className="text-sm text-slate-300 mb-1">
-                  剛剛登入成功（帳號 <span className="text-emerald-300">{credsPrompt.maskedAccount}</span>）。
-                </p>
-                <p className="text-sm text-slate-400 mb-4 leading-relaxed">
-                  記起來之後，下次斷線會自動幫你重新登入，不用一直手動。<br/>
-                  帳號用 Windows 內建的加密保管，<b>只存在這台電腦上</b>，不會傳到網路。
-                </p>
-                <div className="flex justify-end gap-2">
-                  <button className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm" onClick={() => answerCredsPrompt(false)}>這次就好</button>
-                  <button className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm" onClick={() => answerCredsPrompt(true)}>記起來</button>
-                </div>
-              </div>
-            </ModalGuard>
-          </div>
-        )}
-        {/* Portal target for ConfirmBatchModal (rendered deep in Selecting tree) */}
-        <div id="left-modal-root" />
-      </div>
-      <div
-        onMouseDown={(e) => {
-          if (collapsed) return;
-          e.preventDefault();
-          dragging.current = true;
-          document.body.style.cursor = "col-resize";
-          document.body.style.userSelect = "none";
-        }}
-        className={`${
-          collapsed ? "bg-slate-800" : "bg-slate-700 hover:bg-emerald-500"
-        } transition-colors flex items-center justify-center text-xs text-slate-400 select-none`}
-        style={{
-          width: collapsed ? 24 : DIVIDER_PX,
-          cursor: collapsed ? "default" : "col-resize",
-          flex: `0 0 ${collapsed ? 24 : DIVIDER_PX}px`,
-          writingMode: collapsed ? "vertical-rl" : "horizontal-tb",
-        }}
-        title={collapsed ? "瀏覽器已收起" : "拖曳調整左右分隔"}
-      >
-        {collapsed && <span>瀏覽器已收起</span>}
-      </div>
-      <div
-        id="browserview-mount"
-        style={{
-          flex: rightFlex,
-          background: "#000",
-          minWidth: 0,
-        }}
-      />
-      {/* 把右邊瀏覽器收起來（讓左邊操作區吃滿）。 */}
-      {!leftCollapsed && (
-        <button
-          className="absolute bottom-3 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
-          style={{
-            right: collapsed ? COLLAPSED_BROWSER_PX + 12 : `calc(${browserRatio * 100}% + 12px)`,
+        <div
+          onMouseDown={(e) => {
+            if (collapsed) return;
+            e.preventDefault();
+            dragging.current = true;
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
           }}
-          onClick={toggleCollapse}
-          title={collapsed ? "重新打開右邊網頁" : "右邊網頁收起來，操作區看得更清楚"}
+          className={`${
+            collapsed ? "bg-slate-800" : "bg-slate-700 hover:bg-emerald-500"
+          } transition-colors flex items-center justify-center text-xs text-slate-400 select-none`}
+          style={{
+            width: collapsed ? 24 : DIVIDER_PX,
+            cursor: collapsed ? "default" : "col-resize",
+            flex: `0 0 ${collapsed ? 24 : DIVIDER_PX}px`,
+            writingMode: collapsed ? "vertical-rl" : "horizontal-tb",
+          }}
+          title={collapsed ? "瀏覽器已收起" : "拖曳調整左右分隔"}
         >
-          {collapsed ? "→ 打開網頁" : "← 收起網頁"}
-        </button>
-      )}
+          {collapsed && <span>瀏覽器已收起</span>}
+        </div>
+        <div
+          id="browserview-mount"
+          style={{
+            flex: rightFlex,
+            background: "#000",
+            minWidth: 0,
+          }}
+        />
 
-      {/* 把左邊操作區收起來（讓右邊網頁吃滿）。 */}
-      {!collapsed && !leftCollapsed && (
-        <button
-          className="absolute bottom-3 left-44 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
-          onClick={() => setLeftCollapsed(true)}
-          title="把左邊操作區收起來，網頁吃滿畫面"
-        >
-          ← 收起左邊
-        </button>
-      )}
+        {!leftCollapsed && (
+          <button
+            className="absolute bottom-3 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
+            style={{
+              right: collapsed
+                ? COLLAPSED_BROWSER_PX + 12
+                : `calc(${browserRatio * 100}% + 12px)`,
+            }}
+            onClick={toggleCollapse}
+            title={collapsed ? "重新打開右邊網頁" : "右邊網頁收起來，操作區看得更清楚"}
+          >
+            {collapsed ? "→ 打開網頁" : "← 收起網頁"}
+          </button>
+        )}
+        {!collapsed && !leftCollapsed && (
+          <button
+            className="absolute bottom-3 left-44 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
+            onClick={() => setLeftCollapsed(true)}
+            title="把左邊操作區收起來，網頁吃滿畫面"
+          >
+            ← 收起左邊
+          </button>
+        )}
+      </div>
 
-      {/* Credentials chip — always shown in bottom-left (stacked above the
-          🫥/⚙ button row at bottom-3). bottom-14 (was bottom-11) keeps a
-          visible gap above the row; the bottom row now also has 收起左邊
-          taking left-44, so the chip can't touch any of them. */}
-      <button
-        className={`fixed left-3 bottom-14 z-40 px-2 py-1 rounded text-xs border backdrop-blur shadow-lg ${
-          credsStatus?.saved
-            ? "bg-slate-800/90 border-slate-600 text-emerald-300 hover:bg-slate-700"
-            : "bg-slate-800/90 border-slate-600 text-slate-400 hover:bg-slate-700 hover:text-emerald-300"
-        }`}
-        onClick={() => setCredsModalOpen(true)}
-        title={
-          credsStatus?.saved
-            ? "點我可以改帳號密碼，或清除已記得的帳號（這裡不秀帳號避免被旁邊的人看到）"
-            : "手動輸入 e 等公務園的帳號密碼"
-        }
-      >
-        {credsStatus?.saved
-          ? "🔑 已儲存帳號（點我可改）"
-          : "🔑 還沒記住帳號，點我設定"}
-      </button>
-
-      {/* 第一次啟動時跳一次「Windows 第一次跑會跳警告」說明 */}
       {showFirstRunHelp && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70">
           <ModalGuard>
@@ -565,9 +524,6 @@ function App() {
         </div>
       )}
 
-      {/* 解鎖狀態的右鍵 mini menu — 只放「版本 + 打開 log」一條，不複製 Noteqad 的
-          整個 Notepad 編輯選單，因為這裡是 dashboard，使用者根本不會在 dashboard 上
-          剪下複製。 */}
       {appCtxMenu && (
         <div
           className="fixed z-[90] min-w-[200px] bg-white border border-[#bfbfbf] shadow-md py-1 select-none"
@@ -590,7 +546,6 @@ function App() {
           </button>
         </div>
       )}
-
     </div>
   );
 }
@@ -1047,129 +1002,6 @@ export default function Shell() {
   );
 }
 
-function CredsManageCard({
-  status,
-  onClose,
-  onClear,
-  onSwitch,
-  onSave,
-}: {
-  status: CredentialsStatus | null;
-  onClose: () => void;
-  onClear: () => void;
-  onSwitch: () => void;
-  onSave: (account: string, password: string) => Promise<{ ok: boolean; reason?: string }>;
-}) {
-  const [account, setAccount] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  async function submit() {
-    setErr(null);
-    if (!account.trim() || !password) {
-      setErr("帳號和密碼都要填");
-      return;
-    }
-    setBusy(true);
-    try {
-      const res = await onSave(account.trim(), password);
-      if (!res.ok) setErr(res.reason ?? "存不起來");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
-      <h2 className="text-lg font-semibold mb-2">🔑 帳號設定</h2>
-
-      {status?.saved ? (
-        <p className="text-sm text-slate-300 mb-4">
-          已記得：<span className="text-emerald-300 font-mono">{status.maskedAccount}</span>
-          {status.lastUsedAt && (
-            <span className="block text-xs text-slate-500 mt-1">
-              上次用：{new Date(status.lastUsedAt).toLocaleString()}
-            </span>
-          )}
-        </p>
-      ) : (
-        <p className="text-sm text-slate-400 mb-4 leading-relaxed">
-          還沒記住任何帳號。把人事服務網（e 等公務園）的帳號密碼填進來，
-          下次斷線就會自動幫你登回去。
-        </p>
-      )}
-
-      <div className="space-y-2 mb-3">
-        <input
-          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
-          placeholder={status?.saved ? "新的帳號（會蓋掉舊的）" : "帳號（身分證字號）"}
-          value={account}
-          onChange={(e) => setAccount(e.target.value)}
-          autoFocus
-          disabled={busy}
-        />
-        <input
-          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:border-emerald-500"
-          placeholder="密碼"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          disabled={busy}
-        />
-      </div>
-
-      {err && <div className="text-xs text-rose-400 mb-3">{err}</div>}
-
-      <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-        帳號用 Windows 內建加密保管，只存在這台電腦上，不會傳到網路。
-      </p>
-
-      <div className="flex justify-between items-center flex-wrap gap-2">
-        {status?.saved ? (
-          <div className="flex gap-2">
-            <button
-              className="px-3 py-2 rounded bg-amber-700 hover:bg-amber-600 text-amber-50 text-sm"
-              onClick={onSwitch}
-              disabled={busy}
-              title="把目前登入的帳號從網頁登出，並清掉本機記得的帳號，回到第一次使用的畫面讓你輸入新帳號"
-            >
-              🚪 登出 / 換帳號
-            </button>
-            <button
-              className="px-3 py-2 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 text-sm"
-              onClick={onClear}
-              disabled={busy}
-              title="只清除本機記得的帳號，網頁端 session 不動"
-            >
-              🗑 忘記帳號
-            </button>
-          </div>
-        ) : (
-          <span />
-        )}
-        <div className="flex gap-2">
-          <button
-            className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
-            onClick={onClose}
-            disabled={busy}
-          >
-            取消
-          </button>
-          <button
-            className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
-            onClick={submit}
-            disabled={busy}
-          >
-            {busy ? "存中…" : status?.saved ? "蓋掉舊的" : "記起來"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function StealthSetupCard({
   value,
   confirmValue,
@@ -1317,8 +1149,9 @@ function StealthOptionsCard({
 
 function TopPanel({ state }: { state: AppState }) {
   if (state.status === "boot") return <Centered>啟動中...</Centered>;
-  if (state.status === "setup") return <CredentialsSetup />;
-  if (state.status === "await_login") return <AwaitingLogin state={state} />;
+  // 新增帳號流程：右邊 BrowserView 顯示 eCPA login，左邊放 status + cancel button
+  if (state.status === "setup" || state.status === "await_login")
+    return <NewAccountWaiting state={state} />;
   if (state.status === "selecting") return <Selecting state={state} />;
   return <Monitor state={state} />;
 }
@@ -1332,141 +1165,27 @@ function Centered({ children }: { children: React.ReactNode }) {
 }
 
 // ── First-run setup screen ────────────────────────────────────
-function CredentialsSetup() {
-  const [account, setAccount] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [hardResetting, setHardResetting] = useState(false);
-
-  async function submit() {
-    setErr(null);
-    if (!account.trim() || !password) { setErr("帳號和密碼都要填"); return; }
-    setBusy(true);
-    // 10 秒 timeout：有時 saveCredentialsManual 看似 resolve 但 main 端 tryAutoLogin
-    // 卡在 SSO chain，state 不翻 → 使用者按了沒反應。明確顯示「重試」按鈕。
-    const timeout = window.setTimeout(() => {
-      setBusy(false);
-      setErr("登入超時，請再試一次（如果一直失敗，請按下方「完全重置」）");
-    }, 10_000);
-    try {
-      const res = await window.api.saveCredentialsManual({ account: account.trim(), password });
-      window.clearTimeout(timeout);
-      if (!res.ok) { setErr(res.reason ?? "儲存失敗"); setBusy(false); return; }
-      setSaved(true);
-      // saved=true 時 busy 已不重要；不再 setBusy(false) 以免閃爍。
-    } catch (e) {
-      window.clearTimeout(timeout);
-      setErr(e instanceof Error ? e.message : String(e));
-      setBusy(false);
-    }
+/**
+ * 新增帳號的等候畫面：右邊 BrowserView 顯示 eCPA 登入頁，使用者在那邊登入；
+ * 我們攔截 GetApTicketV2 的 POST body 拿到帳密後，main 端會把 multi.mode 切到
+ * post_login，使用者填暱稱 + PIN 完成新增。這個元件提供「← 取消新增」按鈕
+ * 跟即時 log 顯示，讓使用者知道我們有在偵測。
+ */
+function NewAccountWaiting({ state }: { state: AppState }) {
+  const [cancelling, setCancelling] = useState(false);
+  function cancel() {
+    if (cancelling) return;
+    if (!window.confirm("取消新增帳號？\n\n剛剛在右邊網頁的登入動作不會被儲存。")) return;
+    setCancelling(true);
+    window.api.addAccountCancel();
   }
-
-  async function hardReset() {
-    if (hardResetting) return;
-    setHardResetting(true);
-    try {
-      // switchAccount 會 destroy + 重建 BrowserView、清掉本機帳密、重置 state。
-      // 對「卡在中間狀態」是萬靈丹級的 nuke。
-      await window.api.switchAccount();
-    } finally {
-      setHardResetting(false);
-      setErr(null);
-      setBusy(false);
-      setSaved(false);
-      setAccount("");
-      setPassword("");
-    }
-  }
-
-  if (saved) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-4 px-8">
-        <div className="text-5xl">✅</div>
-        <p className="text-slate-200 text-lg font-semibold">帳號已記住，正在幫你登入…</p>
-        <div className="w-4 h-4 rounded-full bg-emerald-400 animate-pulse" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-full flex flex-col items-center justify-center gap-6 px-8 py-10">
-      <div className="text-center">
-        <h1 className="text-2xl font-bold mb-2">第一次使用</h1>
-        <p className="text-slate-300 text-sm leading-relaxed max-w-sm">
-          請輸入「人事服務網（e 等公務園）」的帳號密碼。<br />
-          記住之後，下次打開會自動幫你登入，<br />
-          也不會把帳號傳到網路上，只存在你自己的電腦裡。
-        </p>
-      </div>
-
-      <div className="w-full max-w-sm space-y-3">
-        <input
-          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-          placeholder="帳號"
-          value={account}
-          onChange={(e) => setAccount(e.target.value)}
-          disabled={busy}
-          autoFocus
-        />
-        <input
-          type="password"
-          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
-          placeholder="密碼"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          disabled={busy}
-        />
-        {err && <p className="text-red-400 text-sm">{err}</p>}
-        <button
-          className="w-full py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 font-semibold flex items-center justify-center gap-2"
-          disabled={busy}
-          onClick={submit}
-        >
-          {busy && (
-            <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-          )}
-          {busy ? "登入中…" : "記住帳號並登入"}
-        </button>
-        <p className="text-slate-500 text-xs text-center">
-          也可以直接在右邊網頁裡自己登入
-        </p>
-        <button
-          className="w-full py-1.5 mt-4 rounded text-xs text-slate-400 border border-slate-700 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-40"
-          disabled={hardResetting}
-          onClick={hardReset}
-          title="把右邊瀏覽器整個重新建立、清掉本機帳密、回到第一次使用畫面 — 卡住時的萬用解法"
-        >
-          {hardResetting ? "重置中…" : "完全重置"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function AwaitingLogin({ state }: { state: AppState }) {
-  const [hardResetting, setHardResetting] = useState(false);
-
-  async function hardReset() {
-    if (hardResetting) return;
-    if (!window.confirm("完全重置會：\n\n• 重新建立右邊瀏覽器\n• 清掉這台電腦記得的帳密\n• 回到第一次使用畫面\n\n確定要重置嗎？")) return;
-    setHardResetting(true);
-    try {
-      await window.api.switchAccount();
-    } finally {
-      setHardResetting(false);
-    }
-  }
-
   return (
     <div className="h-full flex flex-col px-6 py-6 gap-4 overflow-hidden">
       <div className="text-center space-y-2">
-        <h1 className="text-2xl font-bold">等你登入</h1>
+        <h1 className="text-2xl font-bold">新增帳號</h1>
         <p className="text-slate-300">👉 請在右邊網頁登入 e 等公務園</p>
         <p className="text-slate-400 text-xs">
-          帳號密碼 / 自然人憑證 / MyData 都可以，看你習慣哪一種
+          登入成功後，會請你幫這個帳號取一個暱稱、設一組 4 位數 PIN
         </p>
         <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse mx-auto" />
       </div>
@@ -1481,8 +1200,8 @@ function AwaitingLogin({ state }: { state: AppState }) {
                 l.level === "error"
                   ? "text-red-400"
                   : l.level === "warn"
-                  ? "text-amber-400"
-                  : "text-slate-300"
+                    ? "text-amber-400"
+                    : "text-slate-300"
               }
             >
               [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
@@ -1496,11 +1215,11 @@ function AwaitingLogin({ state }: { state: AppState }) {
 
       <button
         className="w-full py-1.5 rounded text-xs text-slate-400 border border-slate-700 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-40"
-        disabled={hardResetting}
-        onClick={hardReset}
-        title="把右邊瀏覽器整個重新建立、清掉本機帳密、回到第一次使用畫面 — 卡住時的萬用解法"
+        disabled={cancelling}
+        onClick={cancel}
+        title="把這個還在新增中的帳號丟掉，回 picker"
       >
-        {hardResetting ? "重置中…" : "卡住沒反應？點這裡完全重置"}
+        ← 取消新增
       </button>
     </div>
   );
@@ -2587,4 +2306,762 @@ function statusLabel(s: AppState["status"]): string {
     default:
       return s;
   }
+}
+
+// ── 多帳號 UI（v0.8.0） ────────────────────────────────────────
+
+/**
+ * Picker layout：mode === picker / pin / reset_pin / boot 時顯示。
+ * BrowserView 在這個 layout 下會被縮成 0×0（PickerLayout 不放
+ * #browserview-mount，因此 main 拿不到實 bounds）。
+ */
+function PickerLayout({
+  state,
+  showFirstRunHelp,
+  onCloseFirstRunHelp,
+}: {
+  state: AppState;
+  showFirstRunHelp: boolean;
+  onCloseFirstRunHelp: () => void;
+}) {
+  // BrowserView 必須縮起來，否則會蓋住 picker
+  useHideBrowserViewWhileMounted();
+  const { multi } = state;
+  return (
+    <div className="h-screen w-screen bg-gradient-to-br from-slate-950 to-slate-900 text-slate-100 flex flex-col items-center justify-center px-6 py-10 relative overflow-auto">
+      <div className="text-center mb-10">
+        <h1 className="text-3xl font-bold mb-2">誰要刷課？</h1>
+        <p className="text-sm text-slate-400">
+          選一個使用者，輸入 4 位數 PIN 開始；或者「+」新增另一個帳號
+        </p>
+      </div>
+
+      <PickerTiles state={state} />
+
+      <div className="mt-10 flex gap-3 text-xs text-slate-400">
+        {multi.tabs.length > 0 && (
+          <button
+            className="px-3 py-1.5 rounded border border-slate-700 hover:bg-slate-800 hover:text-slate-200"
+            onClick={() => {
+              // 找第一個 active=false 但 isOpen=true 的 tab，回到它（其實這條路徑很少踩到）
+              const t = multi.tabs[0];
+              if (t) window.api.switchActiveAccount(t.id);
+            }}
+            title="把畫面切回正在背景跑的 tab"
+          >
+            ↩ 回到背景的 tab
+          </button>
+        )}
+        {multi.pickerAccounts.length > 0 && (
+          <button
+            className="px-3 py-1.5 rounded border border-rose-900 text-rose-300 hover:bg-rose-950"
+            onClick={async () => {
+              if (
+                !window.confirm(
+                  "全域清除：把所有帳號的紀錄、PIN、cookies 全清掉，回到空白 picker。\n\n（如果有正在跑的課會被中止）\n\n確定？",
+                )
+              )
+                return;
+              await window.api.clearAllAccounts();
+            }}
+          >
+            🗑 全域清除（清掉所有帳號）
+          </button>
+        )}
+      </div>
+
+      {multi.mode === "pin" && multi.pinTarget && <PinModal target={multi.pinTarget} />}
+      {multi.mode === "reset_pin" && multi.resetPin && (
+        <ResetPinModal target={multi.resetPin} />
+      )}
+
+      {showFirstRunHelp && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70">
+          <FirstRunHelpCard onClose={onCloseFirstRunHelp} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PickerTiles({ state }: { state: AppState }) {
+  const accounts = state.multi.pickerAccounts;
+  return (
+    <div className="flex flex-wrap gap-5 justify-center max-w-5xl">
+      {accounts.map((a) => (
+        <PickerTile key={a.id} account={a} />
+      ))}
+      <AddAccountTile />
+    </div>
+  );
+}
+
+function PickerTile({ account }: { account: NonNullable<AppState["multi"]["pickerAccounts"][number]> }) {
+  const [showSettings, setShowSettings] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [editingNickname, setEditingNickname] = useState(false);
+  const [editingPin, setEditingPin] = useState(false);
+  const [nicknameValue, setNicknameValue] = useState(account.nickname);
+  const [err, setErr] = useState<string | null>(null);
+
+  function startUnlock() {
+    if (account.isOpen) {
+      // 已經 open 直接 switch
+      window.api.switchActiveAccount(account.id);
+    } else {
+      window.api.beginUnlock(account.id);
+    }
+  }
+
+  async function saveNickname() {
+    const n = nicknameValue.trim();
+    if (!n) return setErr("暱稱不能為空");
+    const res = await window.api.setAccountNickname({ id: account.id, nickname: n });
+    if (!res.ok) return setErr(res.reason ?? "存不起來");
+    setEditingNickname(false);
+    setErr(null);
+  }
+
+  return (
+    <div className="relative group">
+      <button
+        onClick={startUnlock}
+        className={`w-44 h-52 rounded-xl border-2 flex flex-col items-center justify-center gap-3 transition ${
+          account.isActive
+            ? "border-emerald-400 bg-emerald-950/30"
+            : account.isOpen
+              ? "border-sky-700 bg-slate-800 hover:border-sky-400"
+              : "border-slate-700 bg-slate-900 hover:border-emerald-500 hover:bg-slate-800"
+        }`}
+      >
+        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-emerald-500 to-sky-600 flex items-center justify-center text-3xl">
+          {account.nickname.slice(0, 1) || "?"}
+        </div>
+        <div className="text-base font-semibold text-slate-100 truncate w-36 text-center">
+          {account.nickname}
+        </div>
+        <div className="text-xs text-slate-500 font-mono">{account.maskedAccount}</div>
+        {account.isOpen && (
+          <div className="text-[10px] text-sky-400">
+            {account.pipelineRunning
+              ? `🟢 跑課中 ${account.doneCount ?? 0}/${account.totalCount ?? 0}`
+              : "● 已開啟"}
+          </div>
+        )}
+      </button>
+      <button
+        className="absolute top-2 right-2 w-7 h-7 rounded-full bg-slate-700/80 hover:bg-slate-600 text-slate-200 text-sm opacity-0 group-hover:opacity-100 transition"
+        onClick={(e) => {
+          e.stopPropagation();
+          setShowSettings(true);
+        }}
+        title="設定"
+      >
+        ⚙
+      </button>
+
+      {showSettings && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/70">
+          <ModalGuard>
+            <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-sm w-[92vw] p-6 shadow-2xl">
+              <h2 className="text-lg font-semibold text-slate-100 mb-3">
+                ⚙ {account.nickname}
+              </h2>
+              <p className="text-xs text-slate-500 mb-4 font-mono">{account.maskedAccount}</p>
+
+              <div className="space-y-2 mb-4">
+                {editingNickname ? (
+                  <div className="flex gap-2">
+                    <input
+                      autoFocus
+                      className="flex-1 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-sm"
+                      value={nicknameValue}
+                      onChange={(e) => setNicknameValue(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveNickname()}
+                      placeholder="新暱稱"
+                    />
+                    <button
+                      className="px-3 py-1 rounded bg-emerald-600 text-white text-xs"
+                      onClick={saveNickname}
+                    >
+                      存
+                    </button>
+                    <button
+                      className="px-3 py-1 rounded bg-slate-700 text-slate-300 text-xs"
+                      onClick={() => {
+                        setEditingNickname(false);
+                        setNicknameValue(account.nickname);
+                        setErr(null);
+                      }}
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="w-full text-left px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+                    onClick={() => setEditingNickname(true)}
+                  >
+                    ✏️ 改暱稱
+                  </button>
+                )}
+                <button
+                  className="w-full text-left px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+                  onClick={() => setEditingPin(true)}
+                >
+                  🔢 改 PIN（要先輸入舊 PIN）
+                </button>
+                <button
+                  className="w-full text-left px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+                  onClick={() => {
+                    setShowSettings(false);
+                    window.api.resetPinBegin(account.id);
+                  }}
+                >
+                  ❓ 忘記 PIN（用 e 等密碼重設）
+                </button>
+                <button
+                  className={`w-full text-left px-3 py-2 rounded text-sm ${
+                    confirmingRemove
+                      ? "bg-rose-800 hover:bg-rose-700 text-rose-50"
+                      : "bg-slate-800 hover:bg-slate-700 text-rose-300"
+                  }`}
+                  onClick={async () => {
+                    if (!confirmingRemove) {
+                      setConfirmingRemove(true);
+                      return;
+                    }
+                    await window.api.removeAccount(account.id);
+                    setShowSettings(false);
+                  }}
+                >
+                  {confirmingRemove
+                    ? "⚠ 再點一次：徹底移除這個帳號"
+                    : "🗑 移除這個帳號"}
+                </button>
+              </div>
+
+              {err && <div className="text-xs text-rose-400 mb-2">{err}</div>}
+
+              <div className="flex justify-end">
+                <button
+                  className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                  onClick={() => {
+                    setShowSettings(false);
+                    setEditingNickname(false);
+                    setEditingPin(false);
+                    setConfirmingRemove(false);
+                    setNicknameValue(account.nickname);
+                    setErr(null);
+                  }}
+                >
+                  關閉
+                </button>
+              </div>
+            </div>
+          </ModalGuard>
+        </div>
+      )}
+
+      {editingPin && (
+        <ChangePinModal
+          accountId={account.id}
+          onClose={() => setEditingPin(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddAccountTile() {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          const res = await window.api.addAccountBegin();
+          if (!res.ok) alert(`新增失敗：${res.reason ?? "unknown"}`);
+        } finally {
+          setBusy(false);
+        }
+      }}
+      className="w-44 h-52 rounded-xl border-2 border-dashed border-slate-600 flex flex-col items-center justify-center gap-2 hover:border-emerald-500 hover:bg-slate-800/50 transition disabled:opacity-50"
+      title="新增另一個 e 等公務園帳號"
+    >
+      <div className="text-5xl text-slate-500">+</div>
+      <div className="text-sm text-slate-400">{busy ? "建立中…" : "新增帳號"}</div>
+    </button>
+  );
+}
+
+function PinModal({
+  target,
+}: {
+  target: NonNullable<AppState["multi"]["pinTarget"]>;
+}) {
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }, []);
+
+  async function submit() {
+    if (busy) return;
+    if (!/^\d{4}$/.test(pin)) {
+      setErr("PIN 必須是 4 位數字");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await window.api.verifyPin(target.id, pin);
+      if (!res.ok) {
+        setErr(res.reason ?? "PIN 不正確");
+        setPin("");
+        setTimeout(() => inputRef.current?.focus(), 0);
+      }
+      // 成功時 main 會 push state，UI 自動轉場
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80">
+      <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-sm w-[92vw] p-6 shadow-2xl text-slate-100">
+        <h2 className="text-lg font-semibold mb-1">輸入 {target.nickname} 的 PIN</h2>
+        <p className="text-xs text-slate-500 mb-4 font-mono">{target.maskedAccount}</p>
+
+        <input
+          ref={inputRef}
+          type="password"
+          inputMode="numeric"
+          pattern="\d*"
+          maxLength={4}
+          className="w-full text-center text-2xl tracking-[1em] py-3 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 font-mono"
+          placeholder="••••"
+          value={pin}
+          onChange={(e) => {
+            setPin(e.target.value.replace(/\D/g, "").slice(0, 4));
+            setErr(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          disabled={busy}
+        />
+        {err && (
+          <div className="text-rose-400 text-sm mt-2">
+            {err}
+            {target.failedAttempts && target.failedAttempts >= 1
+              ? ` (錯 ${target.failedAttempts} 次)`
+              : ""}
+          </div>
+        )}
+
+        <div className="flex justify-between items-center mt-5">
+          <button
+            className="text-xs text-slate-400 hover:text-slate-200"
+            onClick={() => {
+              window.api.cancelUnlock();
+              window.api.resetPinBegin(target.id);
+            }}
+          >
+            忘記 PIN？
+          </button>
+          <div className="flex gap-2">
+            <button
+              className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+              onClick={() => window.api.cancelUnlock()}
+              disabled={busy}
+            >
+              取消
+            </button>
+            <button
+              className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+              onClick={submit}
+              disabled={busy || pin.length !== 4}
+            >
+              {busy ? "驗證中…" : "解鎖"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResetPinModal({
+  target,
+}: {
+  target: NonNullable<AppState["multi"]["resetPin"]>;
+}) {
+  const [password, setPassword] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submitVerify() {
+    if (busy) return;
+    if (!password) {
+      setErr("請輸入 e 等公務園的密碼");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await window.api.resetPinVerify({ id: target.id, password });
+      if (!res.ok) {
+        setErr(res.reason ?? "密碼不對");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitSet() {
+    if (busy) return;
+    if (!/^\d{4}$/.test(newPin)) {
+      setErr("PIN 必須是 4 位數字");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await window.api.resetPinComplete({ id: target.id, newPin });
+      if (!res.ok) setErr(res.reason ?? "存不起來");
+      // 成功 main 會 push state 翻回 picker
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80">
+      <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-sm w-[92vw] p-6 shadow-2xl text-slate-100">
+        <h2 className="text-lg font-semibold mb-1">忘記 PIN：{target.nickname}</h2>
+        {target.stage === "verify" ? (
+          <>
+            <p className="text-xs text-slate-400 mb-3 leading-relaxed">
+              請輸入這個帳號的 e 等公務園密碼，驗證通過就可以重設 PIN。
+            </p>
+            <input
+              type="password"
+              autoFocus
+              className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
+              placeholder="e 等公務園密碼"
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setErr(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && submitVerify()}
+              disabled={busy}
+            />
+            {err && (
+              <div className="text-rose-400 text-sm mt-2">
+                {err}
+                {target.failedAttempts && target.failedAttempts >= 1
+                  ? ` (錯 ${target.failedAttempts} 次)`
+                  : ""}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                onClick={() => window.api.resetPinCancel()}
+                disabled={busy}
+              >
+                取消
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+                onClick={submitVerify}
+                disabled={busy}
+              >
+                {busy ? "驗證中…" : "驗證"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-slate-400 mb-3">密碼驗過了，請設定新的 4 位數 PIN。</p>
+            <input
+              type="password"
+              inputMode="numeric"
+              pattern="\d*"
+              maxLength={4}
+              autoFocus
+              className="w-full text-center text-2xl tracking-[1em] py-3 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 font-mono"
+              placeholder="••••"
+              value={newPin}
+              onChange={(e) => {
+                setNewPin(e.target.value.replace(/\D/g, "").slice(0, 4));
+                setErr(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && submitSet()}
+              disabled={busy}
+            />
+            {err && <div className="text-rose-400 text-sm mt-2">{err}</div>}
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+                onClick={() => window.api.resetPinCancel()}
+                disabled={busy}
+              >
+                取消
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+                onClick={submitSet}
+                disabled={busy || newPin.length !== 4}
+              >
+                {busy ? "存中…" : "設定新 PIN"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ChangePinModal({
+  accountId,
+  onClose,
+}: {
+  accountId: string;
+  onClose: () => void;
+}) {
+  const [oldPin, setOldPin] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submit() {
+    if (busy) return;
+    if (!/^\d{4}$/.test(oldPin) || !/^\d{4}$/.test(newPin)) {
+      setErr("舊 PIN 跟新 PIN 都要 4 位數字");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await window.api.setAccountPin({ id: accountId, oldPin, newPin });
+      if (!res.ok) {
+        setErr(res.reason ?? "失敗");
+      } else {
+        onClose();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/80">
+      <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-sm w-[92vw] p-6 shadow-2xl text-slate-100">
+        <h2 className="text-lg font-semibold mb-3">改 PIN</h2>
+        <input
+          type="password"
+          inputMode="numeric"
+          pattern="\d*"
+          maxLength={4}
+          autoFocus
+          className="w-full mb-2 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-center font-mono tracking-[0.5em]"
+          placeholder="舊 PIN"
+          value={oldPin}
+          onChange={(e) => {
+            setOldPin(e.target.value.replace(/\D/g, "").slice(0, 4));
+            setErr(null);
+          }}
+          disabled={busy}
+        />
+        <input
+          type="password"
+          inputMode="numeric"
+          pattern="\d*"
+          maxLength={4}
+          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 text-center font-mono tracking-[0.5em]"
+          placeholder="新 PIN"
+          value={newPin}
+          onChange={(e) => {
+            setNewPin(e.target.value.replace(/\D/g, "").slice(0, 4));
+            setErr(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          disabled={busy}
+        />
+        {err && <div className="text-rose-400 text-sm mt-2">{err}</div>}
+        <div className="flex justify-end gap-2 mt-5">
+          <button
+            className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </button>
+          <button
+            className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+            onClick={submit}
+            disabled={busy}
+          >
+            {busy ? "存中…" : "存"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostLoginCard({ accountId }: { accountId: string }) {
+  const [nickname, setNickname] = useState("");
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submit() {
+    if (busy) return;
+    const n = nickname.trim();
+    if (!n) {
+      setErr("暱稱不能為空");
+      return;
+    }
+    if (!/^\d{4}$/.test(pin)) {
+      setErr("PIN 必須是 4 位數字");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await window.api.finishNewAccount({ nickname: n, pin });
+      if (!res.ok) setErr(res.reason ?? "存不起來");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  void accountId; // 沒直接用到 — finishNewAccount 在 main 內部從 pendingNewSessionId 拿
+
+  return (
+    <div className="bg-slate-900 border border-emerald-700 rounded-lg max-w-md w-[92vw] p-6 shadow-2xl text-slate-100">
+      <h2 className="text-xl font-semibold mb-2">🎉 登入成功！</h2>
+      <p className="text-sm text-slate-300 mb-4 leading-relaxed">
+        幫這個帳號取一個暱稱（tab 上會顯示這個名稱）
+        跟一組 4 位數 PIN（每次切換到這個帳號要輸入）
+      </p>
+      <div className="space-y-3">
+        <input
+          autoFocus
+          className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500"
+          placeholder="暱稱（例如「公務帳」「我」）"
+          value={nickname}
+          onChange={(e) => {
+            setNickname(e.target.value);
+            setErr(null);
+          }}
+          maxLength={20}
+          disabled={busy}
+        />
+        <input
+          type="password"
+          inputMode="numeric"
+          pattern="\d*"
+          maxLength={4}
+          className="w-full text-center text-2xl tracking-[1em] py-3 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 font-mono"
+          placeholder="4 位數 PIN"
+          value={pin}
+          onChange={(e) => {
+            setPin(e.target.value.replace(/\D/g, "").slice(0, 4));
+            setErr(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          disabled={busy}
+        />
+      </div>
+      {err && <div className="text-rose-400 text-sm mt-3">{err}</div>}
+      <div className="flex justify-between items-center mt-5">
+        <button
+          className="text-xs text-slate-400 hover:text-rose-300"
+          onClick={() => window.api.addAccountCancel()}
+          disabled={busy}
+        >
+          取消新增（丟掉這個登入）
+        </button>
+        <button
+          className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+          onClick={submit}
+          disabled={busy || !nickname.trim() || pin.length !== 4}
+        >
+          {busy ? "存中…" : "完成"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TabBar({ state }: { state: AppState }) {
+  const { multi } = state;
+  if (multi.tabs.length === 0) return null;
+  return (
+    <div className="flex items-stretch bg-slate-950 border-b border-slate-800 select-none shrink-0">
+      {multi.tabs.map((t) => (
+        <Tab key={t.id} tab={t} />
+      ))}
+      <button
+        className="px-3 text-slate-500 hover:text-emerald-300 hover:bg-slate-900 text-sm border-l border-slate-800"
+        onClick={() => window.api.goPicker()}
+        title="切回 picker，可以選別的帳號 / 新增帳號"
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+function Tab({ tab }: { tab: NonNullable<AppState["multi"]["tabs"][number]> }) {
+  const [closing, setClosing] = useState(false);
+  return (
+    <div
+      className={`flex items-center gap-2 px-3 py-1.5 border-r border-slate-800 cursor-pointer ${
+        tab.isActive ? "bg-slate-800 text-slate-100" : "text-slate-400 hover:bg-slate-900"
+      }`}
+      onClick={() => {
+        if (!tab.isActive) window.api.switchActiveAccount(tab.id);
+      }}
+      title={`${tab.nickname}（${tab.maskedAccount}）`}
+    >
+      <div
+        className={`w-2 h-2 rounded-full ${
+          tab.pipelineRunning ? "bg-emerald-400 animate-pulse" : tab.isOpen ? "bg-sky-400" : "bg-slate-600"
+        }`}
+      />
+      <span className="text-sm font-medium truncate max-w-[140px]">{tab.nickname}</span>
+      {tab.pipelineRunning && tab.totalCount != null && (
+        <span className="text-[10px] text-emerald-300">
+          {tab.doneCount ?? 0}/{tab.totalCount}
+        </span>
+      )}
+      <button
+        className="ml-1 w-5 h-5 rounded hover:bg-rose-700 hover:text-white text-xs disabled:opacity-50"
+        onClick={async (e) => {
+          e.stopPropagation();
+          if (closing) return;
+          if (
+            !window.confirm(
+              `關閉 ${tab.nickname} 的 tab？\n\n會做：\n• 停掉這個帳號正在跑的 pipeline\n• 把右邊瀏覽器移除\n\n帳號跟 PIN 還會留在 picker，下次可以重新點開。`,
+            )
+          )
+            return;
+          setClosing(true);
+          try {
+            await window.api.closeTab(tab.id);
+          } finally {
+            setClosing(false);
+          }
+        }}
+        title="關閉這個 tab（停 pipeline、保留帳號）"
+      >
+        ×
+      </button>
+    </div>
+  );
 }

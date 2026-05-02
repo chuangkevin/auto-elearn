@@ -1,4 +1,4 @@
-import { BrowserWindow } from "electron";
+import { BrowserWindow, type Session } from "electron";
 
 export interface UnenrollResult {
   ok: boolean;
@@ -11,9 +11,13 @@ export interface UnenrollResult {
  * Strategy: try the /info/<cid> detail page first (simpler DOM, one course);
  * fall back to the learning dashboard if the detail page doesn't expose the
  * button.
+ *
+ * v0.8.0：必須帶該帳號的 partition session，不然 hidden window 沒 cookie，
+ * 會被 server 踢回登入頁、找不到任何退選按鈕。
  */
 export async function unenrollCourse(
   cid: string,
+  session?: Session,
   timeoutMs = 25_000,
 ): Promise<UnenrollResult> {
   const win = new BrowserWindow({
@@ -21,6 +25,7 @@ export async function unenrollCourse(
     width: 1280,
     height: 800,
     webPreferences: {
+      ...(session ? { session } : {}),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

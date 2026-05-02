@@ -8,31 +8,37 @@ export interface PersistedRun {
   status: "running" | "paused" | "done" | "aborted";
 }
 
-function filePath(): string {
+/**
+ * v0.8.0 起 run-state 走 per-account：每個帳號自己的中斷狀態。
+ * 沒帶 accountId 是給 v0.7.x 路徑（已退役）保留 fallback。
+ */
+function filePath(accountId?: string): string {
+  if (accountId) return storagePath("accounts", `${accountId}.run.json`);
   return storagePath("run-state.json");
 }
 
-export function saveRun(run: PersistedRun): void {
+export function saveRun(run: PersistedRun, accountId?: string): void {
   try {
-    fs.writeFileSync(filePath(), JSON.stringify(run, null, 2));
+    fs.writeFileSync(filePath(accountId), JSON.stringify(run, null, 2));
   } catch {
     /* non-fatal */
   }
 }
 
-export function loadRun(): PersistedRun | null {
+export function loadRun(accountId?: string): PersistedRun | null {
   try {
-    if (!fs.existsSync(filePath())) return null;
-    const raw = fs.readFileSync(filePath(), "utf-8");
+    const p = filePath(accountId);
+    if (!fs.existsSync(p)) return null;
+    const raw = fs.readFileSync(p, "utf-8");
     return JSON.parse(raw) as PersistedRun;
   } catch {
     return null;
   }
 }
 
-export function clearRun(): void {
+export function clearRun(accountId?: string): void {
   try {
-    fs.unlinkSync(filePath());
+    fs.unlinkSync(filePath(accountId));
   } catch {
     /* idempotent */
   }

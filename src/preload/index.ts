@@ -1,11 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   IPC,
+  type AccountOpResult,
   type AppState,
   type AutoLoginProgress,
   type CourseCandidate,
-  type CredsPromptPayload,
-  type CredentialsStatus,
   type ResumePrompt,
   type SearchOptions,
   type StealthState,
@@ -35,20 +34,6 @@ const api = {
   startPipeline: (cids: string[]) => ipcRenderer.send(IPC.PIPELINE_START, cids),
   unenrollCourse: (cid: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke(IPC.UNENROLL_COURSE, cid),
-  getCredsStatus: (): Promise<CredentialsStatus> => ipcRenderer.invoke(IPC.CREDS_STATUS),
-  forgetCredentials: () => ipcRenderer.send(IPC.CREDS_FORGET),
-  switchAccount: (): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke(IPC.CREDS_SWITCH_ACCOUNT),
-  saveCredentialsManual: (
-    payload: { account: string; password: string },
-  ): Promise<{ ok: boolean; reason?: string }> =>
-    ipcRenderer.invoke(IPC.CREDS_SAVE_MANUAL, payload),
-  answerCredsPrompt: (save: boolean) => ipcRenderer.send(IPC.CREDS_SAVE_ANSWER, save),
-  onCredsPrompt: (cb: (p: CredsPromptPayload) => void) => {
-    const listener = (_evt: Electron.IpcRendererEvent, p: CredsPromptPayload) => cb(p);
-    ipcRenderer.on(IPC.CREDS_PROMPT_SAVE, listener);
-    return () => ipcRenderer.off(IPC.CREDS_PROMPT_SAVE, listener);
-  },
   onAutoLoginProgress: (cb: (p: AutoLoginProgress) => void) => {
     const listener = (_evt: Electron.IpcRendererEvent, p: AutoLoginProgress) => cb(p);
     ipcRenderer.on(IPC.AUTOLOGIN_PROGRESS, listener);
@@ -81,6 +66,47 @@ const api = {
     ipcRenderer.send(IPC.RENDERER_LOG, { level, msg }),
   openLogsFolder: () => ipcRenderer.send(IPC.OPEN_LOGS_FOLDER),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC.APP_VERSION_GET),
+
+  // ── 多帳號 (v0.8.0) ─────────────────────────────────────────────
+  beginUnlock: (id: string) => ipcRenderer.send(IPC.ACCOUNT_BEGIN_UNLOCK, id),
+  verifyPin: (id: string, pin: string): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_VERIFY_PIN, { id, pin }),
+  cancelUnlock: () => ipcRenderer.send(IPC.ACCOUNT_CANCEL_UNLOCK),
+  switchActiveAccount: (id: string) => ipcRenderer.send(IPC.ACCOUNT_SWITCH_ACTIVE, id),
+  closeTab: (id: string): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_CLOSE_TAB, id),
+  goPicker: () => ipcRenderer.send(IPC.ACCOUNT_GO_PICKER),
+  addAccountBegin: (): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_ADD_BEGIN),
+  addAccountCancel: () => ipcRenderer.send(IPC.ACCOUNT_ADD_CANCEL),
+  finishNewAccount: (
+    payload: { nickname: string; pin: string },
+  ): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_FINISH_NEW, payload),
+  setAccountNickname: (
+    payload: { id: string; nickname: string },
+  ): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_SET_NICKNAME, payload),
+  setAccountPin: (
+    payload: { id: string; oldPin: string; newPin: string },
+  ): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_SET_PIN, payload),
+  resetPinBegin: (id: string) => ipcRenderer.send(IPC.ACCOUNT_RESET_PIN_BEGIN, id),
+  resetPinVerify: (
+    payload: { id: string; password: string },
+  ): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_RESET_PIN_VERIFY, payload),
+  resetPinComplete: (
+    payload: { id: string; newPin: string },
+  ): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_RESET_PIN_COMPLETE, payload),
+  resetPinCancel: () => ipcRenderer.send(IPC.ACCOUNT_RESET_PIN_CANCEL),
+  removeAccount: (id: string): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_REMOVE, id),
+  logoutActiveAccount: (): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_LOGOUT_ACTIVE),
+  clearAllAccounts: (): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNTS_CLEAR_ALL),
 };
 
 contextBridge.exposeInMainWorld("api", api);

@@ -5,7 +5,7 @@
 
 export type AppStatus =
   | "boot"
-  | "setup"         // first run: no credentials saved; show onboarding form
+  | "setup"         // first run / new-account flow: no credentials saved; show onboarding form
   | "await_login"
   | "selecting"     // user browsing + ticking courses, before enrollment
   | "enrolling"    // POSTing /enploy/<cid> for each selected course
@@ -51,6 +51,56 @@ export interface LogEntry {
   msg: string;
 }
 
+/**
+ * 多帳號 UI 模式（比 active session 的 status 高一層）：
+ *  - boot: app 啟動中
+ *  - picker: Netflix tile picker；沒 active 帳號
+ *  - pin: 使用者剛點 picker 上某個 tile，正在輸入 PIN
+ *  - reset_pin: 「忘記 PIN」流程，要先驗證 elearn 密碼
+ *  - post_login: 剛登入新帳號，要使用者設暱稱 + PIN
+ *  - active: 有 active 帳號，畫面是該帳號的 selecting/running 等等
+ */
+export type MultiMode =
+  | "boot"
+  | "picker"
+  | "pin"
+  | "reset_pin"
+  | "post_login"
+  | "active";
+
+export interface AccountSummary {
+  id: string;
+  nickname: string;
+  /** "F*****8271"，UI 永遠拿這個顯示；raw account 不過 IPC 邊界 */
+  maskedAccount: string;
+  /** 是否已經被開成 tab（有自己的 BrowserView + 可以跑 pipeline） */
+  isOpen: boolean;
+  /** 是否就是當前 active tab（可見的那個） */
+  isActive: boolean;
+  /** mirror of per-session AppState.status；只有 isOpen=true 時有意義 */
+  status?: AppStatus;
+  pipelineRunning: boolean;
+  /** 進度徽章用 */
+  doneCount?: number;
+  totalCount?: number;
+  lastUsedAt?: string;
+}
+
+export interface MultiInfo {
+  mode: MultiMode;
+  /** 所有已存 record 的帳號，for tile picker（含 isOpen / isActive 旗標） */
+  pickerAccounts: AccountSummary[];
+  /** picker 中已 open 的子集合（順序 = tab bar 順序） */
+  tabs: AccountSummary[];
+  activeAccountId: string | null;
+  /** mode==="pin"：要驗哪個 tile 的 PIN */
+  pinTarget?: { id: string; nickname: string; maskedAccount: string; failedAttempts?: number };
+  /** mode==="reset_pin"：忘記 PIN 流程要驗的帳號 + 進入哪一階段 */
+  resetPin?: { id: string; nickname: string; stage: "verify" | "set"; failedAttempts?: number };
+  /** mode==="post_login"：剛登入完成的新帳號，請求暱稱 + PIN */
+  postLogin?: { id: string; suggestedNickname?: string };
+}
+
 export interface AppState {
   status: AppStatus;
   pauseReason?: string;
@@ -87,6 +137,8 @@ export interface AppState {
     llmCalls: number;
     progressPct: number;
   };
+  /** 多帳號層的狀態（picker / tabs / 模式）。永遠存在，renderer 第一個 case 看 multi.mode 決定要 render 什麼。 */
+  multi: MultiInfo;
 }
 
 export const IPC = {
@@ -113,19 +165,6 @@ export const IPC = {
   REFRESH_COURSES: "courses:refresh",
   /** renderer → main: navigate the embedded BrowserView */
   NAVIGATE_VIEW: "view:navigate",
-  /** main → renderer: prompt the user to save freshly-sniffed credentials */
-  CREDS_PROMPT_SAVE: "creds:prompt-save",
-  /** renderer → main: user accepted / declined the save-creds prompt */
-  CREDS_SAVE_ANSWER: "creds:save-answer",
-  /** renderer → main: forget the stored credentials */
-  CREDS_FORGET: "creds:forget",
-  /** renderer → main: log out from BrowserView, clear stored creds, and
-   *  return UI to first-run setup so user can enter a different account. */
-  CREDS_SWITCH_ACCOUNT: "creds:switch-account",
-  /** renderer → main: query current saved-credentials state */
-  CREDS_STATUS: "creds:status",
-  /** renderer → main: manually save credentials without the sniffer flow */
-  CREDS_SAVE_MANUAL: "creds:save-manual",
   /** main → renderer: auto-login in progress / result */
   AUTOLOGIN_PROGRESS: "autologin:progress",
   /** main → renderer: previous run exists, offer to resume */
@@ -168,6 +207,44 @@ export const IPC = {
   OPEN_LOGS_FOLDER: "logs:open-folder",
   /** renderer → main: 取得 app.getVersion()，給偽裝記事本右鍵的「版本」項顯示用 */
   APP_VERSION_GET: "app:version-get",
+
+  // ── 多帳號 (v0.8.0) ─────────────────────────────────────────────
+  /** renderer → main: picker tile click → 進入 PIN 輸入模式（main 端記下 pinTarget） */
+  ACCOUNT_BEGIN_UNLOCK: "account:begin-unlock",
+  /** renderer → main: 提交 PIN，正確 → 開 tab + 設成 active；錯 → multi.pinTarget.failedAttempts++ */
+  ACCOUNT_VERIFY_PIN: "account:verify-pin",
+  /** renderer → main: 取消 PIN 輸入回 picker */
+  ACCOUNT_CANCEL_UNLOCK: "account:cancel-unlock",
+  /** renderer → main: tab bar 點某 tab → 切 active（前提 isOpen） */
+  ACCOUNT_SWITCH_ACTIVE: "account:switch-active",
+  /** renderer → main: tab × 鈕 → 停 pipeline + detach view，但保留 record + PIN */
+  ACCOUNT_CLOSE_TAB: "account:close-tab",
+  /** renderer → main: tab bar 上的「+」/ 切回 picker：setActiveId(null)，其他 tab 繼續跑 */
+  ACCOUNT_GO_PICKER: "account:go-picker",
+  /** renderer → main: 「+ 新增帳號」tile click：建立 pending session（fresh BrowserView + partition），進入 setup 流程 */
+  ACCOUNT_ADD_BEGIN: "account:add-begin",
+  /** renderer → main: 取消新增帳號（detach view + 清 in-memory creds） */
+  ACCOUNT_ADD_CANCEL: "account:add-cancel",
+  /** renderer → main: 新帳號登入完成（已抓到帳密），使用者填好 nickname + PIN，main 寫入 storage */
+  ACCOUNT_FINISH_NEW: "account:finish-new",
+  /** renderer → main: 改暱稱（picker tile 設定齒輪） */
+  ACCOUNT_SET_NICKNAME: "account:set-nickname",
+  /** renderer → main: 改 PIN（要先驗舊 PIN） */
+  ACCOUNT_SET_PIN: "account:set-pin",
+  /** renderer → main: 點「忘記 PIN」→ 進入 reset_pin 模式 */
+  ACCOUNT_RESET_PIN_BEGIN: "account:reset-pin-begin",
+  /** renderer → main: reset_pin 階段「verify」：使用者輸入 elearn 密碼，main 比對 storage */
+  ACCOUNT_RESET_PIN_VERIFY: "account:reset-pin-verify",
+  /** renderer → main: reset_pin 階段「set」：使用者輸入新 PIN */
+  ACCOUNT_RESET_PIN_COMPLETE: "account:reset-pin-complete",
+  /** renderer → main: 取消 reset_pin 流程 */
+  ACCOUNT_RESET_PIN_CANCEL: "account:reset-pin-cancel",
+  /** renderer → main: 從 picker 移除單一帳號（停 pipeline、detach、清 partition data + creds + record） */
+  ACCOUNT_REMOVE: "account:remove",
+  /** renderer → main: active 帳號「登出」回到 picker（停 pipeline + detach view，保留 record + PIN） */
+  ACCOUNT_LOGOUT_ACTIVE: "account:logout-active",
+  /** renderer → main: 全域清除（清掉所有帳號的 record + creds + partition data + pipeline + tabs） */
+  ACCOUNTS_CLEAR_ALL: "accounts:clear-all",
 } as const;
 
 export interface SearchOptions {
@@ -183,19 +260,6 @@ export interface SearchOptions {
   hoursMin?: number;
   /** Max cert hours. */
   hoursMax?: number;
-}
-
-export interface CredentialsStatus {
-  saved: boolean;
-  /** Masked account the user can see ("F*****8271") without exposing the full ID */
-  maskedAccount?: string;
-  savedAt?: string;
-  lastUsedAt?: string;
-}
-
-export interface CredsPromptPayload {
-  /** Masked account for the UI. Server never receives the plain value back. */
-  maskedAccount: string;
 }
 
 export interface AutoLoginProgress {
@@ -236,4 +300,10 @@ export interface ViewBounds {
   y: number;
   width: number;
   height: number;
+}
+
+/** Generic 多帳號操作回應 */
+export interface AccountOpResult {
+  ok: boolean;
+  reason?: string;
 }

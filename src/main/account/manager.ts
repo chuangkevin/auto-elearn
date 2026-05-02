@@ -1,0 +1,131 @@
+/**
+ * AccountSession 集合管理。
+ *
+ * 一個「session」= 一個正在 app 內被打開的帳號（picker 上 tile 點開、PIN 過了之後）。
+ * 每個 session 都掛一個自己 partition 的 BrowserView、自己的 AppState、自己的
+ * heartbeat / pipeline / watchdog 旗標。彼此 cookie / storage / pipeline 互不干擾。
+ *
+ * 沒打開的帳號（在 picker 看得到但沒解鎖）只是 storage 裡的 AccountRecord，
+ * 不會出現在這裡。
+ */
+
+import type { BrowserView } from "electron";
+import { session as sessionModule } from "electron";
+import type { AppState, AppStatus } from "../../shared/ipc";
+import type { SniffedCredentials } from "../auth/login-sniffer";
+import type { AccountRecord } from "./storage";
+
+export interface AccountSession {
+  /** sha256(account)[:12] */
+  id: string;
+  /** 從 accounts/index.json 讀出來的 metadata（暱稱、PIN hash 等） */
+  record: AccountRecord;
+  /** 解密後的 raw 帳號（IPC 不會送出） */
+  account: string;
+  /** 解密後的 raw 密碼（IPC 不會送出） */
+  password: string;
+  /** Electron 用的 partition string：`persist:elearn-<id>` */
+  partitionId: string;
+  /** 這個帳號的嵌入式瀏覽器；null 代表「tab 被關了」但帳號還在 picker */
+  view: BrowserView | null;
+  /** 這個帳號當下的 UI state（renderer 拿到的就是 active session 的這個 state） */
+  state: AppState;
+  /** Pipeline 中止旗標 */
+  abortSignal: { aborted: boolean };
+  pipelineRunning: boolean;
+  /** 心跳階段正在跑的課，view focus 切換用 */
+  runningCids: Set<string>;
+  /** 目前 view 顯示哪一門課的 /info 頁面 */
+  focusedCid: string | null;
+  /** 從 login-sniffer 抓到、還沒持久化的 creds（多帳號模式不太用得到，但保險起見保留） */
+  pendingSniffed: SniffedCredentials | null;
+  autoLoginInFlight: boolean;
+  reloginInFlight: boolean;
+  logoutHandlingInFlight: boolean;
+  watchdogTimer: NodeJS.Timeout | null;
+  loginWatchdogTimer: NodeJS.Timeout | null;
+  consecutiveDeadChecks: number;
+  loginMissCount: number;
+  setupFallbackTimer: NodeJS.Timeout | null;
+  /** 觀察 status 卡住用 */
+  lastStatusChangeAt: number;
+  lastObservedStatus: AppStatus;
+  /** 解構這個 session 時要呼叫的 cleanup 函式（e.g. login-sniffer detacher） */
+  onDestroy: Array<() => void>;
+}
+
+const sessions = new Map<string, AccountSession>();
+let activeId: string | null = null;
+
+export function partitionIdFor(id: string): string {
+  return `persist:elearn-${id}`;
+}
+
+export function listSessions(): AccountSession[] {
+  return Array.from(sessions.values());
+}
+
+export function getSession(id: string): AccountSession | null {
+  return sessions.get(id) ?? null;
+}
+
+export function getActiveSession(): AccountSession | null {
+  if (!activeId) return null;
+  return sessions.get(activeId) ?? null;
+}
+
+export function getActiveId(): string | null {
+  return activeId;
+}
+
+export function setActiveId(id: string | null): void {
+  activeId = id;
+}
+
+export function hasSession(id: string): boolean {
+  return sessions.has(id);
+}
+
+export function registerSession(s: AccountSession): void {
+  sessions.set(s.id, s);
+}
+
+export function deregisterSession(id: string): void {
+  if (activeId === id) activeId = null;
+  sessions.delete(id);
+}
+
+/** 全新 session 用的 default state。
+ * 注意 `multi` 欄位是 placeholder：renderer 拿到的 AppState 在 main `pushState()` 時
+ * 會用 buildMultiInfo() 蓋掉這個 placeholder；per-session state 內部 read/write
+ * 從不碰它，所以放空殼就好。 */
+export function createInitialState(): AppState {
+  return {
+    status: "boot",
+    now: { action: "idle" },
+    courses: [],
+    logs: [],
+    stats: { done: 0, total: 0, quizzes: 0, llmCalls: 0, progressPct: 0 },
+    multi: {
+      mode: "boot",
+      pickerAccounts: [],
+      tabs: [],
+      activeAccountId: null,
+    },
+  };
+}
+
+/**
+ * 把指定 id 列表的 partition storage 清乾淨（cookies / localStorage / serviceworker）。
+ * 用在「全域清除」或單一帳號移除 —— 沒清的話下次同 id 再加帳號會撞到舊 cookie。
+ */
+export async function clearPartitionDataFor(ids: string[]): Promise<void> {
+  for (const id of ids) {
+    try {
+      const s = sessionModule.fromPartition(partitionIdFor(id));
+      await s.clearStorageData().catch(() => void 0);
+    } catch {
+      /* partition 從未被建立過就 swallow */
+    }
+  }
+}
