@@ -142,6 +142,8 @@ export const IPC = {
   STEALTH_SET_SECRET: "stealth:set-secret",
   /** renderer → main: re-lock the app (back to Noteqad) */
   STEALTH_LOCK: "stealth:lock",
+  /** renderer → main: 徹底清掉密碼，回到 no_secret 狀態（解除偽裝模式） */
+  STEALTH_CLEAR_SECRET: "stealth:clear-secret",
   /** renderer → main: absolute path of userData/config.json (for "your password is stored at..." UI) */
   STEALTH_CONFIG_PATH: "stealth:config-path",
   /** dialog → main: get current Gemini API key (masked) */

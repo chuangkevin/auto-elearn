@@ -48,6 +48,7 @@ import { clearRun, loadRun, saveRun, type PersistedRun } from "./persist/run-sta
 import { solveExam } from "./exam/solver";
 import { fillSurvey } from "./survey/filler";
 import {
+  clearSecret as stealthClearSecret,
   currentState as stealthCurrentState,
   lock as stealthLock,
   setSecret as stealthSetSecret,
@@ -1796,6 +1797,11 @@ ipcMain.handle(IPC.STEALTH_STATUS, () => stealthCurrentState());
 ipcMain.handle(IPC.STEALTH_UNLOCK, (_evt, secret: string) => stealthTryUnlock(secret));
 ipcMain.handle(IPC.STEALTH_SET_SECRET, (_evt, secret: string) => stealthSetSecret(secret));
 ipcMain.on(IPC.STEALTH_LOCK, () => stealthLock());
+ipcMain.handle(IPC.STEALTH_CLEAR_SECRET, () => {
+  stealthClearSecret();
+  log("info", "已解除偽裝模式（清掉密碼），下次打開會直接看到真正畫面");
+  return { ok: true };
+});
 ipcMain.handle(IPC.STEALTH_CONFIG_PATH, () => storagePath("config.json"));
 
 ipcMain.handle(IPC.GEMINI_KEY_GET, () => loadConfig().geminiApiKey ?? "");
@@ -2148,10 +2154,24 @@ ipcMain.handle(IPC.CREDS_SWITCH_ACCOUNT, async () => {
   buildElearnView("https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD");
   // destroy + rebuild 後 keyboard focus 仍卡在「已 destroy 的 view」遺址，新 view
   // 還沒接到游標前，左邊 React input 也打不進字。明確把 focus 拉回主視窗。
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.focus();
-    mainWindow.webContents.focus();
-  }
+  //
+  // v0.7.10：v0.7.9 只 focus 一次但實測使用者回報無效 —— buildElearnView 內的
+  // `view.webContents.loadURL(url)` 是非同步，新 view 在 loadURL resolve 後會搶 focus，
+  // 我們 focus 完馬上又被搶走。改成連續多次 focus（0ms / 200ms / 600ms / 1500ms），
+  // 確保超過任何一次新 view 的 loadURL settle 時間都還能把 focus 搶回來。
+  const focusBackToMain = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      mainWindow.focus();
+      mainWindow.webContents.focus();
+    } catch {
+      /* 視窗剛被使用者最小化或關掉就算了 */
+    }
+  };
+  focusBackToMain();
+  setTimeout(focusBackToMain, 200);
+  setTimeout(focusBackToMain, 600);
+  setTimeout(focusBackToMain, 1500);
   startSetupFallbackTimer();
   abortSignal.aborted = false;
   return { ok: true };

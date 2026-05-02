@@ -46,6 +46,7 @@ declare global {
       stealthUnlock: (secret: string) => Promise<boolean>;
       stealthSetSecret: (secret: string) => Promise<{ ok: boolean; reason?: string }>;
       stealthLock: () => void;
+      stealthClearSecret: () => Promise<{ ok: boolean }>;
       stealthConfigPath: () => Promise<string>;
       openGeminiDialog: () => void;
       onGeminiDialogRequest: (cb: () => void) => () => void;
@@ -541,12 +542,12 @@ function App() {
         onClick={() => setCredsModalOpen(true)}
         title={
           credsStatus?.saved
-            ? "點我可以改帳號密碼，或清除已記得的帳號"
+            ? "點我可以改帳號密碼，或清除已記得的帳號（這裡不秀帳號避免被旁邊的人看到）"
             : "手動輸入 e 等公務園的帳號密碼"
         }
       >
         {credsStatus?.saved
-          ? `🔑 已儲存帳號：${credsStatus.maskedAccount ?? "（讀取中）"}（點我可改）`
+          ? "🔑 已儲存帳號（點我可改）"
           : "🔑 還沒記住帳號，點我設定"}
       </button>
 
@@ -842,6 +843,10 @@ export default function Shell() {
   // v0.6.7：Gemini key 改成 renderer 內的 React modal（原本是 child BrowserWindow，
   // 在多螢幕環境會跑到別的 monitor 看起來像「程式黑掉卡住」）。
   const [showGeminiKey, setShowGeminiKey] = useState(false);
+  // v0.7.10：偽裝模式設定 modal —— 之前只有「馬上偽裝」按鈕，使用者要關偽裝
+  // （清掉密碼讓下次打開直接看到真畫面）找不到入口。modal 提供「馬上偽裝」+
+  // 「徹底解除偽裝模式」兩個選項。
+  const [showStealthOptions, setShowStealthOptions] = useState(false);
 
   useEffect(() => {
     window.api
@@ -926,13 +931,10 @@ export default function Shell() {
       {stealth === "unlocked" && (
         <button
           className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-          title="馬上偽裝成記事本（也可以用 Ctrl+Alt+H）"
-          onClick={() => {
-            window.api.stealthLock();
-            setStealth("locked");
-          }}
+          title="點開可以馬上偽裝成記事本，或者徹底解除偽裝模式（清掉密碼）"
+          onClick={() => setShowStealthOptions(true)}
         >
-          🫥 馬上偽裝
+          🫥 偽裝模式…
         </button>
       )}
       {stealth === "no_secret" && (
@@ -984,6 +986,28 @@ export default function Shell() {
         <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70">
           <ModalGuard>
             <GeminiKeyModal onClose={() => setShowGeminiKey(false)} />
+          </ModalGuard>
+        </div>
+      )}
+
+      {showStealthOptions && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/60">
+          <ModalGuard>
+            <StealthOptionsCard
+              onCancel={() => setShowStealthOptions(false)}
+              onLockNow={() => {
+                window.api.stealthLock();
+                setStealth("locked");
+                setShowStealthOptions(false);
+              }}
+              onClearSecret={async () => {
+                const res = await window.api.stealthClearSecret();
+                if (res.ok) {
+                  setStealth("no_secret");
+                  setShowStealthOptions(false);
+                }
+              }}
+            />
           </ModalGuard>
         </div>
       )}
@@ -1216,6 +1240,75 @@ function StealthSetupCard({
           onClick={onSubmit}
         >
           設定好了
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 已解鎖狀態下，左下角 🫥 按鈕點開的設定卡。
+ * 提供兩個動作：
+ *  - 馬上偽裝（鎖回 Notepad，密碼還在，下次打開仍是偽裝模式）
+ *  - 徹底解除偽裝模式（清掉密碼，下次打開直接看到真畫面）
+ *
+ * 為什麼要這個 modal：v0.7.10 之前點 🫥 直接 lock，沒地方「關掉偽裝」—— 想關掉
+ * 偽裝的使用者只能去翻 config.json，違反「點得到的功能就不該叫使用者改檔案」。
+ */
+function StealthOptionsCard({
+  onCancel,
+  onLockNow,
+  onClearSecret,
+}: {
+  onCancel: () => void;
+  onLockNow: () => void;
+  onClearSecret: () => void;
+}) {
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  return (
+    <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-md w-[90vw] p-6 shadow-2xl text-slate-100">
+      <h2 className="text-lg font-semibold mb-3">🫥 偽裝模式</h2>
+      <p className="text-sm text-slate-300 mb-4 leading-relaxed">
+        目前是「<b className="text-emerald-300">已解鎖</b>」狀態。
+        要把畫面馬上變回記事本，或者徹底關掉偽裝模式？
+      </p>
+      <div className="space-y-2 mb-4">
+        <button
+          className="w-full text-left px-4 py-3 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700"
+          onClick={onLockNow}
+        >
+          <div className="text-sm font-semibold text-slate-100">🫥 馬上偽裝（鎖回記事本）</div>
+          <div className="text-xs text-slate-400 mt-0.5">
+            畫面立刻變回 Notepad；密碼還在，下次打開仍是偽裝模式。
+            （也可以隨時用 <code>Ctrl+Alt+H</code>）
+          </div>
+        </button>
+        <button
+          className={`w-full text-left px-4 py-3 rounded border ${
+            confirmingClear
+              ? "bg-rose-900 hover:bg-rose-800 border-rose-700"
+              : "bg-slate-800 hover:bg-slate-700 border-slate-700"
+          }`}
+          onClick={() => {
+            if (confirmingClear) onClearSecret();
+            else setConfirmingClear(true);
+          }}
+        >
+          <div className="text-sm font-semibold text-slate-100">
+            {confirmingClear ? "⚠ 再點一次確定徹底解除偽裝" : "🚪 徹底解除偽裝模式（清掉密碼）"}
+          </div>
+          <div className="text-xs text-slate-400 mt-0.5">
+            清掉偽裝密碼，<b>下次打開程式直接看到真畫面，不再經過 Notepad</b>。
+            想恢復偽裝要重新設一組密碼。
+          </div>
+        </button>
+      </div>
+      <div className="flex justify-end">
+        <button
+          className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm"
+          onClick={onCancel}
+        >
+          取消
         </button>
       </div>
     </div>
@@ -1647,7 +1740,9 @@ function Selecting({ state }: { state: AppState }) {
               : "已登入"}
           </div>
           <h1 className="text-xl font-bold flex items-center gap-1">
-            {state.user?.name ?? "使用者"}
+            {/* 不再顯示使用者名稱（連 maskName 的「莊***」也不秀），純粹顯示登入狀態。
+                避免旁邊的人從姓氏 + 機關推得出是誰。 */}
+            <span>已登入</span>
             {state.loginStatus === "ok" && <span className="text-emerald-400 text-base">✅</span>}
             {state.loginStatus === "relogging" && <span className="text-amber-400 text-base animate-pulse">🔄</span>}
             {state.loginStatus === "failed" && <span className="text-rose-400 text-base">❌</span>}
@@ -1921,7 +2016,12 @@ function Selecting({ state }: { state: AppState }) {
       </section>
 
       {/* 下方確認區：選完課之後，按下面按鈕開始上課 */}
-      <footer className="sticky bottom-0 bg-slate-950/90 backdrop-blur-sm py-3 -mx-6 px-6 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+      {/* v0.7.10：footer 左側留 pl-44 而不是原本的 px-6 ——
+          視窗壓窄時，左下角的 fixed 浮動 chip（🔑/🫥/⚙）會蓋住 footer 左邊的
+          「選了 X 門」字樣。chip 大概 ~170px 寬（位於 left-3），給 pl-44 (176px)
+          就能讓 footer 內容永遠在 chip 右側。flex-wrap 也讓「開始上課」按鈕在
+          很窄的時候能掉到下一行不被截掉。 */}
+      <footer className="sticky bottom-0 bg-slate-950/90 backdrop-blur-sm py-3 -mx-6 pl-44 pr-6 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
         <div className="text-sm flex items-center gap-4 flex-wrap">
           <span>
             選了 <span className="font-bold text-emerald-400">{selected.size}</span> 門
@@ -2240,7 +2340,8 @@ function Monitor({ state }: { state: AppState }) {
     <div className="p-6 pb-14 space-y-3 text-slate-100 h-full flex flex-col">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-bold flex items-center gap-1">
-          {statusLabel(state.status)} · {state.user?.name ?? ""}
+          {/* 不再顯示使用者名稱，純粹顯示目前 pipeline 階段。 */}
+          {statusLabel(state.status)}
           {state.loginStatus === "relogging" && <span className="text-amber-400 animate-pulse">🔄</span>}
           {state.loginStatus === "failed" && <span className="text-rose-400">❌</span>}
         </h1>

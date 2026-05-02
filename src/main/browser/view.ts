@@ -256,6 +256,11 @@ export function attachElearnView(
     },
   });
   win.setBrowserView(view);
+  // 預設把 BrowserView 整個靜音 —— 課程影片自動播放會炸出聲音，使用者在公司
+  // 上班放著刷課很尷尬。Electron 的 webContents.setAudioMuted 是分頁等級的控制，
+  // 不會影響系統音量、不會 mute 整個 app，純粹只 silence elearn 那塊嵌入畫面。
+  // 之後若使用者要聽課可加開關，目前先一律靜音。
+  view.webContents.setAudioMuted(true);
   view.webContents.loadURL(url);
 
   // Suppress JS alert / confirm / prompt at the earliest possible point on

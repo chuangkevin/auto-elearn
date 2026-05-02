@@ -6,30 +6,35 @@
  */
 
 /**
- * 帳號隱碼：保留第 1 碼 + *** + 後 2 碼。
- * "F123456789" -> "F***89"
+ * 帳號隱碼：保留第 1 碼 + *** + 後 1 碼（v0.7.10 起更短）。
+ * "F123456789" -> "F***9"
  * "ABC"        -> "A***" (太短時保留前 1 碼，後段留空)
+ *
+ * 為什麼縮短：之前 "F***89" 還會洩漏身分證末 2 碼，使用者旁邊的人對得起來；
+ * 改成只留末 1 碼資訊量更低，仍夠使用者自己辨識「對，是我這個帳號」。
  */
 export function maskAccount(account: string | null | undefined): string {
   if (!account) return "";
   const a = String(account).trim();
   if (!a) return "";
-  if (a.length <= 3) return `${a.charAt(0)}***`;
-  return `${a.charAt(0)}***${a.slice(-2)}`;
+  if (a.length <= 2) return `${a.charAt(0)}***`;
+  return `${a.charAt(0)}***${a.slice(-1)}`;
 }
 
 /**
- * 使用者名稱隱碼：保留第 1 個字 + ***。
- * "王小明" -> "王***"
- * "Kevin"  -> "K***"
+ * 使用者名稱隱碼：完全不顯示任何字（v0.7.10 起更嚴）。
+ * "王小明" -> "***"
+ * "Kevin"  -> "***"
+ *
+ * 為什麼整個遮：之前 "王***" 仍會洩漏姓氏，公務體系內部認得姓氏 + 機關就猜得出人；
+ * 改成完全的 "***"，只保留「有東西在這」的視覺指示。但 maskSecretsInString 仍能
+ * 用「真名 → ***」做 log 替換，不影響 log 隱碼。
  */
 export function maskName(name: string | null | undefined): string {
   if (!name) return "";
   const n = String(name).trim();
   if (!n) return "";
-  // 取第一個字（中文一個字、英文一個字母）
-  const first = Array.from(n)[0] ?? "";
-  return `${first}***`;
+  return "***";
 }
 
 /**

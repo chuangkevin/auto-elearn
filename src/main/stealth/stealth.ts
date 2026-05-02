@@ -45,6 +45,16 @@ export function lock(): void {
   sessionUnlocked = false;
 }
 
+/**
+ * 完全清掉 stealth 密碼，回到「沒設定密碼」的狀態。
+ * 給操作區的「解除偽裝模式」按鈕用 — 之前只有「鎖回 Notepad」沒有「徹底關掉」，
+ * 使用者要關偽裝得手動去翻 config.json。
+ */
+export function clearSecret(): void {
+  saveConfig({ stealthSecret: undefined });
+  sessionUnlocked = false;
+}
+
 /** Test-only helper: clears the in-memory unlocked flag. Does not touch config. */
 export function resetSession(): void {
   sessionUnlocked = false;

@@ -65,6 +65,8 @@ const api = {
   stealthSetSecret: (secret: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke(IPC.STEALTH_SET_SECRET, secret),
   stealthLock: () => ipcRenderer.send(IPC.STEALTH_LOCK),
+  stealthClearSecret: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.STEALTH_CLEAR_SECRET),
   stealthConfigPath: (): Promise<string> => ipcRenderer.invoke(IPC.STEALTH_CONFIG_PATH),
   getGeminiKey: (): Promise<string> => ipcRenderer.invoke(IPC.GEMINI_KEY_GET),
   setGeminiKey: (key: string): Promise<void> => ipcRenderer.invoke(IPC.GEMINI_KEY_SET, key),
