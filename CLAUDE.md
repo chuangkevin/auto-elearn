@@ -236,6 +236,57 @@ elearn 各機關的測驗 row 版型差很多，原本 `closest('label')` / `clo
 - 早期版本 chain 跑 `心得` 步驟對沒 textarea 的課常態 timeout 噴 `心得失敗`，純粹噪音
 - v0.4.7 砍掉 reflection 整個模組；UI stepper 對齊 elearn 三步 + 「等待 server 確認通過…」 sky badge for verifying phase
 
+## Domain Knowledge — 多帳號架構（v0.8.0+）
+
+### Account = Session + Record + Partition
+- v0.8.0 起 multi-account 是唯一模式，**沒有單帳號 fallback**。Picker 上沒帳號 = 空 picker，不會自動進入任何流程。
+- 每帳號對應：`AccountSession`（in-memory runtime）+ `AccountRecord`（持久化 metadata）+ 自己的 Electron `partition: persist:elearn-<id>`，cookies / localStorage 互不污染
+- `id = sha256(account.toUpperCase())[:12]` deterministic — 換機後同一個 e 等帳號還是同 id
+- Storage：`accounts/index.json`（公開 metadata + PIN hash）+ `accounts/<id>.bin`（safeStorage 加密的 raw creds）
+- 程式碼：`src/main/account/{storage,manager,pin}.ts`，`AccountSession` 定義在 `manager.ts`
+
+### Pause / Abort 必須是兩個 signal，不要混
+- `abortSignal.aborted` = 不可逆終止（pipeline 整個結束）
+- `pauseSignal.paused` = 可恢復暫停；chain 跟 heartbeat engine 在 step boundary 用 `awaitNotPaused(s)` 讀
+- v0.8.2 之前 `ACTION_PAUSE` 只翻 `state.status="paused"` 但**沒有任何模組讀** → UI 假動作，考試問卷照跑
+- 任何新加的長執行流程都要 plumb `pauseSignal`（heartbeat engine 接 `pauseSignal` option；chain 在每個 step 邊界 call `await awaitNotPaused(s)`）
+
+### PIN grace 機制（v0.8.2 起）
+- 通過 PIN → `unlocked = true; lastUnlockedAt = Date.now()`
+- 切 tab 用 `isWithinPinGrace(s) = unlocked && (now - lastUnlockedAt < 5min)` 判斷要不要重輸
+- 手動「🔒 鎖定」按鈕**必須**設 `unlocked = false` **且** `lastUnlockedAt = 0` —— 光 `unlocked = false` 不夠（grace 仍 honor 上次的 timestamp）
+- UI 上 `locked` icon 顯示來自 `!isWithinPinGrace(s)`，跟實際是否要 PIN 一致
+
+### Hahow「登入數量上限」auto-click 陷阱（v0.8.4→v0.8.5 教訓）
+- Hahow for business 限同帳號 2 裝置同時登入；超過跳 limit 頁
+- limit 頁有兩種按鈕：
+  - 「登出其他/舊裝置」/ "logout other" = **SAFE**，只踢其他保留我們自己 → 可 auto-click
+  - 「繼續」/「使用此裝置」/ "continue" = **UNSAFE**，會踢掉所有其他裝置含**我們自己的 SCORM heartbeat hidden window** → server 砍 reading session → 課程進度直接歸零
+- **永遠不要 auto-click UNSAFE 按鈕**。v0.8.4 配 generic「繼續」regex 點下去就是把使用者進度砍掉，緊急 v0.8.5 回滾
+- 偵測程式碼：`src/main/browser/view.ts maybeFireHahowLimit`，content-based regex（不靠 URL pattern；hahow URL 可能變但限制頁文字相對穩）
+
+### Hahow 為什麼單一帳號也撞 limit（v0.8.5 已知 issue，待 v0.8.6+）
+- chain 並行 `Promise.all([examTask, surveyTask])`（v0.7.3 設計）→ 同時開 2 個 hidden window 都載入 hahow → hahow 看成 2 裝置
+- `acquireElearnWindowSlot` 只在 `enterLC` 期間 hold，window 載完 LC 後 slot 就 release
+- 修法：refactor `lc-nav.ts` 把 slot ownership 給 caller（solveExam / fillSurvey），讓整個 hidden window lifecycle 都 hold slot
+
+### Cross-domain nav logger（v0.8.1+）
+- BrowserView 沒有 URL bar，使用者看不到撞到哪個 host
+- `view.ts logCrossDomain` 攔 did-navigate / did-redirect-navigation，非 elearn/ecpa 域名自動 log
+- 每 host 第一次出現必 log；後續同 host 命中關鍵字（hahow / nidp / limit / device）也 log
+- 用來定位 hahow / 自然人 SSO 等第三方 host 的 URL pattern；新加 third-party 整合時這個 log 是第一手線索
+
+### Heartbeat reauthFn（v0.8.1+）
+- 連續 3 次 heartbeat 失敗 → caller 提供的 `reauthFn(cid)` 被呼叫
+- caller 應該：靜默 `loginViaEcpa` + `extractTicket` → 回傳新 ticket
+- engine 拿到新 ticket 重置 bt，繼續打剩下的時間
+- 沒 reauth 的話心跳失敗 5 次直接 break，server 端的 reading session 變成孤兒，下一輪重啟也救不回來
+
+### 加選課程前 isSessionAlive precheck（v0.8.1+）
+- 多帳號背景 tab 久了 idx cookie 會過期但 partition 其他 cookies 還在
+- 不檢查直接 enrol → server silently 302 到 login → 看似報名 200 OK 實則沒寫成功
+- `runPipelineFor` 在 enrol 前 ping 一下 dashboard，沒 idx 就先 `tryAutoLogin`
+
 ## Release 流程
 
 **觸發時機（強制）**：每當一輪功能/修復告一段落、`package.json` 有 bump 版號的意圖，就必須走完下列 7 步。**只 bump 版號不打 tag = 未完成的 release**，等同沒做。
