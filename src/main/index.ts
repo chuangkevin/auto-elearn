@@ -396,9 +396,35 @@ function makeSession(opts: {
   });
   session.onDestroy.push(detachSniffer);
 
+  // v0.8.5：partition cookie 診斷 — 確認 persist:elearn-<id> 在重啟後有沒有保留
+  // hahow / elearn 的 session 識別。如果每次都回 0 → partition 沒持久化（不太可
+  // 能，但要排除）。如果每次都 fresh device-id → hahow 不認 partition。
+  void diagnosePartitionCookies(session).catch(() => void 0);
+
   startDetectLogin(session);
   registerSession(session);
   return session;
+}
+
+async function diagnosePartitionCookies(s: AccountSession): Promise<void> {
+  if (!s.view) return;
+  try {
+    const sess = s.view.webContents.session;
+    const elearnCookies = await sess.cookies.get({ domain: "elearn.hrd.gov.tw" }).catch(() => []);
+    const hahowCookies = await sess.cookies.get({ domain: "hahow.in" }).catch(() => []);
+    const hahowTwCookies = await sess.cookies.get({ domain: "hahow.tw" }).catch(() => []);
+    const idx = elearnCookies.find((c) => c.name === "idx");
+    const allHahow = [...hahowCookies, ...hahowTwCookies];
+    logSession(
+      s,
+      "info",
+      `[partition ${s.partitionId}] elearn idx=${idx?.value ? "yes" : "no"}, hahow cookies=${allHahow.length}${
+        allHahow.length > 0 ? ` (${allHahow.map((c) => c.name).join(",")})` : ""
+      }`,
+    );
+  } catch (e) {
+    logSession(s, "warn", `partition cookie 診斷失敗：${(e as Error)?.message ?? e}`);
+  }
 }
 
 async function destroySession(s: AccountSession): Promise<void> {
@@ -453,7 +479,15 @@ const HAHOW_AUTO_RESUME_MS = 30_000;
 
 async function handleHahowLimitHit(
   s: AccountSession,
-  info: { click: () => Promise<boolean>; navUrl: string },
+  info: {
+    click: () => Promise<{
+      clicked: boolean;
+      buttonText?: string;
+      unsafeButtonFound?: boolean;
+      pageButtons?: string[];
+    }>;
+    navUrl: string;
+  },
 ): Promise<void> {
   if (hahowEvictionInFlight) {
     logSession(s, "warn", `🟠 hahow 限制頁（已有別 tab 在處理中，跳過）：${info.navUrl}`);
@@ -464,22 +498,44 @@ async function handleHahowLimitHit(
     hahowEvictionInFlight = false;
   }, 8000);
 
-  logSession(
-    s,
-    "warn",
-    `🟠 hahow 偵測到「登入數量上限」頁，自動點「繼續」搶下裝置位置（${info.navUrl}）`,
-  );
+  logSession(s, "warn", `🟠 hahow 偵測到「登入數量上限」頁：${info.navUrl}`);
 
-  // Step 1：自動點「繼續」 — 失敗就告訴使用者要手動點
-  const clicked = await info.click();
-  if (!clicked) {
+  // Step 1：嚴格只點「登出其他裝置」這類安全按鈕；點「繼續/使用此裝置」會踢掉
+  // 我們自己的 SCORM heartbeat hidden window → 進度直接歸零（v0.8.4 撞過的坑）。
+  const result = await info.click();
+  if (result.clicked) {
     logSession(
       s,
-      "error",
-      `❌ hahow「繼續」按鈕找不到，請手動點 — 沒點掉的話這門課會卡住。請把網頁畫面截圖回報。`,
+      "info",
+      `▶ 已點「${result.buttonText ?? "?"}」（明確只踢其他裝置），3 秒後 reload 此頁恢復狀態`,
     );
+    // 3 秒後 reload 當前 view URL — hahow 點完通常會自動 redirect，但 redirect
+    // 失敗時 reload 是保險。
+    setTimeout(() => {
+      try {
+        s.view?.webContents.reload();
+      } catch {
+        /* swallow */
+      }
+    }, 3000);
   } else {
-    logSession(s, "info", `▶ 已點「繼續」，hahow 會踢掉舊裝置；其他帳號暫停 30 秒`);
+    const dump =
+      result.pageButtons && result.pageButtons.length > 0
+        ? `\n      頁面上的按鈕：${result.pageButtons.map((b) => `「${b}」`).join(" ")}`
+        : "";
+    if (result.unsafeButtonFound) {
+      logSession(
+        s,
+        "error",
+        `❌ hahow limit 頁只有「繼續/使用此裝置」按鈕（會踢掉我們自己 SCORM window 造成課程重置），刻意不點。請手動處理或回報以下按鈕清單：${dump}`,
+      );
+    } else {
+      logSession(
+        s,
+        "error",
+        `❌ hahow limit 頁認不出按鈕，請手動點「登出其他裝置」並截圖回報。${dump}`,
+      );
+    }
   }
 
   // Step 2：把其他 session 全部暫停（reactive — 哪個是真的被踢的不知道，全停穩）

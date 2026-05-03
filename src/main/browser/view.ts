@@ -271,12 +271,28 @@ export type NavLogger = (msg: string) => void;
  * hahow 課程時會撞到 limit 頁。沒處理會卡住整個 chain，被踢的帳號 SCORM session
  * 也會被 server 清掉 → 進度歸零。
  *
+ * v0.8.5 修改：
+ *  - 即使**單一帳號**也會撞到 limit 頁，因為 chain 並行 exam+survey 同時存在 2 個
+ *    hidden window 都載入 hahow，hahow 看成 2 裝置。
+ *  - 之前 v0.8.4 直接點「繼續」會把舊裝置（包含我們自己的 SCORM heartbeat window）
+ *    踢出 → server 砍 reading session → 進度直接重置。這比卡在 limit 頁更糟。
+ *  - 改成只點「登出其他裝置」這類**明確只踢其他**的按鈕（如 hahow 有提供）；找不
+ *    到就放棄 auto-click，請使用者手動處理。
+ *
  * 觸發條件：did-finish-load 後 page innerText 含「登入數量上限」(或英文等價字串)。
- * caller 應該在 callback 裡執行：(a) 自動點此頁的「繼續」搶下裝置位置 + (b) 把
- * 其他帳號的 heartbeat 暫停，避免 thrashing。
  */
+export interface HahowLimitClickResult {
+  clicked: boolean;
+  /** 我們識別到的按鈕文字（debug 用） */
+  buttonText?: string;
+  /** 是否找到不安全的按鈕（generic「繼續」之類）— 會踢掉所有其他裝置含我們自己。
+   *  found=true 但 clicked=false 表示我們刻意沒點。 */
+  unsafeButtonFound?: boolean;
+  /** 整頁 button/anchor 文字 dump，幫助使用者回報新版型 */
+  pageButtons?: string[];
+}
 export type HahowLimitCallback = (info: {
-  click: () => Promise<boolean>;
+  click: () => Promise<HahowLimitClickResult>;
   navUrl: string;
 }) => void;
 
@@ -452,25 +468,52 @@ async function maybeFireHahowLimit(
   cb({
     navUrl: detection.navUrl,
     click: async () => {
+      // v0.8.5：嚴格挑「明確只踢其他裝置」的按鈕（不含「繼續/此裝置」這類會踢掉
+      // 我們自己 SCORM hidden window 的）。識別不出安全按鈕就回傳整頁按鈕 dump，
+      // 由 caller log 出來請使用者回報。
       try {
-        const clicked = (await wc.executeJavaScript(
+        const result = (await wc.executeJavaScript(
           `(() => {
-            const all = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-            // 找文字含「繼續」「踢」「continue」的按鈕；過濾掉太長的（避免誤點 navigation 連結）
-            const target = all.find((el) => {
-              const t = ((el).innerText || (el).textContent || '').trim();
-              if (!t || t.length > 12) return false;
-              return /^(繼續|踢|登出其他|continue|kick)/i.test(t);
+            const els = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            const buttons = els
+              .map((e) => {
+                const t = ((e.innerText || e.textContent || '') + '').trim();
+                return t;
+              })
+              .filter((t) => t && t.length <= 30);
+            // SAFE：明確說「登出其他/舊/全部其他」的按鈕，點了會保留我們自己。
+            const SAFE = /(登出.{0,4}(其他|舊|所有.*?其他)|logout.{0,4}other|sign.{0,4}out.{0,4}other)/i;
+            // UNSAFE：含「繼續/使用此裝置/此裝置」— 會踢掉所有其他裝置（包含我們
+            // 自己的 SCORM heartbeat window），造成課程進度歸零。 v0.8.4 撞過的坑。
+            const UNSAFE = /^(繼續|使用此裝置|此裝置|continue|use this device)/i;
+            const safeEl = els.find((el) => {
+              const t = ((el.innerText || el.textContent || '') + '').trim();
+              return t && t.length <= 30 && SAFE.test(t);
             });
-            if (!target) return false;
-            target.click();
-            return true;
+            const unsafeEl = els.find((el) => {
+              const t = ((el.innerText || el.textContent || '') + '').trim();
+              return t && t.length <= 30 && UNSAFE.test(t);
+            });
+            if (safeEl) {
+              safeEl.click();
+              return {
+                clicked: true,
+                buttonText: ((safeEl.innerText || safeEl.textContent || '') + '').trim(),
+                unsafeButtonFound: !!unsafeEl,
+                pageButtons: buttons,
+              };
+            }
+            return {
+              clicked: false,
+              unsafeButtonFound: !!unsafeEl,
+              pageButtons: buttons,
+            };
           })()`,
           true,
-        )) as boolean;
-        return !!clicked;
+        )) as HahowLimitClickResult;
+        return result || { clicked: false };
       } catch {
-        return false;
+        return { clicked: false };
       }
     },
   });
