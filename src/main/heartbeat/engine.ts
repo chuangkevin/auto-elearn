@@ -1,6 +1,6 @@
 import type { Session } from "electron";
 import { enterReadingSession, finishReadingSession, getServerTime, heartbeat as sendHeartbeat, startReadingSession } from "../http/elearn";
-import { executeScormFinish, extractTicket } from "./reader";
+import { executeScormFinish, extractTicket, type TicketInfo } from "./reader";
 import type { Tracked } from "../course/types";
 
 export type ProgressStage = "open" | "tick" | "done" | "error";
@@ -45,6 +45,15 @@ export interface HeartbeatOptions {
    *  full reading credit, so we can save ~half the wall-clock time. The
    *  heartbeat keeps ticking afterwards until reading is fully credited. */
   onHalfway?: (cid: string) => void;
+  /** v0.8.1：當 heartbeat 連續失敗達 reauthThreshold 時呼叫 — caller 應該重新登入
+   *  partition 的 SSO，並重抽一張 ticket 回傳。回 null 代表救不回來，loop 走原本
+   *  的 5-failure-break 路徑。Hahow 並行登入上限 / SSO session timeout 都會把
+   *  reading session 從 server 端清掉，沒重抽 actid 的話心跳全部 noop（server
+   *  回 success 但完全不算時數），這就是使用者「課程時數歸零」的根因之一。 */
+  reauthFn?: (cid: string) => Promise<TicketInfo | null>;
+  /** v0.8.1：連續 N 次 heartbeat 失敗後嘗試 reauth。Default 3 — 比 break 早 2 次，
+   *  讓我們有機會在 loop 死掉前救回來。 */
+  reauthThreshold?: number;
   /** Abort signal (checked between ticks). */
   signal?: { aborted: boolean };
 }
@@ -219,6 +228,21 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
       } else {
         failures++;
         opts.onProgress?.(cid, "error", { status, failures, body: body.slice(0, 300) });
+        const reauthThreshold = opts.reauthThreshold ?? 3;
+        if (failures >= reauthThreshold && opts.reauthFn) {
+          const newTicket = await opts.reauthFn(cid).catch(() => null);
+          if (newTicket) {
+            opts.onProgress?.(cid, "tick", { reauthOk: true, oldActid: ticket.actid, newActid: newTicket.actid });
+            ticket = newTicket;
+            try { bt = await getServerTime(session, ticket.origin); } catch { bt = "0"; }
+            try {
+              const r = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin, ticket.actid, bt);
+              bt = r.timediff;
+            } catch { /* fall through; loop will retry */ }
+            failures = 0;
+            continue;
+          }
+        }
         if (failures >= 5) break;
         await sleep(3000);
       }
@@ -228,6 +252,21 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
         msg: e instanceof Error ? e.message : String(e),
         failures,
       });
+      const reauthThreshold = opts.reauthThreshold ?? 3;
+      if (failures >= reauthThreshold && opts.reauthFn) {
+        const newTicket = await opts.reauthFn(cid).catch(() => null);
+        if (newTicket) {
+          opts.onProgress?.(cid, "tick", { reauthOk: true, oldActid: ticket.actid, newActid: newTicket.actid });
+          ticket = newTicket;
+          try { bt = await getServerTime(session, ticket.origin); } catch { bt = "0"; }
+          try {
+            const r = await startReadingSession(session, ticket.pTicket, ticket.encCid, ticket.origin, ticket.actid, bt);
+            bt = r.timediff;
+          } catch { /* fall through */ }
+          failures = 0;
+          continue;
+        }
+      }
       if (failures >= 5) break;
       await sleep(3000);
     }

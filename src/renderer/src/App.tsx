@@ -59,6 +59,11 @@ declare global {
       finishNewAccount: (
         payload: { nickname: string; pin: string },
       ) => Promise<AccountOpResult>;
+      addAccountSubmit: (
+        payload: { account: string; password: string; nickname: string; pin: string },
+      ) => Promise<AccountOpResult>;
+      lockTab: (id: string) => Promise<AccountOpResult>;
+      lockActive: () => Promise<AccountOpResult>;
       setAccountNickname: (
         payload: { id: string; nickname: string },
       ) => Promise<AccountOpResult>;
@@ -325,7 +330,14 @@ function App() {
   const mode = state.multi.mode;
 
   // mode = picker / pin / reset_pin / boot：顯示 tile picker（無 BrowserView）
-  if (mode === "boot" || mode === "picker" || mode === "pin" || mode === "reset_pin") {
+  // v0.8.1：active tab 被鎖定時 multi.mode 也會是 "pin"（PIN target 是 active session
+  // 自己）。這個 case 留在 active layout — TabBar 仍可見、PinModal 覆蓋中央區塊，
+  // 使用者按取消可從 TabBar 切到別的 tab 而不是被踢回 picker。
+  const lockingActiveTab = mode === "pin" && !!state.multi.activeAccountId;
+  if (
+    !lockingActiveTab &&
+    (mode === "boot" || mode === "picker" || mode === "pin" || mode === "reset_pin")
+  ) {
     return (
       <PickerLayout
         state={state}
@@ -384,6 +396,21 @@ function App() {
               <TopPanel state={state} />
             </div>
           )}
+
+          {/* v0.8.1：左下「🔒 鎖定」按鈕。只在 active 模式下、且 active tab 是 unlocked 時顯示
+           *  （locked 時 PinModal 已蓋住整個 left 區，再放鎖按鈕無意義）。
+           *  按了之後 main 把 active session unlocked = false → multiMode = "pin" → PinModal 彈出。 */}
+          {!leftCollapsed &&
+            state.multi.mode === "active" &&
+            state.multi.activeAccountId && (
+              <button
+                className="absolute bottom-3 left-3 z-40 flex items-center gap-1 px-2.5 py-1.5 rounded border border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-xs text-slate-300 backdrop-blur shadow"
+                onClick={() => window.api.lockActive()}
+                title="鎖定此帳號 — 切回時要重輸 PIN（同事走過去看不到課程）"
+              >
+                🔒 鎖定
+              </button>
+            )}
 
           {autoLogin && (
             <div
@@ -444,13 +471,20 @@ function App() {
             </div>
           )}
 
-          {/* mode === "post_login"：剛新登入，請使用者設定暱稱 + PIN */}
+          {/* mode === "post_login"：剛新登入，請使用者設定暱稱 + PIN（v0.8.1 後新流程
+           *  不會走進這個 mode；保留 render branch 以免舊 main / 跨版本 preload 失靈） */}
           {state.multi.mode === "post_login" && state.multi.postLogin && (
             <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/70">
               <ModalGuard>
                 <PostLoginCard accountId={state.multi.postLogin.id} />
               </ModalGuard>
             </div>
+          )}
+
+          {/* v0.8.1：active tab 被鎖定 — PinModal 蓋住整個 active layout 中央區，
+           *  使用者要重輸 PIN 才能繼續看；TabBar 仍可見可切到別的 tab 逃。 */}
+          {state.multi.mode === "pin" && state.multi.pinTarget && (
+            <PinModal target={state.multi.pinTarget} />
           )}
 
           {/* Portal target for ConfirmBatchModal (rendered deep in Selecting tree) */}
@@ -1149,9 +1183,10 @@ function StealthOptionsCard({
 
 function TopPanel({ state }: { state: AppState }) {
   if (state.status === "boot") return <Centered>啟動中...</Centered>;
-  // 新增帳號流程：右邊 BrowserView 顯示 eCPA login，左邊放 status + cancel button
+  // v0.8.1：新增帳號流程改成左側 modal，main 不再把 active session 切到 status="setup"。
+  // 萬一舊流程殘留進來（preload mismatch），show 一個 fallback 提示，避免空白畫面。
   if (state.status === "setup" || state.status === "await_login")
-    return <NewAccountWaiting state={state} />;
+    return <Centered>準備中… 如果卡在這裡，請從 picker 重新進入</Centered>;
   if (state.status === "selecting") return <Selecting state={state} />;
   return <Monitor state={state} />;
 }
@@ -1164,66 +1199,9 @@ function Centered({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ── First-run setup screen ────────────────────────────────────
-/**
- * 新增帳號的等候畫面：右邊 BrowserView 顯示 eCPA 登入頁，使用者在那邊登入；
- * 我們攔截 GetApTicketV2 的 POST body 拿到帳密後，main 端會把 multi.mode 切到
- * post_login，使用者填暱稱 + PIN 完成新增。這個元件提供「← 取消新增」按鈕
- * 跟即時 log 顯示，讓使用者知道我們有在偵測。
- */
-function NewAccountWaiting({ state }: { state: AppState }) {
-  const [cancelling, setCancelling] = useState(false);
-  function cancel() {
-    if (cancelling) return;
-    if (!window.confirm("取消新增帳號？\n\n剛剛在右邊網頁的登入動作不會被儲存。")) return;
-    setCancelling(true);
-    window.api.addAccountCancel();
-  }
-  return (
-    <div className="h-full flex flex-col px-6 py-6 gap-4 overflow-hidden">
-      <div className="text-center space-y-2">
-        <h1 className="text-2xl font-bold">新增帳號</h1>
-        <p className="text-slate-300">👉 請在右邊網頁登入 e 等公務園</p>
-        <p className="text-slate-400 text-xs">
-          登入成功後，會請你幫這個帳號取一個暱稱、設一組 4 位數 PIN
-        </p>
-        <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse mx-auto" />
-      </div>
-
-      <div className="flex-1 flex flex-col min-h-0">
-        <h2 className="text-xs font-semibold text-slate-400 mb-1">📜 系統訊息</h2>
-        <div className="flex-1 bg-black/30 rounded p-2 text-xs font-mono overflow-auto space-y-0.5 min-h-0 border border-slate-800">
-          {state.logs.slice(-100).map((l, i) => (
-            <div
-              key={i}
-              className={
-                l.level === "error"
-                  ? "text-red-400"
-                  : l.level === "warn"
-                    ? "text-amber-400"
-                    : "text-slate-300"
-              }
-            >
-              [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
-            </div>
-          ))}
-          {state.logs.length === 0 && (
-            <div className="text-slate-500">（還沒有訊息）</div>
-          )}
-        </div>
-      </div>
-
-      <button
-        className="w-full py-1.5 rounded text-xs text-slate-400 border border-slate-700 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-40"
-        disabled={cancelling}
-        onClick={cancel}
-        title="把這個還在新增中的帳號丟掉，回 picker"
-      >
-        ← 取消新增
-      </button>
-    </div>
-  );
-}
+// v0.8.1：原本的 NewAccountWaiting（右側 BrowserView 登入 + 左側等候畫面）已淘汰。
+// 新增帳號改用 NewAccountFormModal — 左側 modal 一次填齊，main 走 net.request 靜默
+// SSO，使用者完全不必碰右邊的 eCPA web 介面。
 
 // Mirrors HEARTBEAT_PARALLEL_MAX in src/main/index.ts. Surfaced in the footer
 // so users see "your N selected courses will run X in parallel, rest queued"
@@ -2574,25 +2552,157 @@ function PickerTile({ account }: { account: NonNullable<AppState["multi"]["picke
 }
 
 function AddAccountTile() {
-  const [busy, setBusy] = useState(false);
+  const [showForm, setShowForm] = useState(false);
   return (
-    <button
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          const res = await window.api.addAccountBegin();
-          if (!res.ok) alert(`新增失敗：${res.reason ?? "unknown"}`);
-        } finally {
-          setBusy(false);
-        }
-      }}
-      className="w-44 h-52 rounded-xl border-2 border-dashed border-slate-600 flex flex-col items-center justify-center gap-2 hover:border-emerald-500 hover:bg-slate-800/50 transition disabled:opacity-50"
-      title="新增另一個 e 等公務園帳號"
-    >
-      <div className="text-5xl text-slate-500">+</div>
-      <div className="text-sm text-slate-400">{busy ? "建立中…" : "新增帳號"}</div>
-    </button>
+    <>
+      <button
+        onClick={() => setShowForm(true)}
+        className="w-44 h-52 rounded-xl border-2 border-dashed border-slate-600 flex flex-col items-center justify-center gap-2 hover:border-emerald-500 hover:bg-slate-800/50 transition"
+        title="新增另一個 e 等公務園帳號"
+      >
+        <div className="text-5xl text-slate-500">+</div>
+        <div className="text-sm text-slate-400">新增帳號</div>
+      </button>
+      {showForm && <NewAccountFormModal onClose={() => setShowForm(false)} />}
+    </>
+  );
+}
+
+/**
+ * v0.8.1：新增帳號表單。一次填齊「e 等帳號 / 密碼 / 暱稱 / PIN」，main 用 net.request
+ * 走靜默 SSO，使用者不必碰右邊網頁。
+ *
+ * v0.7.x ~ v0.8.0：先點 tile → 主程序開 BrowserView → 使用者在右邊 web 登入 →
+ * sniffer 攔 GetApTicketV2 → 跳 post_login modal → 補暱稱 + PIN。
+ * 問題：右側 web 偶爾會被 hahow / SSO 跨網域擋住、使用者不確定要在哪填、
+ *      cancel 路徑很多坑（pendingNewSessionId leak）。改回左側表單最直觀。
+ */
+function NewAccountFormModal({ onClose }: { onClose: () => void }) {
+  const [account, setAccount] = useState("");
+  const [password, setPassword] = useState("");
+  const [nickname, setNickname] = useState("");
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const canSubmit =
+    account.trim().length >= 2 &&
+    password.length >= 1 &&
+    nickname.trim().length >= 1 &&
+    /^\d{4}$/.test(pin);
+
+  async function submit() {
+    if (busy || !canSubmit) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await window.api.addAccountSubmit({
+        account: account.trim(),
+        password,
+        nickname: nickname.trim(),
+        pin,
+      });
+      if (!res.ok) {
+        setErr(res.reason ?? "新增失敗");
+        return;
+      }
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80">
+      <ModalGuard>
+        <div className="bg-slate-900 border border-emerald-700 rounded-lg max-w-md w-[92vw] p-6 shadow-2xl text-slate-100">
+          <h2 className="text-xl font-semibold mb-2">新增 e 等公務園帳號</h2>
+          <p className="text-sm text-slate-400 mb-4 leading-relaxed">
+            填完按「新增」，會直接在背景登入 e 等公務園 — 不用碰右邊的網頁。
+          </p>
+          <div className="space-y-3">
+            <label className="block text-xs text-slate-400">
+              e 等公務園 帳號
+              <input
+                autoFocus
+                disabled={busy}
+                className="mt-1 w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 text-slate-100 font-mono"
+                placeholder="身分證字號 / 別名"
+                value={account}
+                onChange={(e) => {
+                  setAccount(e.target.value);
+                  setErr(null);
+                }}
+                maxLength={20}
+              />
+            </label>
+            <label className="block text-xs text-slate-400">
+              密碼
+              <input
+                type="password"
+                disabled={busy}
+                className="mt-1 w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 text-slate-100"
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  setErr(null);
+                }}
+                maxLength={64}
+              />
+            </label>
+            <label className="block text-xs text-slate-400">
+              暱稱（tab 上會顯示這個）
+              <input
+                disabled={busy}
+                className="mt-1 w-full px-3 py-2 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 text-slate-100"
+                placeholder="例如「公務帳」、「我」"
+                value={nickname}
+                onChange={(e) => {
+                  setNickname(e.target.value);
+                  setErr(null);
+                }}
+                maxLength={20}
+              />
+            </label>
+            <label className="block text-xs text-slate-400">
+              4 位數 PIN（每次切到這個帳號要輸入）
+              <input
+                type="password"
+                inputMode="numeric"
+                pattern="\d*"
+                maxLength={4}
+                disabled={busy}
+                className="mt-1 w-full text-center text-2xl tracking-[1em] py-3 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:border-emerald-500 font-mono text-slate-100"
+                placeholder="••••"
+                value={pin}
+                onChange={(e) => {
+                  setPin(e.target.value.replace(/\D/g, "").slice(0, 4));
+                  setErr(null);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && canSubmit && submit()}
+              />
+            </label>
+          </div>
+          {err && <div className="text-rose-400 text-sm mt-3">{err}</div>}
+          <div className="flex justify-between items-center mt-5">
+            <button
+              className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+              onClick={onClose}
+              disabled={busy}
+            >
+              取消
+            </button>
+            <button
+              className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold disabled:opacity-50"
+              onClick={submit}
+              disabled={busy || !canSubmit}
+            >
+              {busy ? "登入中…" : "新增"}
+            </button>
+          </div>
+        </div>
+      </ModalGuard>
+    </div>
   );
 }
 
@@ -3035,6 +3145,11 @@ function Tab({ tab }: { tab: NonNullable<AppState["multi"]["tabs"][number]> }) {
         }`}
       />
       <span className="text-sm font-medium truncate max-w-[140px]">{tab.nickname}</span>
+      {tab.locked && (
+        <span className="text-[10px] text-amber-300" title="此 tab 已鎖定 — 切過去要重輸 PIN">
+          🔒
+        </span>
+      )}
       {tab.pipelineRunning && tab.totalCount != null && (
         <span className="text-[10px] text-emerald-300">
           {tab.doneCount ?? 0}/{tab.totalCount}

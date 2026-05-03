@@ -80,6 +80,8 @@ export interface AccountSummary {
   /** mirror of per-session AppState.status；只有 isOpen=true 時有意義 */
   status?: AppStatus;
   pipelineRunning: boolean;
+  /** v0.8.1：tab 是否被使用者鎖定（切 tab 時需要重輸 PIN）。只有 isOpen=true 時有意義。 */
+  locked?: boolean;
   /** 進度徽章用 */
   doneCount?: number;
   totalCount?: number;
@@ -209,6 +211,16 @@ export const IPC = {
   APP_VERSION_GET: "app:version-get",
 
   // ── 多帳號 (v0.8.0) ─────────────────────────────────────────────
+  // v0.8.1：新增帳號改成左側表單一次填齊（帳號／密碼／暱稱／PIN），main 用 net.request
+  // 靜默呼 eCPA SSO，不再開右側 BrowserView 給使用者填表 → 不用攔 GetApTicketV2、
+  // 沒有 post_login 中間態。舊的 ADD_BEGIN / ADD_CANCEL / FINISH_NEW 仍保留以免
+  // pre-built preload 呼叫炸掉，但只 renderer 走表單路徑。
+  /** renderer → main: 一次提交全部 → 靜默 SSO + 建 session + 寫 record + 存 PIN */
+  ACCOUNT_ADD_SUBMIT: "account:add-submit",
+  /** renderer → main: 鎖住指定 tab（active 會切到 PIN 輸入；切 tab 會自動鎖前一個） */
+  ACCOUNT_LOCK_TAB: "account:lock-tab",
+  /** renderer → main: 鎖住目前 active tab（左下「🔒 鎖定」按鈕用） */
+  ACCOUNT_LOCK_ACTIVE: "account:lock-active",
   /** renderer → main: picker tile click → 進入 PIN 輸入模式（main 端記下 pinTarget） */
   ACCOUNT_BEGIN_UNLOCK: "account:begin-unlock",
   /** renderer → main: 提交 PIN，正確 → 開 tab + 設成 active；錯 → multi.pinTarget.failedAttempts++ */

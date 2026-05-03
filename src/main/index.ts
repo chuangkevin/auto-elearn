@@ -7,6 +7,7 @@ import {
   Tray,
   nativeImage,
   screen,
+  session as sessionModule,
   type Session,
 } from "electron";
 import { join } from "node:path";
@@ -53,7 +54,9 @@ import {
 } from "./http/elearn";
 import { fetchCourseDetail } from "./http/course-detail";
 import { runHeartbeatBatch, type PollData } from "./heartbeat/engine";
+import { extractTicket } from "./heartbeat/reader";
 import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
+import { loginViaEcpa } from "./auth/ecpa-login";
 import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
@@ -255,6 +258,8 @@ function buildMultiInfo(): MultiInfo {
       isActive: r.id === activeId,
       status: sess?.state.status,
       pipelineRunning: sess?.pipelineRunning ?? false,
+      // v0.8.1：locked 旗標讓 UI 顯示 🔒 icon；未 isOpen 的不掛此欄位
+      locked: sess ? !sess.unlocked : undefined,
       doneCount: sess?.state.stats.done,
       totalCount: sess?.state.stats.total,
       lastUsedAt: r.lastUsedAt,
@@ -341,6 +346,8 @@ function makeSession(opts: {
     runningCids: new Set(),
     focusedCid: null,
     pendingSniffed: null,
+    // v0.8.1：fresh session 預設 unlocked（建立 session 一定是剛通過 PIN/剛新增）
+    unlocked: true,
     autoLoginInFlight: false,
     reloginInFlight: false,
     logoutHandlingInFlight: false,
@@ -360,7 +367,12 @@ function makeSession(opts: {
     (reason) => {
       void handleBrowserViewLogout(session, reason).catch(() => void 0);
     },
-    { partition: partitionId },
+    {
+      partition: partitionId,
+      // 跨 domain 導航記到 per-session log，供使用者 / 開發者定位 hahow 登入上限
+      // 頁面的真實 URL（BrowserView 沒有網址列）+ 自然人 SSO 的 redirect chain。
+      navLogger: (msg) => logSession(session, "warn", msg),
+    },
   );
   view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
   view.setAutoResize({ width: false, height: false });
@@ -411,20 +423,41 @@ async function destroySession(s: AccountSession): Promise<void> {
 }
 
 function setActiveSessionAndShow(id: string | null): void {
+  // v0.8.1：切換 tab 時自動鎖前一個（隱私要求 — 同事走過去看不到別人的課程）
+  const prevActiveId = getActiveId();
+  if (prevActiveId && prevActiveId !== id) {
+    const prev = getSession(prevActiveId);
+    if (prev) prev.unlocked = false;
+  }
+
   setActiveId(id);
-  if (id) {
+
+  // 切到 locked tab → 不要直接 active 模式，要先輸 PIN
+  const target = id ? getSession(id) : null;
+  if (id && target && !target.unlocked) {
+    pinTarget = {
+      id: target.id,
+      nickname: target.record.nickname,
+      maskedAccount: target.record.maskedAccount,
+      failedAttempts: 0,
+    };
+    multiMode = "pin";
+  } else if (id) {
+    pinTarget = null;
     multiMode = "active";
     setLastActive(id);
     touchLastUsed(id);
   } else {
+    pinTarget = null;
     multiMode = "picker";
   }
-  // 隱藏所有非 active 的 view；active 的 bounds 由 renderer push
+  // 隱藏所有非 active 或 locked 的 view；active+unlocked 的 bounds 由 renderer push
   for (const s of listSessions()) {
-    if (s.id !== id) hideElearnView(s.view);
+    const showThis = s.id === id && s.unlocked;
+    if (!showThis) hideElearnView(s.view);
   }
   const active = id ? getSession(id) : null;
-  if (active && active.view && mainWindow) {
+  if (active && active.unlocked && active.view && mainWindow) {
     // 重新套用 last-known bounds（renderer 應該很快會再 push 一次更新）
     try {
       active.view.setBounds(lastBounds);
@@ -974,7 +1007,15 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     s.state.now.action = "enroll";
     s.state.now.detail = `${toEnrol.length} 門課待報名`;
     pushState();
-    logSession(s, "info", `開始報名 ${toEnrol.length} 門新課程...`);
+    // v0.8.1：多帳號模式下，A tab 在背景被 hahow / SSO 踢出時 partition cookies 仍
+    // 在但已失效，enrollCourse 會 silently 302 到 login → 看似報名 200 OK 實則沒
+    // 寫成功。報名前 ping 一下 dashboard，沒有 idx 就先補登。
+    const alive = await isSessionAlive(session);
+    if (!alive) {
+      logSession(s, "warn", "報名前發現 session 失效，先自動補登...");
+      await tryAutoLogin(s).catch(() => void 0);
+    }
+    logSession(s, "info", `開始報名 ${toEnrol.length} 門新課程... (partition=${s.partitionId})`);
     const results = await enrollMany(session, toEnrol, ENROLL_DELAY_MS);
     const ok = results.filter((r) => r.ok).map((r) => r.cid);
     const bad = results.filter((r) => !r.ok);
@@ -1261,6 +1302,11 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     pushState();
     startSessionWatchdog(s, session);
 
+    // v0.8.1：caption map 給 reauthFn 重抽 ticket 用 — extractTicket 需要 caption
+    // 才能在多 lesson 共用 SCORM tree 時挑對課，沒帶會抓到 sibling 變成 noop 心跳。
+    const captionByCid = new Map<string, string>();
+    for (const t of needReading) captionByCid.set(t.course.cid, t.course.caption ?? "");
+
     await runHeartbeatBatch(session, needReading, {
       parallel,
       intervalMs: HEARTBEAT_INTERVAL_MS,
@@ -1268,6 +1314,31 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
       graceSec: 120,
       signal: s.abortSignal,
       pollIntervalMs: 30_000,
+      // v0.8.1：心跳連續 3 次失敗時觸發 — 通常是 hahow 並行登入上限或 SSO timeout
+      // 把 server 端的 reading session 砍了，partition cookies 仍在但 idx 已失效。
+      // 這裡走靜默 net.request 補登 → 重新從 SCORM 抽一張新的 actid，loop 接著用
+      // 新 ticket 繼續打剩下的時間，避免「失敗 5 次直接 break」造成的時數歸零。
+      reauthFn: async (cid) => {
+        if (!s.account || !s.password) {
+          logSession(s, "warn", `[${cid.slice(0, 8)}] 心跳失敗想 reauth 但沒有儲存帳密（SSO-only？）`);
+          return null;
+        }
+        const partSess = sessionModule.fromPartition(s.partitionId);
+        logSession(s, "warn", `[${cid.slice(0, 8)}] 心跳連續失敗，靜默重登 + 重抽 actid...`);
+        const r = await loginViaEcpa(partSess, s.account, s.password);
+        if (!r.ok) {
+          logSession(s, "error", `[${cid.slice(0, 8)}] reauth 登入失敗：${r.error ?? r.stage}`);
+          return null;
+        }
+        const caption = captionByCid.get(cid);
+        const t = await extractTicket(cid, 30_000, caption, partSess);
+        if (!t) {
+          logSession(s, "error", `[${cid.slice(0, 8)}] reauth 後仍抽不到 ticket，放棄`);
+          return null;
+        }
+        logSession(s, "info", `[${cid.slice(0, 8)}] reauth 成功，新 actid=${(t.actid ?? "?").slice(0, 40)}`);
+        return t;
+      },
       pollFn: async (cid) => {
         try {
           const map = await fetchProgressCached();
@@ -1850,6 +1921,14 @@ async function verifyPinAndOpen(payload: {
     return { ok: false, reason: "PIN 不正確" };
   }
   pinTarget = null;
+  // v0.8.1：locked tab 已 open 時，verify 通過直接解鎖 + 顯示，不要重建 session
+  // （那會 detach view、丟失正在跑的 pipeline）
+  const existing = getSession(record.id);
+  if (existing) {
+    existing.unlocked = true;
+    setActiveSessionAndShow(record.id);
+    return { ok: true };
+  }
   return openExistingAccountAsTab(record);
 }
 
@@ -1871,6 +1950,144 @@ async function closeTab(id: string): Promise<AccountOpResult> {
     pushState();
   }
   logGlobal("info", `已關閉 ${s.record.nickname} 的 tab（pipeline 已停，帳號保留在 picker）`);
+  return { ok: true };
+}
+
+// v0.8.1：tab 鎖定 — 把 unlocked 翻 false。如果是 active tab，UI 即刻變成 PIN 輸入；
+// 否則只是把 lock icon 點亮，下次切換到那個 tab 才會要求 PIN。
+async function lockTabOp(id: string): Promise<AccountOpResult> {
+  const s = getSession(id);
+  if (!s) return { ok: false, reason: "tab 不存在" };
+  s.unlocked = false;
+  if (getActiveId() === id) {
+    // 當下就把 view 藏掉 + 切 PIN 模式，避免使用者離開電腦那瞬間還露出畫面
+    hideElearnView(s.view);
+    pinTarget = {
+      id: s.id,
+      nickname: s.record.nickname,
+      maskedAccount: s.record.maskedAccount,
+      failedAttempts: 0,
+    };
+    multiMode = "pin";
+  }
+  pushState();
+  return { ok: true };
+}
+
+async function lockActiveTabOp(): Promise<AccountOpResult> {
+  const s = getActiveSession();
+  if (!s) return { ok: false, reason: "沒有 active 帳號" };
+  return lockTabOp(s.id);
+}
+
+// v0.8.1：左側表單一次填齊 → 靜默 SSO + 建 session + 寫入帳號。沒有右側 BrowserView
+// 互動，使用者也不需要在 web 上動手。loginViaEcpa 走 net.request 共用 cookie jar。
+async function submitNewAccount(payload: {
+  account: string;
+  password: string;
+  nickname: string;
+  pin: string;
+}): Promise<AccountOpResult> {
+  const account = (payload.account ?? "").trim();
+  const password = payload.password ?? "";
+  const nickname = (payload.nickname ?? "").trim();
+  const pin = payload.pin ?? "";
+
+  if (!account) return { ok: false, reason: "請輸入 e 等公務園帳號" };
+  if (!password) return { ok: false, reason: "請輸入密碼" };
+  if (!nickname) return { ok: false, reason: "請取一個暱稱" };
+  if (nickname.length > 20) return { ok: false, reason: "暱稱不要超過 20 字" };
+  const pinCheck = validatePinFormat(pin);
+  if (!pinCheck.ok) return { ok: false, reason: pinCheck.reason };
+
+  // 用「猜的」id 先 partition；如果 GetUID 解析後 id 不一樣，會在登入後 re-key。
+  const guessedId = computeAccountId(account);
+  const guessedDup = getAccount(guessedId);
+  if (guessedDup) {
+    return {
+      ok: false,
+      reason: `這個帳號已經在列表中（${guessedDup.nickname}）`,
+    };
+  }
+
+  pushSecretToMaskList(account, maskAccount(account));
+
+  // Step 1: 用猜的 partition 跑 SSO
+  const guessedPartition = partitionIdFor(guessedId);
+  const guessSess = sessionModule.fromPartition(guessedPartition);
+  // 清掉 partition 殘骸（之前 remove 沒清乾淨的 cookies），確保 fresh session
+  await guessSess.clearStorageData().catch(() => void 0);
+
+  logGlobal("info", `正在背景登入 ${maskAccount(account)} ...`);
+  const r1 = await loginViaEcpa(guessSess, account, password);
+  if (!r1.ok) {
+    return {
+      ok: false,
+      reason: `登入失敗（${r1.stage ?? "?"}）：${r1.error ?? "unknown"}`,
+    };
+  }
+  const resolved = r1.resolvedAccount ?? account;
+  const realId = computeAccountId(resolved);
+
+  pushSecretToMaskList(resolved, maskAccount(resolved));
+
+  // 如果使用者打的是短別名 → guessId 跟 realId 不一樣 → 把 cookie 移到正確 partition
+  // 後再走一次 SSO（loginViaEcpa 在當前 partition 上是冪等的，只是多花 ~3 秒）。
+  let workingPartition = guessedPartition;
+  let workingSess = guessSess;
+  if (realId !== guessedId) {
+    const realDup = getAccount(realId);
+    if (realDup) {
+      // 別名指到已存在的帳號 → 中止
+      await guessSess.clearStorageData().catch(() => void 0);
+      return {
+        ok: false,
+        reason: `這個帳號已經在列表中（${realDup.nickname}）`,
+      };
+    }
+    // 移到 real partition，重跑一次（cookies 不能跨 partition，重登最簡單）
+    await guessSess.clearStorageData().catch(() => void 0);
+    workingPartition = partitionIdFor(realId);
+    workingSess = sessionModule.fromPartition(workingPartition);
+    await workingSess.clearStorageData().catch(() => void 0);
+    const r2 = await loginViaEcpa(workingSess, resolved, password);
+    if (!r2.ok) {
+      return {
+        ok: false,
+        reason: `登入失敗（${r2.stage ?? "?"}）：${r2.error ?? "unknown"}`,
+      };
+    }
+  }
+
+  // Step 2: 寫入儲存層（creds + record + PIN）
+  const credsRes = saveAccountCreds(realId, { account: resolved, password });
+  if (!credsRes.ok) return { ok: false, reason: `儲存帳密失敗：${credsRes.reason}` };
+  const salt = newSalt();
+  const record: AccountRecord = {
+    id: realId,
+    nickname,
+    maskedAccount: maskAccount(resolved),
+    pinHash: hashPin(pin, salt),
+    pinSalt: salt,
+    addedAt: new Date().toISOString(),
+    lastUsedAt: new Date().toISOString(),
+  };
+  upsertAccount(record);
+  setLastActive(realId);
+
+  // Step 3: 建 BrowserView session — 用同一個 partition，cookies 自動繼承
+  const accountSession = makeSession({
+    id: realId,
+    record,
+    account: resolved,
+    password,
+    startUrl: "https://elearn.hrd.gov.tw/mooc/user/learn_dashboard.php",
+  });
+  accountSession.state.status = "selecting";
+  setActiveSessionAndShow(realId);
+  startLoginWatchdog(accountSession);
+  // refreshCourses 不等：dashboard 一 dom-ready 就會 fire detectLogin → refreshCourses
+  logSession(accountSession, "info", `已新增帳號「${nickname}」並登入成功`);
   return { ok: true };
 }
 
@@ -2376,7 +2593,16 @@ ipcMain.handle(
 
 ipcMain.on(IPC.ACCOUNT_CANCEL_UNLOCK, () => {
   pinTarget = null;
-  if (multiMode === "pin") multiMode = getActiveId() ? "active" : "picker";
+  if (multiMode === "pin") {
+    // v0.8.1：取消 locked-active tab 的 PIN 輸入 → 退回 picker（保留 active session
+    // 仍是 locked 狀態，回 picker 可以選別的帳號或新增）
+    const active = getActiveSession();
+    if (active && !active.unlocked) {
+      setActiveSessionAndShow(null);
+      return;
+    }
+    multiMode = getActiveId() ? "active" : "picker";
+  }
   pushState();
 });
 
@@ -2400,6 +2626,25 @@ ipcMain.handle(IPC.ACCOUNT_ADD_BEGIN, async (): Promise<AccountOpResult> => begi
 ipcMain.on(IPC.ACCOUNT_ADD_CANCEL, () => {
   void cancelAddAccount();
 });
+
+// v0.8.1：新版「左側表單」新增帳號入口
+ipcMain.handle(
+  IPC.ACCOUNT_ADD_SUBMIT,
+  async (
+    _evt,
+    payload: { account: string; password: string; nickname: string; pin: string },
+  ): Promise<AccountOpResult> => submitNewAccount(payload),
+);
+
+// v0.8.1：tab 鎖定
+ipcMain.handle(
+  IPC.ACCOUNT_LOCK_TAB,
+  async (_evt, id: string): Promise<AccountOpResult> => lockTabOp(id),
+);
+ipcMain.handle(
+  IPC.ACCOUNT_LOCK_ACTIVE,
+  async (): Promise<AccountOpResult> => lockActiveTabOp(),
+);
 
 ipcMain.handle(
   IPC.ACCOUNT_FINISH_NEW,

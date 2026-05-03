@@ -251,11 +251,25 @@ export function hideElearnView(view: BrowserView | null): void {
  * embedded site (URL pattern OR raw-source response). The caller decides what
  * to do — usually navigate back to eCPA login + trigger auto-login.
  */
+/**
+ * Domains we expect the embedded BrowserView to ever live on. Anything else =
+ * cross-domain navigation worth logging (hahow / nidp.nat.gov.tw / 自然人
+ * SSO / 其他第三方播放器 / unknown SPOC iframe). v0.8.1：使用者反映看到
+ * 「hahow 登入數量上限」頁面，但 BrowserView 沒有網址列無法看到實際 URL，
+ * 加這個 logger 來定位是哪個 host 觸發的。
+ */
+const KNOWN_HOSTS = [
+  "elearn.hrd.gov.tw",
+  "ecpa.dgpa.gov.tw",
+];
+
+export type NavLogger = (msg: string) => void;
+
 export function attachElearnView(
   win: BrowserWindow,
   url: string,
   onLogoutDetected?: (reason: "url" | "raw-source") => void,
-  opts: { partition?: string } = {},
+  opts: { partition?: string; navLogger?: NavLogger } = {},
 ): BrowserView {
   const view = new BrowserView({
     webPreferences: {
@@ -325,11 +339,19 @@ export function attachElearnView(
       onLogoutDetected(reason);
     };
     view.webContents.on("did-navigate", (_e, navUrl) => {
+      logCrossDomain(navUrl, opts.navLogger);
       if (looksLikeLogoutUrl(navUrl)) fire("url");
     });
     view.webContents.on("did-navigate-in-page", (_e, navUrl) => {
+      logCrossDomain(navUrl, opts.navLogger);
       if (looksLikeLogoutUrl(navUrl)) fire("url");
     });
+    view.webContents.on(
+      "did-redirect-navigation",
+      (_e, navUrl, _isInPlace, isMainFrame) => {
+        if (isMainFrame) logCrossDomain(navUrl, opts.navLogger);
+      },
+    );
     view.webContents.on("did-finish-load", () => {
       // 0.4 s grace so the page actually commits + DOM is queryable
       setTimeout(async () => {
@@ -359,8 +381,45 @@ export function attachElearnView(
         }
       }, 400);
     });
+    // Even without logout handling, still trace cross-domain navigations so
+    // we can locate hahow / SSO redirects in the logs.
+    view.webContents.on("did-navigate", (_e, navUrl) => {
+      logCrossDomain(navUrl, opts.navLogger);
+    });
+    view.webContents.on(
+      "did-redirect-navigation",
+      (_e, navUrl, _isInPlace, isMainFrame) => {
+        if (isMainFrame) logCrossDomain(navUrl, opts.navLogger);
+      },
+    );
   }
   return view;
+}
+
+/**
+ * Log any navigation whose host isn't in KNOWN_HOSTS (elearn / ecpa). The first
+ * hit per host per session is enough to locate the page; we throttle by host so
+ * a redirect chain doesn't spam.
+ */
+const seenHosts = new Set<string>();
+function logCrossDomain(navUrl: string, logger?: NavLogger): void {
+  if (!logger) return;
+  let host: string;
+  try {
+    host = new URL(navUrl).host;
+  } catch {
+    return;
+  }
+  if (!host) return;
+  if (KNOWN_HOSTS.some((h) => host === h || host.endsWith("." + h))) return;
+  // Throttle: log first hit + every "登入數量上限" / hahow / nidp page since
+  // those are exactly what we're hunting for.
+  const key = host;
+  const isInteresting =
+    /hahow|nidp\.nat\.gov\.tw|moica|gov\.tw|warning|limit|device/i.test(navUrl);
+  if (seenHosts.has(key) && !isInteresting) return;
+  seenHosts.add(key);
+  logger(`[nav] cross-domain → ${navUrl}`);
 }
 
 /**

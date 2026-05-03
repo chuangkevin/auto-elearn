@@ -83,6 +83,17 @@ const api = {
     payload: { nickname: string; pin: string },
   ): Promise<AccountOpResult> =>
     ipcRenderer.invoke(IPC.ACCOUNT_FINISH_NEW, payload),
+  /** v0.8.1：左側一次填完 → 靜默 SSO + 建 tab + 存 record */
+  addAccountSubmit: (
+    payload: { account: string; password: string; nickname: string; pin: string },
+  ): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_ADD_SUBMIT, payload),
+  /** v0.8.1：鎖住指定 tab（切換時 main 會自動鎖前一個） */
+  lockTab: (id: string): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_LOCK_TAB, id),
+  /** v0.8.1：鎖住目前 active 帳號（左下「🔒 鎖定」按鈕） */
+  lockActive: (): Promise<AccountOpResult> =>
+    ipcRenderer.invoke(IPC.ACCOUNT_LOCK_ACTIVE),
   setAccountNickname: (
     payload: { id: string; nickname: string },
   ): Promise<AccountOpResult> =>

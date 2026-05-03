@@ -27,6 +27,11 @@ export interface EcpaLoginResult {
   error?: string;
   /** Which step broke, for telemetry */
   stage?: string;
+  /** v0.8.1：使用者可能輸入短別名（例如 `kevin123`）；GetUID 會把它解析成完整身分證
+   *  字號（`F130918271`）。submitNewAccount 用這個來決定 partition / account id —
+   *  保證不論使用者怎麼打，同一個 e 等帳號永遠對應同一個 storage id。
+   *  Login 失敗時可能也填了（例如 GetUID 成功但密碼錯）。 */
+  resolvedAccount?: string;
 }
 
 const UA =
@@ -111,6 +116,7 @@ export async function loginViaEcpa(
         ok: false,
         stage: "GetApTicketV2",
         error: `帳號或密碼錯誤 (body: "${hex.slice(0, 120)}")`,
+        resolvedAccount: fullAccount,
       };
     }
     const encoded = hex;
@@ -174,9 +180,10 @@ export async function loginViaEcpa(
         ok: false,
         stage: "verify",
         error: `session cookies missing idx; present=[${cookieSummary}]; sso status was ${sso.status}`,
+        resolvedAccount: fullAccount,
       };
     }
-    return { ok: true };
+    return { ok: true, resolvedAccount: fullAccount };
   } catch (e) {
     return { ok: false, stage: "exception", error: e instanceof Error ? e.message : String(e) };
   }

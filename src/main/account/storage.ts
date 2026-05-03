@@ -28,6 +28,11 @@ export interface AccountRecord {
   pinSalt: string;
   addedAt: string;
   lastUsedAt?: string;
+  /** v0.8.1 預留：使用者用「行動自然人憑證」/ TWFidO SSO 登入的帳號，沒有 e 等密
+   *  碼可存。autoLogin / 心跳 reauth 走不通 → session 過期時要彈 toast 請使用者
+   *  自己重登，不要悶頭重試。寫入流程在 v0.8.1 還沒實作（無法用左側表單登入），
+   *  欄位先留下，等之後可以從 sniffer / cookie 變化偵測再啟用。 */
+  ssoOnly?: boolean;
 }
 
 export interface AccountIndex {

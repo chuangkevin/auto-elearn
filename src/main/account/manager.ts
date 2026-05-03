@@ -39,6 +39,10 @@ export interface AccountSession {
   focusedCid: string | null;
   /** 從 login-sniffer 抓到、還沒持久化的 creds（多帳號模式不太用得到，但保險起見保留） */
   pendingSniffed: SniffedCredentials | null;
+  /** v0.8.1：tab 是否已通過 PIN 驗證（true = 可見、可切到此 tab；false = 切到此 tab
+   *  時必須重輸 PIN）。fresh 開 tab 時 = true（剛剛輸過 PIN 才會建這個 session）；
+   *  使用者按「🔒 鎖定」或切走此 tab 時 → false。 */
+  unlocked: boolean;
   autoLoginInFlight: boolean;
   reloginInFlight: boolean;
   logoutHandlingInFlight: boolean;
