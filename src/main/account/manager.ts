@@ -38,6 +38,10 @@ export interface AccountSession {
    *  v0.8.2 之前 ACTION_PAUSE 只翻 state.status="paused" 但沒任何模組真的讀，所以
    *  暫停只是 UI 假裝 — 考試問卷照跑，使用者能看到 BrowserView 還在執行動作。 */
   pauseSignal: { paused: boolean };
+  /** v0.8.7：使用者剛退選但 server 端可能還沒同步的 cid 集合。runPipelineFor 在 enrol
+   *  階段會跳過這裡的 cid，避免「退選 → 開始 → 又被 enrollMany 加回去」的迴圈。
+   *  ACTION_BACK / 顯式重新搜尋勾選時清空。 */
+  recentlyUnenrolled: Set<string>;
   pipelineRunning: boolean;
   /** 心跳階段正在跑的課，view focus 切換用 */
   runningCids: Set<string>;

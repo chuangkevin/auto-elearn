@@ -173,6 +173,41 @@ let postLoginState: { id: string; suggestedNickname?: string } | null = null;
 /** 「+ 新增帳號」流程：尚未持久化的 session id（random）；登入成功後會 re-key 成 account-derived id */
 let pendingNewSessionId: string | null = null;
 
+/**
+ * v0.8.7：跨帳號的「課程擁有權」表。同一堂課若被 N 個帳號同時啟動 heartbeat，
+ * server 端只維護一個 active SCORM session（key 在 user 層；多帳號實測下發現
+ * 後啟動的會把先啟動的 session 砍掉 → 先啟動的 reading time 直接歸零）。所以
+ * 限制：同一個 cid 同時間只能有 1 個帳號跑 heartbeat。
+ *
+ * 用法：
+ *  - acquireCourseOwnership(cid, s) → 成功 / 已被誰佔
+ *  - releaseAllCoursesForAccount(s.id) → 帳號 destroy / 整批 heartbeat 結束時呼叫
+ */
+const courseOwners = new Map<
+  string,
+  { accountId: string; nickname: string; startedAt: number }
+>();
+function acquireCourseOwnership(
+  cid: string,
+  s: AccountSession,
+): { ok: boolean; takenBy?: string } {
+  const existing = courseOwners.get(cid);
+  if (existing && existing.accountId !== s.id) {
+    return { ok: false, takenBy: existing.nickname };
+  }
+  courseOwners.set(cid, {
+    accountId: s.id,
+    nickname: s.record.nickname,
+    startedAt: Date.now(),
+  });
+  return { ok: true };
+}
+function releaseAllCoursesForAccount(accountId: string): void {
+  for (const [cid, info] of courseOwners) {
+    if (info.accountId === accountId) courseOwners.delete(cid);
+  }
+}
+
 /** Renderer 推來的 active view bounds */
 let lastBounds: ViewBounds = { x: 0, y: 0, width: 0, height: 0 };
 
@@ -345,6 +380,8 @@ function makeSession(opts: {
     abortSignal: { aborted: false },
     // v0.8.3：暫停旗標跟 abort 分開 — abort=不可逆終止，pause=可恢復暫停
     pauseSignal: { paused: false },
+    // v0.8.7：剛退選但 server 還沒同步 / runPipelineFor 不要 auto re-enrol 的 cid
+    recentlyUnenrolled: new Set<string>(),
     pipelineRunning: false,
     runningCids: new Set(),
     focusedCid: null,
@@ -430,6 +467,8 @@ async function diagnosePartitionCookies(s: AccountSession): Promise<void> {
 async function destroySession(s: AccountSession): Promise<void> {
   s.abortSignal.aborted = true;
   s.pipelineRunning = false;
+  // v0.8.7：釋放佔住的課程擁有權（避免 zombie ownership 卡別的帳號）
+  releaseAllCoursesForAccount(s.id);
   if (s.watchdogTimer) {
     clearInterval(s.watchdogTimer);
     s.watchdogTimer = null;
@@ -1176,7 +1215,25 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
 
   // 1. Enrol
   const enrolled = new Set(s.state.courses.map((c) => c.cid));
-  const toEnrol = cids.filter((c) => !enrolled.has(c));
+  // v0.8.7：使用者剛退選的 cid 不要被自動加選回去 — 即使 selectedCids 裡還有它
+  // （renderer 沒同步刷掉 / pipelineCids 是 click 時的 snapshot）也跳過。
+  const skippedDueToRecentUnenrol: string[] = [];
+  const toEnrol = cids
+    .filter((c) => !enrolled.has(c))
+    .filter((c) => {
+      if (s.recentlyUnenrolled.has(c)) {
+        skippedDueToRecentUnenrol.push(c);
+        return false;
+      }
+      return true;
+    });
+  if (skippedDueToRecentUnenrol.length > 0) {
+    logSession(
+      s,
+      "warn",
+      `⏭ 不自動加選 ${skippedDueToRecentUnenrol.length} 門剛被退選的課程（${skippedDueToRecentUnenrol.join(",")}）— 要重新上請去搜尋頁勾選按開始`,
+    );
+  }
   if (toEnrol.length > 0) {
     s.state.status = "enrolling";
     s.state.now.action = "enroll";
@@ -1466,9 +1523,27 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     startChainOnce(t.course.cid, t.course.caption, false);
   }
 
-  const needReading = tracked.filter(
+  const allNeedReading = tracked.filter(
     (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
   );
+  // v0.8.7：跨帳號的課程擁有權檢查 — 同一個 cid 同時間只能 1 個帳號 heartbeat，
+  // 不然 server SCORM session 互相打掉，先進場的 reading time 會歸零。
+  const needReading: typeof allNeedReading = [];
+  for (const t of allNeedReading) {
+    const claim = acquireCourseOwnership(t.course.cid, s);
+    if (!claim.ok) {
+      logSession(
+        s,
+        "warn",
+        `⏭ 略過「${t.course.caption}」：「${claim.takenBy}」帳號正在上同一堂課（同一堂課同時只能一個帳號上，避免 server SCORM session 互相打掉、進度歸零）`,
+      );
+      // 把卡進度的這堂直接標 done — heartbeatDonePromise 不卡 chain
+      ensureHeartbeatDonePromise(t.course.cid);
+      markHeartbeatDone(t.course.cid);
+      continue;
+    }
+    needReading.push(t);
+  }
   for (const t of needReading) ensureHeartbeatDonePromise(t.course.cid);
 
   if (needReading.length === 0) {
@@ -1696,6 +1771,8 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   }
 
   stopSessionWatchdog(s);
+  // v0.8.7：pipeline 結束 → 釋放這個帳號佔住的所有課程，讓其他帳號可以接手
+  releaseAllCoursesForAccount(s.id);
   s.state.status = "done";
   s.state.now.action = "idle";
   s.state.now.courseId = undefined;
@@ -2481,6 +2558,9 @@ ipcMain.on(IPC.ACTION_BACK, async () => {
   if (!s) return;
   s.abortSignal.aborted = true;
   stopSessionWatchdog(s);
+  // v0.8.7：回到選課畫面 = fresh start；釋放佔住的課程 + 清掉退選防呆 set
+  releaseAllCoursesForAccount(s.id);
+  s.recentlyUnenrolled.clear();
   s.state.status = "selecting";
   s.state.pauseReason = undefined;
   s.state.now = { action: "idle" };
@@ -2679,8 +2759,23 @@ ipcMain.handle(IPC.UNENROLL_COURSE, async (_evt, cid: string) => {
   logSession(s, "info", `嘗試退選：${name}`);
   const res = await unenrollCourse(cid, s.view.webContents.session);
   if (res.ok) {
-    logSession(s, "info", `退選完成：${name}`);
+    // v0.8.7：記住使用者剛退選 — 即使 server 還沒同步、即使 renderer selectedCids
+    // 沒同步刷掉，下次 runPipelineFor 也不要把這個 cid auto-enrol 回來
+    s.recentlyUnenrolled.add(cid);
     await refreshCourses(s);
+    // v0.8.7：refresh 後驗證 server 端真的移除了 — 沒移除就明確警告（不擋
+    // pipeline，但讓使用者知道）。常見原因：unenroll click 收到 confirm 但
+    // server 處理失敗 / 課程在「退選期」之外。
+    const stillEnrolled = s.state.courses.some((c) => c.cid === cid);
+    if (stillEnrolled) {
+      logSession(
+        s,
+        "warn",
+        `⚠ 退選 ${name} 後 server 仍顯示已選 — 可能 server 還在同步、或這門課現在不能退選。下次 pipeline 會跳過 auto-enrol，但 server 真實狀態是「仍已選」。`,
+      );
+    } else {
+      logSession(s, "info", `退選完成（server 已同步）：${name}`);
+    }
   } else {
     logSession(s, "warn", `退選失敗 ${name}：${res.error ?? "unknown"}`);
   }

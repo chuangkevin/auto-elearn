@@ -1284,6 +1284,28 @@ function Selecting({ state }: { state: AppState }) {
     setSelected(new Set(pending.map((c) => c.cid)));
   }, [pending]);
 
+  // v0.8.7：使用者退選某 cid 之後 main 會 refreshCourses → pending 不再包含它，
+  // 但 selected 還記著（didInit guard 不再 fire 整個 reset）→ 上方計數「選了 X 堂」
+  // 仍包含已退課 → 按開始時 main 會把已退課 auto-enrol 回去（已被 v0.8.7
+  // recentlyUnenrolled 防呆住，但 UI 數字還是錯）。這個 effect 把 selected 裡
+  // 「既不在 pending 也不在 search results」的孤兒 cid 清掉。
+  // 注意：不能無條件清掉「不在 pending」的 — 使用者剛從搜尋結果勾的新課還
+  // 沒 enrol，會在 results 裡但不在 pending 裡，那是合法的選擇。
+  useEffect(() => {
+    setSelected((prev) => {
+      const valid = new Set<string>();
+      for (const c of pending) valid.add(c.cid);
+      for (const r of results) valid.add(r.cid);
+      let pruned = false;
+      const next = new Set<string>();
+      for (const c of prev) {
+        if (valid.has(c)) next.add(c);
+        else pruned = true;
+      }
+      return pruned ? next : prev;
+    });
+  }, [pending, results]);
+
   function togglePendingAll() {
     const allCids = pending.map((c) => c.cid);
     const allChecked = allCids.length > 0 && allCids.every((c) => selected.has(c));
