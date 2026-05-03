@@ -265,11 +265,30 @@ const KNOWN_HOSTS = [
 
 export type NavLogger = (msg: string) => void;
 
+/**
+ * v0.8.4：hahow 「登入數量上限」頁面偵測。Hahow for business 限制同帳號最多 2 個
+ * 裝置同時登入，每個 partition 都被視為獨立裝置 → 第 3 個帳號的 heartbeat 跳到
+ * hahow 課程時會撞到 limit 頁。沒處理會卡住整個 chain，被踢的帳號 SCORM session
+ * 也會被 server 清掉 → 進度歸零。
+ *
+ * 觸發條件：did-finish-load 後 page innerText 含「登入數量上限」(或英文等價字串)。
+ * caller 應該在 callback 裡執行：(a) 自動點此頁的「繼續」搶下裝置位置 + (b) 把
+ * 其他帳號的 heartbeat 暫停，避免 thrashing。
+ */
+export type HahowLimitCallback = (info: {
+  click: () => Promise<boolean>;
+  navUrl: string;
+}) => void;
+
 export function attachElearnView(
   win: BrowserWindow,
   url: string,
   onLogoutDetected?: (reason: "url" | "raw-source") => void,
-  opts: { partition?: string; navLogger?: NavLogger } = {},
+  opts: {
+    partition?: string;
+    navLogger?: NavLogger;
+    onHahowLimitHit?: HahowLimitCallback;
+  } = {},
 ): BrowserView {
   const view = new BrowserView({
     webPreferences: {
@@ -365,6 +384,7 @@ export function attachElearnView(
             /* nav races are fine — caller's handler will retry */
           }
         }
+        await maybeFireHahowLimit(view.webContents, opts.onHahowLimitHit);
       }, 400);
     });
   } else {
@@ -379,6 +399,7 @@ export function attachElearnView(
             /* swallow */
           }
         }
+        await maybeFireHahowLimit(view.webContents, opts.onHahowLimitHit);
       }, 400);
     });
     // Even without logout handling, still trace cross-domain navigations so
@@ -394,6 +415,65 @@ export function attachElearnView(
     );
   }
   return view;
+}
+
+/**
+ * 偵測 hahow 限制頁。每個 view 自己有 throttle map（最少 8 秒間隔），避免 redirect
+ * chain / 連續 did-finish-load 重複 fire。設計用 throttle 而非「fire-once」是因為
+ * 使用者跳到下一門 hahow 課程時可能再撞到，那個合法需要再 fire。
+ */
+const lastHahowFireAt = new WeakMap<WebContents, number>();
+async function maybeFireHahowLimit(
+  wc: WebContents,
+  cb: HahowLimitCallback | undefined,
+): Promise<void> {
+  if (!cb) return;
+  const now = Date.now();
+  const last = lastHahowFireAt.get(wc) ?? 0;
+  if (now - last < 8000) return;
+  let detection: { detected: boolean; navUrl: string } | null = null;
+  try {
+    detection = (await wc.executeJavaScript(
+      `(() => {
+        const txt = (document.body && document.body.innerText) || '';
+        const sample = txt.slice(0, 6000);
+        // 中文：「登入數量上限」「同時登入裝置數量已達上限」「達到登入數量限制」
+        // 英文：「reached your device limit」（hahow EN）
+        const re = /登入數量上限|登入裝置數.{0,8}上限|達到.{0,4}登入.{0,4}限制|reached.{0,8}device.{0,8}limit/i;
+        return { detected: re.test(sample), navUrl: location.href };
+      })()`,
+      true,
+    )) as { detected: boolean; navUrl: string };
+  } catch {
+    return;
+  }
+  if (!detection?.detected) return;
+  lastHahowFireAt.set(wc, now);
+  cb({
+    navUrl: detection.navUrl,
+    click: async () => {
+      try {
+        const clicked = (await wc.executeJavaScript(
+          `(() => {
+            const all = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            // 找文字含「繼續」「踢」「continue」的按鈕；過濾掉太長的（避免誤點 navigation 連結）
+            const target = all.find((el) => {
+              const t = ((el).innerText || (el).textContent || '').trim();
+              if (!t || t.length > 12) return false;
+              return /^(繼續|踢|登出其他|continue|kick)/i.test(t);
+            });
+            if (!target) return false;
+            target.click();
+            return true;
+          })()`,
+          true,
+        )) as boolean;
+        return !!clicked;
+      } catch {
+        return false;
+      }
+    },
+  });
 }
 
 /**

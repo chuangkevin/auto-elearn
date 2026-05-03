@@ -377,6 +377,12 @@ function makeSession(opts: {
       // 跨 domain 導航記到 per-session log，供使用者 / 開發者定位 hahow 登入上限
       // 頁面的真實 URL（BrowserView 沒有網址列）+ 自然人 SSO 的 redirect chain。
       navLogger: (msg) => logSession(session, "warn", msg),
+      // v0.8.4：偵測到 hahow 限制頁時自動點繼續 + 暫停其他帳號的 heartbeat
+      onHahowLimitHit: (info) => {
+        void handleHahowLimitHit(session, info).catch((e) =>
+          logSession(session, "error", `hahow 限制頁處理例外：${(e as Error)?.message ?? e}`),
+        );
+      },
     },
   );
   view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
@@ -432,6 +438,85 @@ const PIN_GRACE_MS = 5 * 60 * 1000;
 
 function isWithinPinGrace(s: AccountSession): boolean {
   return s.unlocked && Date.now() - s.lastUnlockedAt < PIN_GRACE_MS;
+}
+
+// v0.8.4：hahow 「登入數量上限」處理。
+//
+// 背景：hahow for business 限制同帳號最多 2 個裝置同時登入；每個 partition 都被
+// 視為獨立裝置，第 3 個帳號 SCORM 跳到 hahow 課時撞到 limit 頁。沒處理會卡住整
+// 個 chain，且舊裝置的 SCORM session 被 server 砍 → 進度歸零。
+//
+// 全域 in-flight 旗：3 個帳號同時撞到 limit 頁時，避免每個各自跑 click + pause-others
+// 演成踢自己。處理 8 秒內只允許一個 session 進入處理流程。
+let hahowEvictionInFlight = false;
+const HAHOW_AUTO_RESUME_MS = 30_000;
+
+async function handleHahowLimitHit(
+  s: AccountSession,
+  info: { click: () => Promise<boolean>; navUrl: string },
+): Promise<void> {
+  if (hahowEvictionInFlight) {
+    logSession(s, "warn", `🟠 hahow 限制頁（已有別 tab 在處理中，跳過）：${info.navUrl}`);
+    return;
+  }
+  hahowEvictionInFlight = true;
+  setTimeout(() => {
+    hahowEvictionInFlight = false;
+  }, 8000);
+
+  logSession(
+    s,
+    "warn",
+    `🟠 hahow 偵測到「登入數量上限」頁，自動點「繼續」搶下裝置位置（${info.navUrl}）`,
+  );
+
+  // Step 1：自動點「繼續」 — 失敗就告訴使用者要手動點
+  const clicked = await info.click();
+  if (!clicked) {
+    logSession(
+      s,
+      "error",
+      `❌ hahow「繼續」按鈕找不到，請手動點 — 沒點掉的話這門課會卡住。請把網頁畫面截圖回報。`,
+    );
+  } else {
+    logSession(s, "info", `▶ 已點「繼續」，hahow 會踢掉舊裝置；其他帳號暫停 30 秒`);
+  }
+
+  // Step 2：把其他 session 全部暫停（reactive — 哪個是真的被踢的不知道，全停穩）
+  // 30 秒後自動 resume，下次 heartbeat 失敗時 v0.8.1 reauthFn 會自動補登 + 重抽
+  // ticket，session 就回來了。
+  const pausedIds: string[] = [];
+  for (const other of listSessions()) {
+    if (other.id === s.id) continue;
+    if (!other.pipelineRunning) continue;
+    if (other.pauseSignal.paused) continue; // 使用者已自己暫停，不要再插手
+    other.pauseSignal.paused = true;
+    pausedIds.push(other.id);
+    logSession(
+      other,
+      "warn",
+      "⚠ 另一個帳號剛搶下 hahow 裝置位置，這個帳號可能被踢；暫停 heartbeat 30 秒",
+    );
+  }
+
+  // Step 3：30 秒後自動 resume — 下次心跳失敗時 reauthFn 會重抽 ticket
+  if (pausedIds.length > 0) {
+    setTimeout(() => {
+      for (const id of pausedIds) {
+        const target = getSession(id);
+        if (!target) continue;
+        // 使用者可能在這 30s 內已經手動 resume 或 abort，那不要動
+        if (target.abortSignal.aborted) continue;
+        if (!target.pauseSignal.paused) continue;
+        target.pauseSignal.paused = false;
+        logSession(
+          target,
+          "info",
+          "▶ 自動恢復 hahow 暫停（被踢的話下次心跳失敗會自動重登 + 重抽 ticket）",
+        );
+      }
+    }, HAHOW_AUTO_RESUME_MS);
+  }
 }
 
 /**
