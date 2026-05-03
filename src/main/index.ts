@@ -56,7 +56,7 @@ import { fetchCourseDetail } from "./http/course-detail";
 import { runHeartbeatBatch, type PollData } from "./heartbeat/engine";
 import { extractTicket } from "./heartbeat/reader";
 import { attachLoginSniffer, type SniffedCredentials } from "./auth/login-sniffer";
-import { loginViaEcpa } from "./auth/ecpa-login";
+import { loginViaEcpa, resolveAlias } from "./auth/ecpa-login";
 import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
@@ -2187,63 +2187,55 @@ async function submitNewAccount(payload: {
   const pinCheck = validatePinFormat(pin);
   if (!pinCheck.ok) return { ok: false, reason: pinCheck.reason };
 
-  // 用「猜的」id 先 partition；如果 GetUID 解析後 id 不一樣，會在登入後 re-key。
-  const guessedId = computeAccountId(account);
-  const guessedDup = getAccount(guessedId);
-  if (guessedDup) {
-    return {
-      ok: false,
-      reason: `這個帳號已經在列表中（${guessedDup.nickname}）`,
-    };
-  }
-
   pushSecretToMaskList(account, maskAccount(account));
 
-  // Step 1: 用猜的 partition 跑 SSO
-  const guessedPartition = partitionIdFor(guessedId);
-  const guessSess = sessionModule.fromPartition(guessedPartition);
-  // 清掉 partition 殘骸（之前 remove 沒清乾淨的 cookies），確保 fresh session
-  await guessSess.clearStorageData().catch(() => void 0);
-
-  logGlobal("info", `正在背景登入 ${maskAccount(account)} ...`);
-  const r1 = await loginViaEcpa(guessSess, account, password);
-  if (!r1.ok) {
+  // v0.8.6：先「便宜」確認 alias → full ID（1 個 GetUID HTTP，~1-2s），再決定 partition。
+  // 這樣完整 SSO 鏈只跑一次，不再「猜 partition → 跑完整 SSO → 發現不對 → 換 partition →
+  // 再跑一次完整 SSO」浪費 30-60s。完整 ID 的 case 直接跳過 GetUID。
+  const isFullId = /^[A-Za-z]\d{9}$/.test(account);
+  let resolved = account;
+  if (!isFullId) {
+    logGlobal("info", `正在解析帳號 ${maskAccount(account)} ...`);
+    // 用 default session 解析就好（不會留下任何 cookie 給後續 SSO 用）
+    const lookup = await resolveAlias(sessionModule.defaultSession, account);
+    if (!lookup) {
+      return {
+        ok: false,
+        reason: "無法解析帳號（可能是別名打錯、eCPA 暫時無法使用、或帳號被鎖）",
+      };
+    }
+    resolved = lookup;
+  }
+  const realId = computeAccountId(resolved);
+  const dup = getAccount(realId);
+  if (dup) {
     return {
       ok: false,
-      reason: `登入失敗（${r1.stage ?? "?"}）：${r1.error ?? "unknown"}`,
+      reason: `這個帳號已經在列表中（${dup.nickname}）`,
     };
   }
-  const resolved = r1.resolvedAccount ?? account;
-  const realId = computeAccountId(resolved);
 
   pushSecretToMaskList(resolved, maskAccount(resolved));
 
-  // 如果使用者打的是短別名 → guessId 跟 realId 不一樣 → 把 cookie 移到正確 partition
-  // 後再走一次 SSO（loginViaEcpa 在當前 partition 上是冪等的，只是多花 ~3 秒）。
-  let workingPartition = guessedPartition;
-  let workingSess = guessSess;
-  if (realId !== guessedId) {
-    const realDup = getAccount(realId);
-    if (realDup) {
-      // 別名指到已存在的帳號 → 中止
-      await guessSess.clearStorageData().catch(() => void 0);
-      return {
-        ok: false,
-        reason: `這個帳號已經在列表中（${realDup.nickname}）`,
-      };
-    }
-    // 移到 real partition，重跑一次（cookies 不能跨 partition，重登最簡單）
-    await guessSess.clearStorageData().catch(() => void 0);
-    workingPartition = partitionIdFor(realId);
-    workingSess = sessionModule.fromPartition(workingPartition);
-    await workingSess.clearStorageData().catch(() => void 0);
-    const r2 = await loginViaEcpa(workingSess, resolved, password);
-    if (!r2.ok) {
-      return {
-        ok: false,
-        reason: `登入失敗（${r2.stage ?? "?"}）：${r2.error ?? "unknown"}`,
-      };
-    }
+  // 直接在 real partition 跑一次 SSO
+  const partition = partitionIdFor(realId);
+  const partSess = sessionModule.fromPartition(partition);
+  // v0.8.6：fresh partition 不需要 clearStorageData（無資料可清）；只有遇到舊
+  // partition 殘骸才清。判斷方式：partition 已有 elearn cookies = 舊資料。
+  const existingCookies = await partSess.cookies
+    .get({ url: "https://elearn.hrd.gov.tw/" })
+    .catch(() => []);
+  if (existingCookies.length > 0) {
+    await partSess.clearStorageData().catch(() => void 0);
+  }
+
+  logGlobal("info", `正在背景登入 ${maskAccount(resolved)} ...`);
+  const r = await loginViaEcpa(partSess, resolved, password);
+  if (!r.ok) {
+    return {
+      ok: false,
+      reason: `登入失敗（${r.stage ?? "?"}）：${r.error ?? "unknown"}`,
+    };
   }
 
   // Step 2: 寫入儲存層（creds + record + PIN）
@@ -2312,7 +2304,22 @@ async function clearAllAccountsHandler(): Promise<AccountOpResult> {
   await clearPartitionDataFor(ids);
   multiMode = "picker";
   setActiveId(null);
+  // v0.8.6：使用者回報「清除後無法輸入」— 防禦性把 BrowserView bounds 歸零、
+  // 把焦點明確還給 renderer（避免上一個 session 的 view destroy 殘留焦點）。
+  // 全部 session 都已 destroy，這裡 setBounds 找不到 view 不會炸；只是把
+  // lastBounds 記成 0 讓下次新增的帳號 view 一開始就不可見。
+  lastBounds = { x: 0, y: 0, width: 0, height: 0 };
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.focus();
+      mainWindow.webContents.focus();
+    } catch {
+      /* swallow */
+    }
+  }
   pushState();
+  // 多推一次 state，覆蓋 renderer 在 unmount→mount transition 之間錯過的訊息
+  setTimeout(() => pushState(), 60);
   logGlobal("info", `已清除全部 ${ids.length} 個帳號（cookie / 帳密 / PIN / pipeline 全清）`);
   return { ok: true };
 }

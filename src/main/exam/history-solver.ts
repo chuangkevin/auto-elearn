@@ -2,6 +2,7 @@ import { BrowserWindow, type Session } from "electron";
 import * as cheerio from "cheerio";
 import { saveLearnedAnswer, clearAllLearnedForCourse } from "./answer-store";
 import { enterLC, suppressDialogs, execJs } from "../browser/lc-nav";
+import { acquireElearnWindowSlot, releaseElearnWindowSlot } from "../heartbeat/reader";
 
 /**
  * Recover an exam's correct-answer key purely from the user's existing
@@ -73,7 +74,8 @@ async function setupLcAndFindLatestEid(
     // blocker quirks sometimes drop the 上課去 click silently.
     let ok = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      ok = await enterLC(win, cid, (m) => log(`enterLC: ${m}`));
+      // v0.8.6：caller (solveExamFromHistory) 已 hold slot，不要 re-acquire
+      ok = await enterLC(win, cid, (m) => log(`enterLC: ${m}`), { skipSlotAcquire: true });
       if (ok) break;
       if (attempt < 3) {
         log(`enterLC 第 ${attempt} 次失敗，等 ${5 + attempt * 3}s 再試`);
@@ -327,12 +329,26 @@ export async function solveExamFromHistory(
   const log = (m: string) => onProgress(`[history-solve ${cid}] ${m}`);
 
   log("setup LC session");
+  // v0.8.6：hold elearn slot 整個 history-solve lifecycle（含 setup 內部建 win
+  // + 本函式持續用 win 跑 fetch view_result），確保跟 chain 並行的
+  // examTask / surveyTask 排隊，hahow 同時間只看到一個 hidden window。
+  await acquireElearnWindowSlot();
+  let slotReleased = false;
+  const releaseSlotOnce = () => {
+    if (slotReleased) return;
+    slotReleased = true;
+    releaseElearnWindowSlot();
+  };
   const setup = await setupLcAndFindLatestEid(session, cid, log);
-  if (!setup) return { ok: false, learned: 0, reason: "找不到 viewResult eid（尚未送過任何測驗？）" };
+  if (!setup) {
+    releaseSlotOnce();
+    return { ok: false, learned: 0, reason: "找不到 viewResult eid（尚未送過任何測驗？）" };
+  }
   const { win } = setup;
   const latest = setup;
   const cleanup = () => {
     try { win.destroy(); } catch { /* already destroyed */ }
+    releaseSlotOnce();
   };
 
   // Use the BrowserWindow's frame to fetch each view_result page — same

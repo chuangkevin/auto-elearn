@@ -165,15 +165,25 @@ export async function loginViaEcpa(
 
     // 7. Small delay so the session cookie jar commits the Set-Cookie headers
     //    written by net.request during the sso redirect chain.
-    await new Promise((r) => setTimeout(r, 600));
+    // v0.8.6：600 → 250ms。實測 net.request 結束後 cookie jar 通常 50-100ms 內就
+    //    commit 完，600ms 太保守。減 350ms 對單次 login 不多，但 alias 路徑（之
+    //    前要跑兩次）能省下不少；同時加退路：cookie 沒抓到時短迴圈再等 200ms × 3。
+    await new Promise((r) => setTimeout(r, 250));
 
     // 8. Cookie-based verify (spec: "idx + suc present" = authenticated).
     //    We deliberately avoid fetching learn_dashboard.php here because
     //    elearn is a SPA — the raw HTML response never contains 個人專區/登出,
     //    causing the old body-text check to always report failure even when
     //    the session is genuinely authenticated.
-    const cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
-    const idx = cookies.find((c) => c.name === "idx");
+    // v0.8.6：250ms 後 cookie 還沒落地就再等 3 × 200ms — 比硬等 600ms 快，又不會
+    //    在快速 case 噴 verify-failed。
+    let cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
+    let idx = cookies.find((c) => c.name === "idx");
+    for (let retry = 0; retry < 3 && !idx?.value; retry++) {
+      await new Promise((r) => setTimeout(r, 200));
+      cookies = await session.cookies.get({ url: "https://elearn.hrd.gov.tw/" });
+      idx = cookies.find((c) => c.name === "idx");
+    }
     if (!idx?.value) {
       const cookieSummary = cookies.map((c) => c.name).join(",");
       return {
@@ -186,6 +196,46 @@ export async function loginViaEcpa(
     return { ok: true, resolvedAccount: fullAccount };
   } catch (e) {
     return { ok: false, stage: "exception", error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * v0.8.6：別名解析獨立 endpoint。submitNewAccount 用這個提早決定 partition id，
+ * 避免「先用猜的 id 跑完整 SSO → 發現不對 → 換 partition 再跑一次完整 SSO」造成
+ * ~30-60s 浪費（兩次 SSO 各 5 個 net.request × 政府主機慢）。
+ *
+ * 只打 GetUID（一次 POST，~1-2s）。回傳 null 代表：
+ *   - 別名不存在
+ *   - eCPA 暫時掛了
+ *   - 該 alias 暫時被鎖（試太多次密碼）
+ * caller 負責 fallback 行為（繼續用 raw input 還是直接報錯）。
+ */
+export async function resolveAlias(
+  session: Session,
+  alias: string,
+): Promise<string | null> {
+  const trimmed = alias.trim();
+  // 已經是完整 ID（1 碼英文 + 9 碼數字）就不需要 resolve
+  if (/^[A-Za-z]\d{9}$/.test(trimmed)) return trimmed;
+
+  try {
+    // 為了 GetUID 能拿到正確的 ASP.NET_SessionId，先 GET clogin 一次
+    await req(session, "GET", CLOGIN_ASPX_URL, undefined, "https://elearn.hrd.gov.tw/");
+    const uid = await req(
+      session,
+      "POST",
+      "https://ecpa.dgpa.gov.tw/Home/GetUID",
+      { account: trimmed },
+      CLOGIN_ASPX_URL,
+      "https://ecpa.dgpa.gov.tw",
+    );
+    if (uid.status >= 400) return null;
+    const body = uid.body.trim();
+    if (/^[A-Za-z]\d{9}$/.test(body)) return body;
+    const m = body.match(/\b([A-Za-z]\d{9})\b/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
   }
 }
 

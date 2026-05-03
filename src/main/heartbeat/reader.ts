@@ -613,6 +613,9 @@ export async function executeScormFinish(
   /** v0.8.0 多帳號：傳該帳號的 partition session，不然此 hidden window 跑空 cookie。 */
   session?: Electron.Session,
 ): Promise<boolean> {
+  // v0.8.6：跟 solveExam / fillSurvey 共用 elearn slot — 否則本函式 + chain 並行
+  // 的 exam/survey 三個 window 同時掛在 hahow 會被算成 3 裝置撞 limit 頁。
+  await acquireElearnWindowSlot();
   const win = new BrowserWindow({
     show: false,
     width: 1280,
@@ -712,6 +715,7 @@ export async function executeScormFinish(
     return false;
   } finally {
     try { win.destroy(); } catch { /* ignore */ }
+    releaseElearnWindowSlot(); // v0.8.6
   }
 }
 

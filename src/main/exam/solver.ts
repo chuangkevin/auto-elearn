@@ -11,6 +11,10 @@ import {
   getSysbarLinks,
   clickSysbarLink,
 } from "../browser/lc-nav";
+import {
+  acquireElearnWindowSlot,
+  releaseElearnWindowSlot,
+} from "../heartbeat/reader";
 import { hasGeminiKey } from "../llm/gemini";
 
 export interface SolveResult {
@@ -716,7 +720,8 @@ async function runExamLoop(
   for (let attempt = 1; attempt <= MAX_EXAM_ATTEMPTS; attempt++) {
     if (best !== null && best >= passingScore) break; // good enough to pass
 
-    const ok = await enterLC(win, cid, onProgress);
+    // v0.8.6：caller (solveExam) 已 hold slot，這裡不能再 acquire
+    const ok = await enterLC(win, cid, onProgress, { skipSlotAcquire: true });
     if (!ok) {
       onProgress(`enterLC 失敗 (attempt ${attempt})；${attempt < MAX_EXAM_ATTEMPTS ? "稍候重試" : "放棄"}`);
       consecutiveSetupFailures++;
@@ -987,6 +992,12 @@ export async function solveExam(
     bySource: { db: 0, fuzzy: 0, llm: 0, random: 0, brute: 0 },
   };
 
+  // v0.8.6：在 win 建立**前**就 hold elearn slot，整個 win lifecycle 都 hold 著
+  // 直到 finally win.destroy。這樣 chain 並行 examTask + surveyTask 時不會有兩
+  // 個 hidden window 同時掛在 hahow 頁面上 — hahow 看成 2 裝置 → 撞 limit 頁
+  // → 我們之中某個會被踢 → 課程進度歸零（v0.8.4/v0.8.5 反覆撞的根因）。
+  await acquireElearnWindowSlot();
+
   // disableDialogs kills alert/prompt at Chromium level. confirm() is
   // overridden to return true via JS injection in lc-nav.ts before any
   // click on 上課去 — see enterLC().
@@ -1011,7 +1022,8 @@ export async function solveExam(
     // click registered. A short backoff lets the multi-window state clear.
     let ok = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      ok = await enterLC(win, cid, onProgress);
+      // v0.8.6：caller 已 hold slot，enterLC 不要再 acquire 否則 deadlock
+      ok = await enterLC(win, cid, onProgress, { skipSlotAcquire: true });
       if (ok) break;
       if (attempt < 3) {
         onProgress(`solveExam: enterLC 第 ${attempt} 次失敗，等 ${5 + attempt * 3}s 再試`);
@@ -1088,5 +1100,8 @@ export async function solveExam(
     } catch {
       /* already closed */
     }
+    // v0.8.6：win 完全 destroy 後才 release slot — chain 並行的 surveyTask 才
+    // 能進來，hahow 在任一時間點只看到一個 hidden window
+    releaseElearnWindowSlot();
   }
 }

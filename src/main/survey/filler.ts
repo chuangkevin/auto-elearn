@@ -8,6 +8,10 @@ import {
   clickSysbarLink,
   awaitWindowOpen,
 } from "../browser/lc-nav";
+import {
+  acquireElearnWindowSlot,
+  releaseElearnWindowSlot,
+} from "../heartbeat/reader";
 import { fetchCourseDetail } from "../http/course-detail";
 
 export interface SurveyResult {
@@ -171,6 +175,9 @@ async function tryFillOnce(
   session: Session,
   log: (msg: string) => void,
 ): Promise<AttemptResult> {
+  // v0.8.6：hold elearn slot 整個 win lifecycle — 跟 solveExam 競爭時排隊，
+  // 確保同時間只有一個 hidden window 掛在 hahow，避免 hahow 看成 2 裝置。
+  await acquireElearnWindowSlot();
   const win = new BrowserWindow({
     show: false,
     width: 1280,
@@ -186,7 +193,7 @@ async function tryFillOnce(
 
   try {
     log(`[問卷] enterLC...`);
-    const lcOk = await enterLC(win, cid, log);
+    const lcOk = await enterLC(win, cid, log, { skipSlotAcquire: true });
     if (!lcOk) {
       return { ok: false, filled: 0, error: "無法進入學習中心" };
     }
@@ -353,5 +360,6 @@ async function tryFillOnce(
     } catch {
       /* already closed */
     }
+    releaseElearnWindowSlot(); // v0.8.6
   }
 }

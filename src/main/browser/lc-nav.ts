@@ -50,12 +50,22 @@ export function suppressDialogs(win: BrowserWindow): void {
  *   Case B: window.open() fires → we capture URL and loadURL into win
  *
  * Returns true when the LC frameset (≥2 frames) is ready.
+ *
+ * v0.8.6：caller 可以傳 `skipSlotAcquire: true` 表示 caller 已經在外面 hold 住
+ * `acquireElearnWindowSlot` slot（典型場景：solveExam / fillSurvey 在 win 建立
+ * 時就 acquire 了，要 hold 到 win.destroy 才 release，避免 chain 並行時兩個
+ * hidden window 同時掛在 hahow 頁面上 → hahow 看成 2 裝置 → limit 頁打到課程
+ * 進度歸零）。沒帶 skip 就維持舊行為（自己 acquire/release）。
  */
 export async function enterLC(
   win: BrowserWindow,
   cid: string,
   onLog?: (msg: string) => void,
+  opts: { skipSlotAcquire?: boolean } = {},
 ): Promise<boolean> {
+  if (opts.skipSlotAcquire) {
+    return await _enterLCImpl(win, cid, onLog);
+  }
   // Throttle to the global elearn-window slot. Same semaphore as ticket
   // extraction; both flows hit /info/{cid} → 上課去 → LC frameset, and
   // elearn's 多重視窗 guard treats them identically. Without throttling,
