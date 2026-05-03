@@ -392,25 +392,17 @@ function App() {
               操作區已收起，點我展開
             </button>
           ) : (
-            <div className="overflow-auto h-full">
+            // v0.8.2：pb-14（56px）給左下角的偽裝 / Gemini / 收起左邊 floating
+            // 按鈕留空間 — 之前內容直接觸底，被那一排按鈕擋住，使用者操作不到
+            // Selecting / Monitor 最底下的 row。
+            <div className="overflow-auto h-full pb-14">
               <TopPanel state={state} />
             </div>
           )}
 
-          {/* v0.8.1：左下「🔒 鎖定」按鈕。只在 active 模式下、且 active tab 是 unlocked 時顯示
-           *  （locked 時 PinModal 已蓋住整個 left 區，再放鎖按鈕無意義）。
-           *  按了之後 main 把 active session unlocked = false → multiMode = "pin" → PinModal 彈出。 */}
-          {!leftCollapsed &&
-            state.multi.mode === "active" &&
-            state.multi.activeAccountId && (
-              <button
-                className="absolute bottom-3 left-3 z-40 flex items-center gap-1 px-2.5 py-1.5 rounded border border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-xs text-slate-300 backdrop-blur shadow"
-                onClick={() => window.api.lockActive()}
-                title="鎖定此帳號 — 切回時要重輸 PIN（同事走過去看不到課程）"
-              >
-                🔒 鎖定
-              </button>
-            )}
+          {/* v0.8.2：原本 v0.8.1 在這裡放「🔒 鎖定」絕對定位按鈕，但跟 Shell
+           *  層的 fixed 偽裝/Gemini 按鈕同樣 left-3 直接重疊。已搬到 TabBar 右側，
+           *  那裡是 tab 級操作的自然位置，也避開了 fixed 元素的螢幕底部擁擠區。 */}
 
           {autoLogin && (
             <div
@@ -536,7 +528,8 @@ function App() {
         )}
         {!collapsed && !leftCollapsed && (
           <button
-            className="absolute bottom-3 left-44 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
+            // v0.8.2：left-44 → left-60，避開 Shell 的 🫥+⚙ flex 容器（左下 ~205px 寬）
+            className="absolute bottom-3 left-60 z-50 px-2 py-1 rounded bg-slate-800/90 hover:bg-slate-700 text-xs text-slate-200 border border-slate-600 backdrop-blur shadow-lg"
             onClick={() => setLeftCollapsed(true)}
             title="把左邊操作區收起來，網頁吃滿畫面"
           >
@@ -915,39 +908,45 @@ export default function Shell() {
   return (
     <>
       <App />
-      {/* Stealth toggle lives in the bottom-LEFT corner (inside dashboard column);
-          fixed right/bottom would put it behind the BrowserView which paints on top. */}
-      {stealth === "unlocked" && (
+      {/* v0.8.2：左下角控制列。原本 🫥 偽裝（fixed left-3）跟 ⚙ Gemini（fixed left-24）
+       *  各自定位、按鈕寬度沒對齊，標籤永遠互相壓住。改用單一 flex 容器 + gap-2，
+       *  保證視覺上一定不重疊；`fixed` 仍在 BrowserView 之上的 renderer 層。
+       *  Stealth toggle lives in bottom-LEFT (not bottom-right) because that side is
+       *  inside the dashboard column — fixed right/bottom would put it behind the
+       *  BrowserView which paints on top. */}
+      <div className="fixed left-3 bottom-3 z-50 flex items-center gap-2">
+        {stealth === "unlocked" && (
+          <button
+            className="px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur shadow-lg"
+            title="點開可以馬上偽裝成記事本，或者徹底解除偽裝模式（清掉密碼）"
+            onClick={() => setShowStealthOptions(true)}
+          >
+            🫥 偽裝模式…
+          </button>
+        )}
+        {stealth === "no_secret" && (
+          <button
+            className="px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur shadow-lg"
+            title="設一組密碼，下次打開會偽裝成記事本。要在記事本裡輸入這組密碼才會進到真正的程式。"
+            onClick={() => {
+              setSetupValue("");
+              setSetupConfirm("");
+              setSetupErr(null);
+              setSetupOpen(true);
+            }}
+          >
+            🫥 設一組偽裝密碼
+          </button>
+        )}
+        {/* ⚙ Gemini —— 點開先彈說明，避免使用者誤以為「沒設定不能用」。 */}
         <button
-          className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-300 hover:text-rose-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-          title="點開可以馬上偽裝成記事本，或者徹底解除偽裝模式（清掉密碼）"
-          onClick={() => setShowStealthOptions(true)}
+          className="px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-amber-300 hover:bg-slate-700 backdrop-blur shadow-lg"
+          title="點我看 Gemini 是什麼，要不要設定（沒設定也能用）"
+          onClick={() => setShowGeminiInfo(true)}
         >
-          🫥 偽裝模式…
+          ⚙ Gemini
         </button>
-      )}
-      {stealth === "no_secret" && (
-        <button
-          className="fixed left-3 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-emerald-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-          title="設一組密碼，下次打開會偽裝成記事本。要在記事本裡輸入這組密碼才會進到真正的程式。"
-          onClick={() => {
-            setSetupValue("");
-            setSetupConfirm("");
-            setSetupErr(null);
-            setSetupOpen(true);
-          }}
-        >
-          🫥 設一組偽裝密碼
-        </button>
-      )}
-      {/* ⚙ Gemini —— 點開先彈說明，避免使用者誤以為「沒設定不能用」。 */}
-      <button
-        className="fixed left-24 bottom-3 z-50 px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-amber-300 hover:bg-slate-700 backdrop-blur shadow-lg"
-        title="點我看 Gemini 是什麼，要不要設定（沒設定也能用）"
-        onClick={() => setShowGeminiInfo(true)}
-      >
-        ⚙ Gemini
-      </button>
+      </div>
 
       {/* Gemini 說明卡片 — 由 Shell 管理（按鈕在 Shell 層）。
           MUST 用 ModalGuard 包：BrowserView 是 Electron native overlay，
@@ -3123,6 +3122,19 @@ function TabBar({ state }: { state: AppState }) {
       >
         +
       </button>
+      {/* v0.8.2：把 v0.8.1 的「左下 🔒 鎖定」按鈕搬到 tab bar 右側 — 跟左下的偽裝 /
+       *  Gemini 重疊不再是問題，而且鎖定本來就是 tab 級操作，放這比較直覺。
+       *  只有 active 模式下才顯示（鎖 picker / pin 模式沒意義） */}
+      <div className="flex-1" />
+      {multi.mode === "active" && multi.activeAccountId && (
+        <button
+          className="px-3 text-amber-300 hover:text-amber-200 hover:bg-slate-900 text-xs border-l border-slate-800"
+          onClick={() => window.api.lockActive()}
+          title="鎖定此 tab — 切回時要重輸 PIN（同事走過去看不到課程）。輸入 PIN 後 5 分鐘內切換不需重輸。"
+        >
+          🔒 鎖定
+        </button>
+      )}
     </div>
   );
 }

@@ -259,7 +259,8 @@ function buildMultiInfo(): MultiInfo {
       status: sess?.state.status,
       pipelineRunning: sess?.pipelineRunning ?? false,
       // v0.8.1：locked 旗標讓 UI 顯示 🔒 icon；未 isOpen 的不掛此欄位
-      locked: sess ? !sess.unlocked : undefined,
+      // v0.8.2：套用 grace — grace 過期等同 locked（切過去要 PIN）
+      locked: sess ? !isWithinPinGrace(sess) : undefined,
       doneCount: sess?.state.stats.done,
       totalCount: sess?.state.stats.total,
       lastUsedAt: r.lastUsedAt,
@@ -348,6 +349,8 @@ function makeSession(opts: {
     pendingSniffed: null,
     // v0.8.1：fresh session 預設 unlocked（建立 session 一定是剛通過 PIN/剛新增）
     unlocked: true,
+    // v0.8.2：5-min grace 起點
+    lastUnlockedAt: Date.now(),
     autoLoginInFlight: false,
     reloginInFlight: false,
     logoutHandlingInFlight: false,
@@ -422,23 +425,28 @@ async function destroySession(s: AccountSession): Promise<void> {
   deregisterSession(s.id);
 }
 
+/** v0.8.2：5 分鐘 PIN grace。輸過 PIN 在這個區間內切換 tab 不需要重輸。 */
+const PIN_GRACE_MS = 5 * 60 * 1000;
+
+function isWithinPinGrace(s: AccountSession): boolean {
+  return s.unlocked && Date.now() - s.lastUnlockedAt < PIN_GRACE_MS;
+}
+
 function setActiveSessionAndShow(id: string | null): void {
-  // v0.8.1：切換 tab 時自動鎖前一個（隱私要求 — 同事走過去看不到別人的課程）
-  const prevActiveId = getActiveId();
-  if (prevActiveId && prevActiveId !== id) {
-    const prev = getSession(prevActiveId);
-    if (prev) prev.unlocked = false;
-  }
+  // v0.8.2：切換 tab 不再 auto-lock 前一個（v0.8.1 行為太擾人，每次切都要 PIN）。
+  // 改成「PIN 通過後 5 分鐘內切過去免重輸」的 grace 模型。手動按「🔒 鎖定」會把
+  // unlocked 砍 false，不論在不在 grace 都要重輸；grace 過期 → unlocked 自然失效。
 
   setActiveId(id);
 
-  // 切到 locked tab → 不要直接 active 模式，要先輸 PIN
   const target = id ? getSession(id) : null;
-  if (id && target && !target.unlocked) {
+  // 需要重輸 PIN 的條件：unlocked=false（手動鎖了）OR grace 過期
+  const needsPin = !!(id && target && !isWithinPinGrace(target));
+  if (needsPin) {
     pinTarget = {
-      id: target.id,
-      nickname: target.record.nickname,
-      maskedAccount: target.record.maskedAccount,
+      id: target!.id,
+      nickname: target!.record.nickname,
+      maskedAccount: target!.record.maskedAccount,
       failedAttempts: 0,
     };
     multiMode = "pin";
@@ -451,13 +459,13 @@ function setActiveSessionAndShow(id: string | null): void {
     pinTarget = null;
     multiMode = "picker";
   }
-  // 隱藏所有非 active 或 locked 的 view；active+unlocked 的 bounds 由 renderer push
+  // 隱藏所有非 active / 仍需 PIN 的 view；active + 在 grace 內的 bounds 由 renderer push
   for (const s of listSessions()) {
-    const showThis = s.id === id && s.unlocked;
+    const showThis = s.id === id && isWithinPinGrace(s);
     if (!showThis) hideElearnView(s.view);
   }
   const active = id ? getSession(id) : null;
-  if (active && active.unlocked && active.view && mainWindow) {
+  if (active && isWithinPinGrace(active) && active.view && mainWindow) {
     // 重新套用 last-known bounds（renderer 應該很快會再 push 一次更新）
     try {
       active.view.setBounds(lastBounds);
@@ -1923,9 +1931,11 @@ async function verifyPinAndOpen(payload: {
   pinTarget = null;
   // v0.8.1：locked tab 已 open 時，verify 通過直接解鎖 + 顯示，不要重建 session
   // （那會 detach view、丟失正在跑的 pipeline）
+  // v0.8.2：通過 PIN 後刷新 grace 起點 — 之後 5 分鐘內切換不需要重輸
   const existing = getSession(record.id);
   if (existing) {
     existing.unlocked = true;
+    existing.lastUnlockedAt = Date.now();
     setActiveSessionAndShow(record.id);
     return { ok: true };
   }
@@ -1955,10 +1965,12 @@ async function closeTab(id: string): Promise<AccountOpResult> {
 
 // v0.8.1：tab 鎖定 — 把 unlocked 翻 false。如果是 active tab，UI 即刻變成 PIN 輸入；
 // 否則只是把 lock icon 點亮，下次切換到那個 tab 才會要求 PIN。
+// v0.8.2：手動鎖會跳過 5-min grace（lastUnlockedAt 倒推到很久以前），切過去一定要 PIN。
 async function lockTabOp(id: string): Promise<AccountOpResult> {
   const s = getSession(id);
   if (!s) return { ok: false, reason: "tab 不存在" };
   s.unlocked = false;
+  s.lastUnlockedAt = 0;
   if (getActiveId() === id) {
     // 當下就把 view 藏掉 + 切 PIN 模式，避免使用者離開電腦那瞬間還露出畫面
     hideElearnView(s.view);

@@ -39,10 +39,17 @@ export interface AccountSession {
   focusedCid: string | null;
   /** 從 login-sniffer 抓到、還沒持久化的 creds（多帳號模式不太用得到，但保險起見保留） */
   pendingSniffed: SniffedCredentials | null;
-  /** v0.8.1：tab 是否已通過 PIN 驗證（true = 可見、可切到此 tab；false = 切到此 tab
-   *  時必須重輸 PIN）。fresh 開 tab 時 = true（剛剛輸過 PIN 才會建這個 session）；
-   *  使用者按「🔒 鎖定」或切走此 tab 時 → false。 */
+  /** v0.8.1：tab 是否已通過 PIN 驗證。v0.8.2 起跟 lastUnlockedAt 配合：
+   *   - unlocked=false（被使用者手動「🔒 鎖定」按了）→ 切過去無條件要求 PIN
+   *   - unlocked=true 但 lastUnlockedAt > 5 min 之前 → 也要求 PIN（grace 失效）
+   *   - unlocked=true 且 lastUnlockedAt < 5 min → 直接切過去，不打擾 */
   unlocked: boolean;
+  /** v0.8.2：上一次 PIN 通過的 timestamp（也包括 fresh session 建立時 = 視同剛通過）。
+   *  setActiveSessionAndShow 用 `now - lastUnlockedAt < 5 min` 來決定要不要要求 PIN。
+   *  manual lock 直接砍 unlocked，完全跳過 grace；grace 過期則 unlocked 自然失效。
+   *  注意：grace 只針對「切換 tab」這個動作；session 一直擺著不切，超過 5 分鐘
+   *  也不會自動鎖（按下「🔒 鎖定」才會立即鎖）。 */
+  lastUnlockedAt: number;
   autoLoginInFlight: boolean;
   reloginInFlight: boolean;
   logoutHandlingInFlight: boolean;
