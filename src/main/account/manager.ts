@@ -32,6 +32,12 @@ export interface AccountSession {
   state: AppState;
   /** Pipeline 中止旗標 */
   abortSignal: { aborted: boolean };
+  /** v0.8.3：暫停旗標。abortSignal 是「終止」（不可逆，pipeline 整個結束）；pauseSignal
+   *  是「暫停」（可恢復）。chain 的 exam / survey 步驟跟 heartbeat engine 都會在 step
+   *  邊界讀這個旗標，paused=true 時 sleep 500ms 重檢，直到 false 或 aborted。
+   *  v0.8.2 之前 ACTION_PAUSE 只翻 state.status="paused" 但沒任何模組真的讀，所以
+   *  暫停只是 UI 假裝 — 考試問卷照跑，使用者能看到 BrowserView 還在執行動作。 */
+  pauseSignal: { paused: boolean };
   pipelineRunning: boolean;
   /** 心跳階段正在跑的課，view focus 切換用 */
   runningCids: Set<string>;

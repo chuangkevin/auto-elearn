@@ -343,6 +343,8 @@ function makeSession(opts: {
     view: null,
     state: createInitialState(),
     abortSignal: { aborted: false },
+    // v0.8.3：暫停旗標跟 abort 分開 — abort=不可逆終止，pause=可恢復暫停
+    pauseSignal: { paused: false },
     pipelineRunning: false,
     runningCids: new Set(),
     focusedCid: null,
@@ -430,6 +432,29 @@ const PIN_GRACE_MS = 5 * 60 * 1000;
 
 function isWithinPinGrace(s: AccountSession): boolean {
   return s.unlocked && Date.now() - s.lastUnlockedAt < PIN_GRACE_MS;
+}
+
+/**
+ * v0.8.3：暫停 gate。chain 的 exam/survey 步驟、heartbeat engine 在 step 邊界呼叫
+ * 這個函式：paused=true 時 sleep 500ms 重檢，直到 false 或 aborted。
+ *
+ * 設計刻意「step boundary」而非「中斷 in-flight 操作」 —— 暫停的 semantic 是
+ * 「暫停接著做下一步」，不是「立刻砍掉現在這題」。砍掉題目會 corrupt exam 狀態
+ * （server 已記 partial answer，下次重來算第幾次 attempt 不準）。
+ *
+ * 回傳 true = should continue（unpaused 且未 abort），false = aborted（caller 應停）
+ */
+async function awaitNotPaused(s: AccountSession): Promise<boolean> {
+  if (s.abortSignal.aborted) return false;
+  if (!s.pauseSignal.paused) return true;
+  logSession(s, "info", "⏸ 暫停中，等使用者按「繼續」...");
+  while (s.pauseSignal.paused && !s.abortSignal.aborted) {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!s.abortSignal.aborted) {
+    logSession(s, "info", "▶ 已恢復");
+  }
+  return !s.abortSignal.aborted;
 }
 
 function setActiveSessionAndShow(id: string | null): void {
@@ -969,6 +994,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   if (!s.view) return;
   const session = s.view.webContents.session;
   s.abortSignal.aborted = false;
+  s.pauseSignal.paused = false; // v0.8.3：fresh pipeline 一定不在暫停狀態
   s.pipelineRunning = true;
 
   const fetchProgressCached = makeProgressPollCache(session);
@@ -1084,6 +1110,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     awaitHeartbeat: boolean,
   ): Promise<void> => {
     if (s.abortSignal.aborted) return;
+    if (!(await awaitNotPaused(s))) return; // v0.8.3：暫停中先卡住，不要起 chain
     const card = s.state.courses.find((c) => c.cid === cid);
     try {
       const fresh = await fetchCourseDetail(session, cid);
@@ -1115,6 +1142,8 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
           let res: Awaited<ReturnType<typeof solveExam>> | null = null;
           for (let round = 1; round <= EXAM_ROUNDS; round++) {
             if (s.abortSignal.aborted) break;
+            // v0.8.3：暫停 gate — 每輪測驗開始前停下來等使用者
+            if (!(await awaitNotPaused(s))) break;
             if (round === 1) {
               logSession(s, "info", `開始測驗：${name}（門檻 ${threshold} 分）`);
             } else {
@@ -1172,6 +1201,8 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
 
         const surveyTask = (async (): Promise<void> => {
           if (surveyDone || s.abortSignal.aborted) return;
+          // v0.8.3：暫停 gate — 開始填問卷前停下來
+          if (!(await awaitNotPaused(s))) return;
           logSession(s, "info", `[${name}] 開始填問卷`);
           let sr = await fillSurvey(cid, session, {
             onProgress: (msg) => logSession(s, "info", `  [${name}] ${msg}`),
@@ -1184,6 +1215,8 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
             );
             await new Promise((r) => setTimeout(r, 30_000));
             if (!s.abortSignal.aborted) {
+              // v0.8.3：30s 等待結束後若仍是暫停狀態，等使用者恢復再 retry
+              if (!(await awaitNotPaused(s))) return;
               sr = await fillSurvey(cid, session, {
                 onProgress: (msg) =>
                   logSession(s, "info", `  [${name}] (外層重試) ${msg}`),
@@ -1321,6 +1354,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
       jitterMs: HEARTBEAT_JITTER_MS,
       graceSec: 120,
       signal: s.abortSignal,
+      pauseSignal: s.pauseSignal, // v0.8.3：暫停時 heartbeat 在 tick 邊界 sleep
       pollIntervalMs: 30_000,
       // v0.8.1：心跳連續 3 次失敗時觸發 — 通常是 hahow 並行登入上限或 SSO timeout
       // 把 server 端的 reading session 砍了，partition cookies 仍在但 idx 已失效。
@@ -2259,15 +2293,19 @@ ipcMain.on(IPC.NAVIGATE_VIEW, (_evt, url: string) => {
 ipcMain.on(IPC.ACTION_PAUSE, () => {
   const s = getActiveSession();
   if (!s) return;
+  // v0.8.3：之前只翻 state.status，但 chain / heartbeat 沒讀，等於暫停假動作。
+  // 改翻 pauseSignal 讓 awaitNotPaused gate 真的擋住下一步。
+  s.pauseSignal.paused = true;
   s.state.status = "paused";
   s.state.pauseReason = "manual";
-  logSession(s, "info", "使用者手動暫停");
+  logSession(s, "info", "使用者手動暫停（考試/問卷/心跳會在下一個步驟邊界停下）");
   pushState();
 });
 
 ipcMain.on(IPC.ACTION_RESUME, () => {
   const s = getActiveSession();
   if (!s) return;
+  s.pauseSignal.paused = false;
   s.state.status = "running";
   s.state.pauseReason = undefined;
   logSession(s, "info", "使用者恢復");
@@ -2278,6 +2316,9 @@ ipcMain.on(IPC.ACTION_ABORT, () => {
   const s = getActiveSession();
   if (s) {
     s.abortSignal.aborted = true;
+    // 順便清 paused，免得 awaitNotPaused 卡在 sleep loop 裡（abort=true 已會解，
+    // 但 paused=true 視覺/log 會繼續顯示「暫停中」一拍，清掉乾淨）
+    s.pauseSignal.paused = false;
     stopSessionWatchdog(s);
     s.state.status = "aborted";
     persistRun(s, "aborted");

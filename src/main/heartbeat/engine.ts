@@ -56,6 +56,11 @@ export interface HeartbeatOptions {
   reauthThreshold?: number;
   /** Abort signal (checked between ticks). */
   signal?: { aborted: boolean };
+  /** v0.8.3：暫停 signal。每 tick 開始前讀；paused=true 時 sleep 500ms 重檢，直到
+   *  false 或 abort。bt 跟 actid 維持不動，恢復後接著打 — server 看到的 elapsedSec
+   *  變大，照常 credit 一個 period。長時間暫停 server 端 reading session 可能會被
+   *  GC 掉，那時 heartbeat 會失敗 → reauthFn 接手重抽 ticket，這條路徑走得通。 */
+  pauseSignal?: { paused: boolean };
 }
 
 /**
@@ -190,6 +195,12 @@ async function driveCourse(session: Session, t: Tracked, opts: HeartbeatOptions)
   }
 
   while (!opts.signal?.aborted) {
+    // v0.8.3：暫停 gate — 跑下一個 heartbeat 前看看使用者按沒按暫停
+    while (opts.pauseSignal?.paused && !opts.signal?.aborted) {
+      await sleep(500);
+    }
+    if (opts.signal?.aborted) break;
+
     const elapsedSec = Math.floor((Date.now() - startAt) / 1000);
     if (elapsedSec >= maxSec) break;
 
