@@ -43,6 +43,9 @@ export interface CourseCard {
   examDone: boolean;
   surveyDone: boolean;
   lastPingAt?: number;
+  /** v0.8.8：跨帳號排隊中。某帳號暱稱（已 mask 過）正在上這堂課，本帳號排在
+   *  後面；等對方上完才會輪到。UI 顯示一個「⏸ 等候 XXX 上完」的 badge。 */
+  waitingForOwner?: string;
 }
 
 export interface LogEntry {

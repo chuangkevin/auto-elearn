@@ -29,6 +29,7 @@ export async function unenrollCourse(
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false, // v0.8.8
     },
   });
   try {

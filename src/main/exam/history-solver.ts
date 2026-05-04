@@ -65,6 +65,7 @@ async function setupLcAndFindLatestEid(
       contextIsolation: true,
       nodeIntegration: false,
       disableDialogs: true,
+      backgroundThrottling: false, // v0.8.8
     },
   });
   suppressDialogs(win);

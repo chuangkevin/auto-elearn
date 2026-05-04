@@ -321,6 +321,13 @@ export function attachElearnView(
       // alert("更新完畢") / alert("Error while parsing the document.")
       // never reaches the user.
       disableDialogs: true,
+      // v0.8.8：多帳號模式下切到別的 tab 時，這個 view 的 bounds 會被縮 0×0
+      // 但 webContents 還活著繼續跑（SCORM iframe 心跳 / heartbeat 用的是
+      // session.fetch from main process 沒這個問題，但 hidden window 跑
+      // setTimeout / setInterval 在背景會被 Chromium throttle 到 1Hz，造成
+      // 課程在背景 tab 推進極慢甚至卡住）。關掉這個 throttle，多人同時上課
+      // 就算沒在 active tab 也能保持原速度。
+      backgroundThrottling: false,
     },
   });
   // v0.8.0：多帳號用 addBrowserView，每個帳號各自掛一個 view。setBrowserView 會

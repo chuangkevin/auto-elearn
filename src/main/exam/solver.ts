@@ -1010,6 +1010,7 @@ export async function solveExam(
       contextIsolation: true,
       nodeIntegration: false,
       disableDialogs: true,
+      backgroundThrottling: false, // v0.8.8：背景 hidden window 不被 Chromium throttle
     },
   });
   suppressDialogs(win);

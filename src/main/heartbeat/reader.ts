@@ -195,6 +195,10 @@ async function _extractTicketImpl(
       // overriding window.confirm via JS injection (with `world: "main"`)
       // BEFORE we click 上課去 — see lc-nav.ts.
       disableDialogs: true,
+      // v0.8.8：show:false 的 BrowserWindow 預設算「背景視窗」，Chromium 會把
+      // setTimeout/setInterval throttle 到 1Hz，導致 SCORM iframe 內 manifest.js
+      // 的 launchActivity callback chain 跑超慢甚至 timeout。關掉。
+      backgroundThrottling: false,
     },
   });
   // Same listener-ceiling bump as suppressDialogs() — Electron attaches
@@ -625,6 +629,7 @@ export async function executeScormFinish(
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false, // v0.8.8：背景 hidden window 不要被 throttle
     },
   });
 

@@ -174,19 +174,26 @@ let postLoginState: { id: string; suggestedNickname?: string } | null = null;
 let pendingNewSessionId: string | null = null;
 
 /**
- * v0.8.7：跨帳號的「課程擁有權」表。同一堂課若被 N 個帳號同時啟動 heartbeat，
- * server 端只維護一個 active SCORM session（key 在 user 層；多帳號實測下發現
- * 後啟動的會把先啟動的 session 砍掉 → 先啟動的 reading time 直接歸零）。所以
- * 限制：同一個 cid 同時間只能有 1 個帳號跑 heartbeat。
+ * v0.8.7+v0.8.8：跨帳號的課程擁有權 + 排隊。
  *
- * 用法：
- *  - acquireCourseOwnership(cid, s) → 成功 / 已被誰佔
- *  - releaseAllCoursesForAccount(s.id) → 帳號 destroy / 整批 heartbeat 結束時呼叫
+ * 為什麼需要鎖：實測同一堂課被 2 個帳號同時 heartbeat → server 端 SCORM session
+ * 互相打掉，先進場的 reading time 歸零。
+ *
+ * 為什麼不能直接擋（v0.8.7 做法）：「多人同時刷課」是核心功能 — 後進場的不能
+ * 直接被標完成跳過，要等先進場的做完才上。
+ *
+ * 設計：
+ *  - courseOwners: cid → 目前擁有者
+ *  - acquireCourseOwnership(cid, s) → ok 拿到了 / 失敗回傳被誰佔
+ *  - releaseAllCoursesForAccount(s.id) → 釋放這個帳號佔的課程
+ *  - 排隊用 caller-side polling（runPipelineFor 每 15s 重 acquire），不靠 event-driven
+ *    resolver，pipeline 邏輯比較好讀；缺點是 release 後最多等 15s 才換手
  */
 const courseOwners = new Map<
   string,
   { accountId: string; nickname: string; startedAt: number }
 >();
+
 function acquireCourseOwnership(
   cid: string,
   s: AccountSession,
@@ -202,10 +209,16 @@ function acquireCourseOwnership(
   });
   return { ok: true };
 }
+
 function releaseAllCoursesForAccount(accountId: string): void {
-  for (const [cid, info] of courseOwners) {
+  for (const [cid, info] of Array.from(courseOwners)) {
     if (info.accountId === accountId) courseOwners.delete(cid);
   }
+}
+
+function releaseCourseOwnership(cid: string, accountId: string): void {
+  const existing = courseOwners.get(cid);
+  if (existing?.accountId === accountId) courseOwners.delete(cid);
 }
 
 /** Renderer 推來的 active view bounds */
@@ -467,7 +480,7 @@ async function diagnosePartitionCookies(s: AccountSession): Promise<void> {
 async function destroySession(s: AccountSession): Promise<void> {
   s.abortSignal.aborted = true;
   s.pipelineRunning = false;
-  // v0.8.7：釋放佔住的課程擁有權（避免 zombie ownership 卡別的帳號）
+  // v0.8.7+v0.8.8：釋放佔住的課程，叫醒 queue 第一個帳號接手
   releaseAllCoursesForAccount(s.id);
   if (s.watchdogTimer) {
     clearInterval(s.watchdogTimer);
@@ -1526,45 +1539,39 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   const allNeedReading = tracked.filter(
     (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
   );
-  // v0.8.7：跨帳號的課程擁有權檢查 — 同一個 cid 同時間只能 1 個帳號 heartbeat，
-  // 不然 server SCORM session 互相打掉，先進場的 reading time 會歸零。
-  const needReading: typeof allNeedReading = [];
+  for (const t of allNeedReading) ensureHeartbeatDonePromise(t.course.cid);
+
+  // v0.8.8：把跨帳號的擁有權檢查改成「拿到立刻上 / 拿不到排隊等」— 同一堂課
+  // 同時間只能 1 個帳號 heartbeat（server SCORM session 會互相打掉，先進場的會
+  // 歸零）；後進場的不能直接被略過/標完成，要等先進場的做完再接手。
+  const immediate: typeof allNeedReading = [];
+  const queued: typeof allNeedReading = [];
   for (const t of allNeedReading) {
     const claim = acquireCourseOwnership(t.course.cid, s);
-    if (!claim.ok) {
+    if (claim.ok) {
+      immediate.push(t);
+    } else {
+      queued.push(t);
+      const card = s.state.courses.find((c) => c.cid === t.course.cid);
+      if (card) card.waitingForOwner = claim.takenBy;
       logSession(
         s,
-        "warn",
-        `⏭ 略過「${t.course.caption}」：「${claim.takenBy}」帳號正在上同一堂課（同一堂課同時只能一個帳號上，避免 server SCORM session 互相打掉、進度歸零）`,
+        "info",
+        `⏸ 「${t.course.caption}」：「${claim.takenBy}」帳號正在上，先排隊；其他課先上，這堂等他上完再接手`,
       );
-      // 把卡進度的這堂直接標 done — heartbeatDonePromise 不卡 chain
-      ensureHeartbeatDonePromise(t.course.cid);
-      markHeartbeatDone(t.course.cid);
-      continue;
     }
-    needReading.push(t);
   }
-  for (const t of needReading) ensureHeartbeatDonePromise(t.course.cid);
+  if (queued.length > 0) pushState();
 
-  if (needReading.length === 0) {
-    logSession(s, "info", "沒有需要閱讀的課程");
-  } else {
-    const parallel = Math.min(needReading.length, HEARTBEAT_PARALLEL_MAX);
-    logSession(
-      s,
-      "info",
-      `${needReading.length} 門課開始閱讀（並行 ${parallel}，每 ${HEARTBEAT_INTERVAL_MS / 1000}s 心跳）`,
-    );
-    s.state.now.action = "heartbeat";
-    pushState();
-    startSessionWatchdog(s, session);
+  // v0.8.1：caption map 給 reauthFn 重抽 ticket 用 — extractTicket 需要 caption
+  // 才能在多 lesson 共用 SCORM tree 時挑對課，沒帶會抓到 sibling 變成 noop 心跳。
+  const captionByCid = new Map<string, string>();
+  for (const t of allNeedReading) captionByCid.set(t.course.cid, t.course.caption ?? "");
 
-    // v0.8.1：caption map 給 reauthFn 重抽 ticket 用 — extractTicket 需要 caption
-    // 才能在多 lesson 共用 SCORM tree 時挑對課，沒帶會抓到 sibling 變成 noop 心跳。
-    const captionByCid = new Map<string, string>();
-    for (const t of needReading) captionByCid.set(t.course.cid, t.course.caption ?? "");
-
-    await runHeartbeatBatch(session, needReading, {
+  /** v0.8.8：runHeartbeatBatch 的標準參數打包，主批跟排隊輪候 batch 共用 */
+  const runHbBatch = async (batch: typeof allNeedReading) => {
+    const parallel = Math.min(batch.length, HEARTBEAT_PARALLEL_MAX);
+    await runHeartbeatBatch(session, batch, {
       parallel,
       intervalMs: HEARTBEAT_INTERVAL_MS,
       jitterMs: HEARTBEAT_JITTER_MS,
@@ -1722,6 +1729,8 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
           s.runningCids.delete(cid);
           if (s.focusedCid === cid) focusNextCourse(s);
           markHeartbeatDone(cid);
+          // v0.8.8：釋放這堂課的擁有權，排隊的帳號最多等 15s 就可接手
+          releaseCourseOwnership(cid, s.id);
           startChainOnce(cid, card.name, false);
         } else if (stage === "error") {
           logSession(s, "warn", `心跳錯誤 ${card.name}：${JSON.stringify(extra ?? {})}`);
@@ -1763,6 +1772,64 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
         }
       },
     });
+  };
+  // ── helper end ──
+
+  if (allNeedReading.length === 0) {
+    logSession(s, "info", "沒有需要閱讀的課程");
+  } else {
+    s.state.now.action = "heartbeat";
+    pushState();
+    startSessionWatchdog(s, session);
+
+    // 主批 — 立刻拿到 ownership 的課程
+    if (immediate.length > 0) {
+      logSession(
+        s,
+        "info",
+        `${immediate.length} 門課開始閱讀${queued.length > 0 ? `（另有 ${queued.length} 門排隊等候）` : ""}（並行 ${Math.min(immediate.length, HEARTBEAT_PARALLEL_MAX)}，每 ${HEARTBEAT_INTERVAL_MS / 1000}s 心跳）`,
+      );
+      await runHbBatch(immediate);
+    } else if (queued.length > 0) {
+      logSession(s, "info", `所有 ${queued.length} 門課都被別的帳號佔用中，先排隊等候...`);
+    }
+
+    // v0.8.8：排隊輪候 — 主批做完後 / 邊做邊釋放，輪流 acquire 還沒拿到的課程
+    while (queued.length > 0 && !s.abortSignal.aborted) {
+      // 等等再 retry — 太快會在 release 之前就重檢，浪費。15s 是排隊更新的合理 cadence
+      await new Promise((r) => setTimeout(r, 15_000));
+      if (s.abortSignal.aborted) break;
+
+      const stillQueued: typeof queued = [];
+      const justAcquired: typeof queued = [];
+      for (const t of queued) {
+        const claim = acquireCourseOwnership(t.course.cid, s);
+        if (claim.ok) {
+          justAcquired.push(t);
+          const card = s.state.courses.find((c) => c.cid === t.course.cid);
+          if (card) card.waitingForOwner = undefined;
+          logSession(
+            s,
+            "info",
+            `▶ 「${t.course.caption}」 排隊到了，開始上`,
+          );
+        } else {
+          stillQueued.push(t);
+          // 持有者可能換了；UI 跟著更新
+          const card = s.state.courses.find((c) => c.cid === t.course.cid);
+          if (card && claim.takenBy && card.waitingForOwner !== claim.takenBy) {
+            card.waitingForOwner = claim.takenBy;
+          }
+        }
+      }
+      queued.length = 0;
+      queued.push(...stillQueued);
+      pushState();
+
+      if (justAcquired.length > 0) {
+        await runHbBatch(justAcquired);
+      }
+    }
   }
 
   if (chainPromises.length > 0) {
@@ -1771,7 +1838,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   }
 
   stopSessionWatchdog(s);
-  // v0.8.7：pipeline 結束 → 釋放這個帳號佔住的所有課程，讓其他帳號可以接手
+  // v0.8.7+v0.8.8：pipeline 結束 → 釋放擁有權，queue 下一個帳號接手
   releaseAllCoursesForAccount(s.id);
   s.state.status = "done";
   s.state.now.action = "idle";
@@ -2558,7 +2625,7 @@ ipcMain.on(IPC.ACTION_BACK, async () => {
   if (!s) return;
   s.abortSignal.aborted = true;
   stopSessionWatchdog(s);
-  // v0.8.7：回到選課畫面 = fresh start；釋放佔住的課程 + 清掉退選防呆 set
+  // v0.8.7+v0.8.8：回到選課畫面 = fresh start；釋放佔住的課程 + 清掉退選防呆 set
   releaseAllCoursesForAccount(s.id);
   s.recentlyUnenrolled.clear();
   s.state.status = "selecting";

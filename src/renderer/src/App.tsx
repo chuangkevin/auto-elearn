@@ -2241,6 +2241,13 @@ function Monitor({ state }: { state: AppState }) {
                         等系統確認過關…
                       </span>
                     )}
+                    {/* v0.8.8：跨帳號排隊中 — 別的帳號正在上同一堂課，這個帳號排隊
+                     *  等候。每 15s 重試一次取得擁有權。 */}
+                    {c.waitingForOwner && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-200">
+                        ⏸ 等候 {c.waitingForOwner} 上完
+                      </span>
+                    )}
                   </div>
                 </div>
               );
