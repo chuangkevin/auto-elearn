@@ -294,6 +294,17 @@ elearn 各機關的測驗 row 版型差很多，原本 `closest('label')` / `clo
 - v0.8.9 修法：tickInfo 提到 module-level，key `${accountId}:${cid}`
 - 注意：這純粹 UI 視覺層；main 端 `card.readSec` 是 per-session in-memory state，切 tab 從來沒影響它
 
+### Gemini 額度耗盡不能卡考試（v0.8.10）
+- 免費 Gemini key 每日 limit 約 20 reqs；多帳號 × 多課同時跑很容易撞 429
+- v0.8.9 之前的問題不在 `generateText` — 它早就會回 null。是在 `solver` 的 strategy 邏輯：看到 fail + `hasGeminiKey()=true` 就 `skipMixedDb=true` 切 LLM 模式，下次重考又打死掉的 Gemini 又拿 random，**brute force probe 永遠不啟動**
+- v0.8.10 修法：`gemini.ts` 加 `_quotaExhaustedAt` timestamp
+  - 第一次 429 設 `_quotaExhaustedAt = now()` + log 一次明確訊息
+  - 1 小時內 `generateText` short-circuit 回 null（不浪費 API timeout）
+  - 1 小時後自動清，下次呼叫再試（GCP 一般是 60s 或 daily window，1h 是穩妥的 retry 點）
+  - 新 export `isGeminiUsable() = hasGeminiKey() && quota 沒撞`
+  - **`matcher.askLlm` 跟 `solver` 策略判斷一定要用 `isGeminiUsable()`，不能用 `hasGeminiKey()`** — 後者撞 quota 後仍回 true，會卡 brute force 不啟動
+- UX：Gemini modal 「清除」按鈕跟 picker 「🗑 全域清除」字面太像，使用者會搞混；改成「清掉 Gemini Key」明確標籤 + 標題下加說明「跟帳號 / 偽裝密碼完全無關」
+
 ### Cross-domain nav logger（v0.8.1+）
 - BrowserView 沒有 URL bar，使用者看不到撞到哪個 host
 - `view.ts logCrossDomain` 攔 did-navigate / did-redirect-navigation，非 elearn/ecpa 域名自動 log
