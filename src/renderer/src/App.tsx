@@ -1998,6 +1998,22 @@ function phaseLabel(p: string): string {
   }
 }
 
+/**
+ * v0.8.9：本地 tick info 提到 module-level Map，key 用 `${accountId}:${cid}` 而非
+ * 純 cid。多帳號模式下兩個帳號修同一堂課，cid 一樣 — 切 tab 時 useEffect 拿
+ * 到 B 的 readSec 就會「以為 A 的 readSec 變了」，把 A 的 lastSyncAt 蓋成現在
+ * → A 的 local extrapolation 重置 → 切回 A 時時間從本地累計的「+90」掉回實際
+ * c.readSec，使用者看到 timer 倒退 1-2 分鐘。
+ *
+ * 把 tickInfo 提到 module level 後，兩個帳號彼此互不影響；切 tab 後再回來時
+ * useEffect 不會誤判 readSec 變動 → lastSyncAt 不重置 → local extrapolation
+ * 連續，timer 自然繼續走。
+ */
+const _tickInfoByKey = new Map<string, { lastReadSec: number; lastSyncAt: number }>();
+function tickKey(accountId: string | null | undefined, cid: string): string {
+  return `${accountId ?? "_"}:${cid}`;
+}
+
 // ── Monitor ──────────────────────────────────────────────────
 function Monitor({ state }: { state: AppState }) {
   const scopeCids = state.pipelineCids ? new Set(state.pipelineCids) : null;
@@ -2005,28 +2021,28 @@ function Monitor({ state }: { state: AppState }) {
     ? state.courses.filter((c) => scopeCids.has(c.cid))
     : state.courses;
   const running = scope.filter((c) => c.phase !== "done");
+  const accountId = state.multi.activeAccountId;
 
   // 每門課的「本地計時器」：每次 server 回來新的 readSec 時對齊一次，
   // 之間用 setInterval(1s) 自己往前算，所以 UI 不會 5 分鐘才動一次。
-  const tickRef = useRef<Map<string, { lastReadSec: number; lastSyncAt: number }>>(new Map());
   const [, setNowTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setNowTick((n) => (n + 1) % 1_000_000), 1000);
     return () => clearInterval(id);
   }, []);
   // 同步：每次 state 進來就比對每門課的 readSec，有變更就重設基準
+  // v0.8.9：用 module-level _tickInfoByKey + accountId+cid key，切 tab 不互相覆蓋
   useEffect(() => {
-    const map = tickRef.current;
-    const seen = new Set<string>();
     for (const c of scope) {
-      seen.add(c.cid);
-      const prev = map.get(c.cid);
+      const k = tickKey(accountId, c.cid);
+      const prev = _tickInfoByKey.get(k);
       if (!prev || prev.lastReadSec !== c.readSec) {
-        map.set(c.cid, { lastReadSec: c.readSec, lastSyncAt: Date.now() });
+        _tickInfoByKey.set(k, { lastReadSec: c.readSec, lastSyncAt: Date.now() });
       }
     }
-    for (const k of Array.from(map.keys())) if (!seen.has(k)) map.delete(k);
-  }, [scope]);
+    // 註：不再清掉「沒看到的 cid」— 那是另一個帳號的，留著切回去時還能用。
+    // module map 會隨帳號 remove / clear-all 慢慢清，目前沒做主動 GC（小 leak）。
+  }, [scope, accountId]);
 
   // Course list / Log 的拖拉分隔條：用百分比 (0.2 ~ 0.8) 紀錄 Course list 佔下半部的比例。
   const [coursePanelRatio, setCoursePanelRatio] = useState(0.6);
@@ -2145,7 +2161,8 @@ function Monitor({ state }: { state: AppState }) {
               // 心跳還在背景跑。tick 必須持續累加，否則倒數計時器會凍結，UI
               // 看起來像 reading 已經停了（其實沒有）。所以條件改成「還沒到
               // 100%」而不是「phase 還在 reading」。
-              const tickInfo = tickRef.current.get(c.cid);
+              // v0.8.9：用 accountId+cid key
+              const tickInfo = _tickInfoByKey.get(tickKey(accountId, c.cid));
               const stillReading = c.readSec < c.requiredSec;
               const localExtraSec = tickInfo && stillReading
                 ? Math.max(0, Math.floor((Date.now() - tickInfo.lastSyncAt) / 1000))
