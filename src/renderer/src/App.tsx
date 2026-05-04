@@ -47,6 +47,7 @@ declare global {
       rendererLog: (level: "info" | "warn" | "error", msg: string) => void;
       openLogsFolder: () => void;
       getAppVersion: () => Promise<string>;
+      openExternalUrl: (url: string) => Promise<{ ok: boolean; reason?: string }>;
       // ── 多帳號 (v0.8.0) ──
       beginUnlock: (id: string) => void;
       verifyPin: (id: string, pin: string) => Promise<AccountOpResult>;
@@ -2633,6 +2634,10 @@ function NewAccountFormModal({ onClose }: { onClose: () => void }) {
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // v0.8.11：第一次登入要先啟用帳號 — main 回的 result 帶 activationRequired 跟
+  // activationUrl；renderer 在錯誤訊息下方多顯示一個「前往啟用帳號」按鈕，點了
+  // 用 shell.openExternal 開外部瀏覽器。
+  const [activationUrl, setActivationUrl] = useState<string | null>(null);
 
   const canSubmit =
     account.trim().length >= 2 &&
@@ -2644,6 +2649,7 @@ function NewAccountFormModal({ onClose }: { onClose: () => void }) {
     if (busy || !canSubmit) return;
     setBusy(true);
     setErr(null);
+    setActivationUrl(null);
     try {
       const res = await window.api.addAccountSubmit({
         account: account.trim(),
@@ -2653,11 +2659,25 @@ function NewAccountFormModal({ onClose }: { onClose: () => void }) {
       });
       if (!res.ok) {
         setErr(res.reason ?? "新增失敗");
+        if (res.activationRequired) {
+          // 抓到的就用，沒抓到 fallback 到 ecpa.dgpa.gov.tw 首頁
+          setActivationUrl(res.activationUrl ?? "https://ecpa.dgpa.gov.tw/");
+        }
         return;
       }
       onClose();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openActivation() {
+    if (!activationUrl) return;
+    const r = await window.api.openExternalUrl(activationUrl);
+    if (!r.ok) {
+      setErr((prev) =>
+        (prev ? prev + "\n" : "") + `打開啟用頁失敗：${r.reason ?? "?"}（請手動到 ecpa.dgpa.gov.tw 找啟用）`,
+      );
     }
   }
 
@@ -2732,7 +2752,26 @@ function NewAccountFormModal({ onClose }: { onClose: () => void }) {
               />
             </label>
           </div>
-          {err && <div className="text-rose-400 text-sm mt-3">{err}</div>}
+          {err && (
+            <div className="text-rose-400 text-sm mt-3 whitespace-pre-line">{err}</div>
+          )}
+          {activationUrl && (
+            // v0.8.11：第一次登入要先啟用 — 提供一鍵打開啟用頁的按鈕（外部瀏覽
+            // 器）。錯誤訊息裡 eCPA 給的「請點選這裡」連結在 modal 裡是純文字
+            // 點不到，這個按鈕把它變成可點。
+            <div className="mt-3 p-3 rounded bg-amber-950/30 border border-amber-800">
+              <p className="text-xs text-amber-200 mb-2">
+                eCPA 第一次登入需要先啟用帳號。點下面的按鈕會開外部瀏覽器到啟用頁，
+                <strong>啟用完再回來這裡按一次「新增」</strong>。
+              </p>
+              <button
+                onClick={openActivation}
+                className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+              >
+                🌐 前往啟用帳號
+              </button>
+            </div>
+          )}
           <div className="flex justify-between items-center mt-5">
             <button
               className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"

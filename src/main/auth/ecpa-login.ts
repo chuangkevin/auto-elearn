@@ -32,6 +32,12 @@ export interface EcpaLoginResult {
    *  保證不論使用者怎麼打，同一個 e 等帳號永遠對應同一個 storage id。
    *  Login 失敗時可能也填了（例如 GetUID 成功但密碼錯）。 */
   resolvedAccount?: string;
+  /** v0.8.11：第一次登入需要啟用帳號 (eCPA 回應 body 含「請先啟用」或「點選這裡」
+   *  等字串)。Renderer 看到這個 flag 會顯示「前往啟用帳號」按鈕。 */
+  activationRequired?: boolean;
+  /** v0.8.11：從錯誤回應 body 抓出來的啟用頁 URL（可能 null — 抓不到時 caller
+   *  fallback 到 ecpa.dgpa.gov.tw 首頁讓使用者自己找） */
+  activationUrl?: string;
 }
 
 const UA =
@@ -112,6 +118,26 @@ export async function loginViaEcpa(
     const hex = ticket.body.trim();
     if (!/^[0-9A-Fa-f]{100,}$/.test(hex)) {
       // Short / empty / "0" body = credential mismatch (or eCPA lockout).
+      // v0.8.11：第一次登入要啟用帳號 — eCPA 回應通常含「請先啟用」/「點選這裡」
+      // 等字串 + 一個 <a href> 啟用連結。偵測到就 return activationRequired
+      // 給 caller，UI 顯示「前往啟用帳號」按鈕讓使用者去外部瀏覽器啟用。
+      const ACTIVATION_RE = /(第一次登入|啟用您?的?帳號|啟用帳號|請先啟用|請先點選|點選這裡|啟動帳號|尚未啟用|activate.{0,12}account)/i;
+      if (ACTIVATION_RE.test(ticket.body)) {
+        // 抓 body 裡的第一個 <a href> 當啟用 URL；抓不到回 undefined，由 caller
+        // 提示使用者手動去 ecpa.dgpa.gov.tw 找
+        const linkMatch =
+          ticket.body.match(/<a[^>]+href=["']([^"'<>]+)["']/i)?.[1] ??
+          ticket.body.match(/(https?:\/\/[^\s"'<>]+)/i)?.[1];
+        return {
+          ok: false,
+          stage: "GetApTicketV2",
+          error:
+            "這個帳號還沒啟用。eCPA 第一次登入要先去啟用頁活化帳號，活化完再回來按一次「新增」。",
+          activationRequired: true,
+          activationUrl: linkMatch,
+          resolvedAccount: fullAccount,
+        };
+      }
       return {
         ok: false,
         stage: "GetApTicketV2",

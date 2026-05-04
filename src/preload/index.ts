@@ -66,6 +66,9 @@ const api = {
     ipcRenderer.send(IPC.RENDERER_LOG, { level, msg }),
   openLogsFolder: () => ipcRenderer.send(IPC.OPEN_LOGS_FOLDER),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC.APP_VERSION_GET),
+  /** v0.8.11：用 shell.openExternal 開外部瀏覽器（main 端有 host 白名單） */
+  openExternalUrl: (url: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke(IPC.OPEN_EXTERNAL_URL, url),
 
   // ── 多帳號 (v0.8.0) ─────────────────────────────────────────────
   beginUnlock: (id: string) => ipcRenderer.send(IPC.ACCOUNT_BEGIN_UNLOCK, id),

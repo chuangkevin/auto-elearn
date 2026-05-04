@@ -2376,6 +2376,20 @@ async function submitNewAccount(payload: {
   logGlobal("info", `正在背景登入 ${maskAccount(resolved)} ...`);
   const r = await loginViaEcpa(partSess, resolved, password);
   if (!r.ok) {
+    // v0.8.11：第一次登入要先啟用帳號 → 把 activation 資訊一起傳給 renderer
+    // 顯示「前往啟用帳號」按鈕（用 shell.openExternal 開外部瀏覽器）。
+    if (r.activationRequired) {
+      logGlobal(
+        "warn",
+        `${maskAccount(resolved)} 第一次登入需要先啟用帳號（${r.activationUrl ?? "去 ecpa.dgpa.gov.tw 找啟用入口"}）`,
+      );
+      return {
+        ok: false,
+        reason: r.error ?? "需要先啟用帳號",
+        activationRequired: true,
+        activationUrl: r.activationUrl,
+      };
+    }
     return {
       ok: false,
       reason: `登入失敗（${r.stage ?? "?"}）：${r.error ?? "unknown"}`,
@@ -2931,6 +2945,35 @@ ipcMain.on(IPC.OPEN_LOGS_FOLDER, () => {
     });
 });
 ipcMain.handle(IPC.APP_VERSION_GET, () => app.getVersion());
+
+// v0.8.11：開外部瀏覽器，限定 ecpa.dgpa.gov.tw / elearn.hrd.gov.tw / moica /
+// nat.gov.tw 之類的政府站。給「前往啟用帳號」按鈕用，避免 renderer 被 prompt
+// injection 拐去開隨意網址。
+ipcMain.handle(IPC.OPEN_EXTERNAL_URL, async (_evt, url: string): Promise<{ ok: boolean; reason?: string }> => {
+  if (typeof url !== "string" || !url) return { ok: false, reason: "no url" };
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") {
+      return { ok: false, reason: "non-http url blocked" };
+    }
+    const ALLOWED = [
+      "ecpa.dgpa.gov.tw",
+      "elearn.hrd.gov.tw",
+      "moica.nat.gov.tw",
+      "fido.nat.gov.tw",
+      "nidp.nat.gov.tw",
+    ];
+    const okHost = ALLOWED.some((h) => u.host === h || u.host.endsWith("." + h));
+    if (!okHost) {
+      logGlobal("warn", `OPEN_EXTERNAL_URL 拒絕非白名單 host：${u.host}`);
+      return { ok: false, reason: `host ${u.host} 不在白名單` };
+    }
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+});
 
 // ── 多帳號 IPC ────────────────────────────────────────────────
 ipcMain.on(IPC.ACCOUNT_BEGIN_UNLOCK, (_evt, id: string) => {

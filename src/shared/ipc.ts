@@ -212,6 +212,9 @@ export const IPC = {
   OPEN_LOGS_FOLDER: "logs:open-folder",
   /** renderer → main: 取得 app.getVersion()，給偽裝記事本右鍵的「版本」項顯示用 */
   APP_VERSION_GET: "app:version-get",
+  /** v0.8.11：renderer → main: 用 shell.openExternal 開外部瀏覽器（限定 ecpa /
+   *  elearn.hrd.gov.tw 等已知 host），給「前往啟用帳號」按鈕用 */
+  OPEN_EXTERNAL_URL: "shell:open-external",
 
   // ── 多帳號 (v0.8.0) ─────────────────────────────────────────────
   // v0.8.1：新增帳號改成左側表單一次填齊（帳號／密碼／暱稱／PIN），main 用 net.request
@@ -321,4 +324,10 @@ export interface ViewBounds {
 export interface AccountOpResult {
   ok: boolean;
   reason?: string;
+  /** v0.8.11：addAccountSubmit 失敗 + eCPA 回應裡看到「需要啟用帳號」時帶這個。
+   *  Renderer 顯示「前往啟用帳號」按鈕 → 點了用 shell.openExternal 開外部瀏覽器。 */
+  activationRequired?: boolean;
+  /** v0.8.11：從 eCPA 錯誤頁抓出來的啟用 URL；可能 null (抓不到時 fallback 到
+   *  ecpa.dgpa.gov.tw 首頁讓使用者自己找) */
+  activationUrl?: string;
 }
