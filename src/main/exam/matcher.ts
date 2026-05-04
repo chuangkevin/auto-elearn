@@ -1,5 +1,5 @@
 import { lookupByLike, lookupLearnedAnswer, normalizeQuestion, type DbRow } from "./answer-store";
-import { generateText, hasGeminiKey } from "../llm/gemini";
+import { generateText, isGeminiUsable } from "../llm/gemini";
 
 export type AnswerSource = "db" | "fuzzy" | "llm" | "random" | "brute";
 
@@ -170,7 +170,8 @@ export async function matchWithLlm(
   options: string[],
   courseName?: string,
 ): Promise<{ pickedIdx: number; confidence: number } | null> {
-  if (!hasGeminiKey() || options.length === 0) return null;
+  // v0.8.10：isGeminiUsable() 兼顧 key 存在 + quota 沒用完
+  if (!isGeminiUsable() || options.length === 0) return null;
   const optLines = options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("\n");
   const courseLine = courseName?.trim()
     ? `\n課程主題：${courseName.trim()}（請依此主題的常識選擇最符合的答案）`

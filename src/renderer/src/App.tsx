@@ -735,9 +735,12 @@ function GeminiKeyModal({ onClose }: { onClose: () => void }) {
         fontFamily: "'Microsoft JhengHei', 'Segoe UI', sans-serif",
       }}
     >
-      <h3 className="text-sm font-semibold mb-4" style={{ color: "#cba6f7" }}>
+      <h3 className="text-sm font-semibold mb-2" style={{ color: "#cba6f7" }}>
         🔑 設定 Gemini API Key
       </h3>
+      <p className="text-[11px] mb-4" style={{ color: "#7f849c" }}>
+        Gemini 是考試 AI 解題用的（沒設也能用，靠暴力解題）。這裡的設定跟「帳號 / 課程 / 偽裝密碼」完全無關。
+      </p>
       <label className="block text-xs mb-1.5" style={{ color: "#a6adc8" }}>
         API Key
       </label>
@@ -785,8 +788,9 @@ function GeminiKeyModal({ onClose }: { onClose: () => void }) {
           onClick={clear}
           className="px-4 py-1.5 rounded-md text-[13px] disabled:opacity-50"
           style={{ background: "#45475a", color: "#cdd6f4" }}
+          title="把這裡的 API Key 清掉（只清 key，不會動到帳號 / 課程 / cookie）"
         >
-          清除
+          清掉 Gemini Key
         </button>
         <button
           disabled={busy}

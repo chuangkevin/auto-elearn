@@ -15,7 +15,7 @@ import {
   acquireElearnWindowSlot,
   releaseElearnWindowSlot,
 } from "../heartbeat/reader";
-import { hasGeminiKey } from "../llm/gemini";
+import { isGeminiUsable } from "../llm/gemini";
 
 export interface SolveResult {
   ok: boolean;
@@ -945,7 +945,10 @@ async function runExamLoop(
     //     force LLM/learned-only on next attempt (assuming Gemini is
     //     configured; otherwise no-op since LLM falls through to random).
     if (score !== null && score < passingScore) {
-      if (learned === 0 && hasGeminiKey()) {
+      // v0.8.10：用 isGeminiUsable 判斷 — 沒 key OR quota 用完都不切到 LLM 模式，
+      // 否則 30 次 attempt 都堵在「呼叫死掉的 LLM 拿 random」。沒 LLM 的時候
+      // bfActive 會接手做暴力解題（brute-force probe），solver 還是會收斂。
+      if (learned === 0 && isGeminiUsable()) {
         if (!skipMixedDb) {
           onProgress(`[${label}] 切換策略：下次重考改走 LLM`);
         }

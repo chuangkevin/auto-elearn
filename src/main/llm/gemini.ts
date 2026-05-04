@@ -42,6 +42,37 @@ export function hasGeminiKey(): boolean {
   return !!loadConfig().geminiApiKey;
 }
 
+/**
+ * v0.8.10：免費 Gemini key 每天有 limit（free_tier_requests=20）。多帳號 × 多
+ * 課程同時跑很容易撞到。撞到後 1 小時內全部 LLM 呼叫都直接 skip，讓 solver
+ * 走「DB → fuzzy → brute force」路徑，不要每題都打 API 拿 429 再 fallback —
+ * 那樣 30 次 attempt 都在重打 Gemini，每題等 timeout，浪費。
+ *
+ * 1 hour 是 free tier rate-limit window 的合理估計（GCP 一般 60s 或 24h
+ * 兩種，免費版傾向 daily 但 1h 是保守 retry 點）。其實只要記住 timestamp，
+ * 1h 後讓 LLM 再試，沒額度會再次回 429 重設這個 flag。
+ */
+let _quotaExhaustedAt = 0;
+const QUOTA_RETRY_AFTER_MS = 60 * 60 * 1000;
+
+function markQuotaExhausted(): void {
+  _quotaExhaustedAt = Date.now();
+  llog(
+    "Gemini 額度撞到上限 — 這 1 小時內所有 LLM 呼叫都會直接 skip，solver 走暴力解題（DB → fuzzy → brute）。1 小時後自動再試。",
+  );
+}
+
+/** v0.8.10：matcher / solver 用這個判斷該不該叫 LLM（取代 hasGeminiKey） */
+export function isGeminiUsable(): boolean {
+  if (!hasGeminiKey()) return false;
+  if (_quotaExhaustedAt === 0) return true;
+  if (Date.now() - _quotaExhaustedAt > QUOTA_RETRY_AFTER_MS) {
+    _quotaExhaustedAt = 0; // retry window 過了，下次呼叫會再試
+    return true;
+  }
+  return false;
+}
+
 /** Log Gemini failures via this hook. Set by index.ts so warnings surface. */
 let _logFn: ((msg: string) => void) | null = null;
 export function setGeminiLogger(fn: (msg: string) => void): void {
@@ -59,6 +90,10 @@ export async function generateText(
   const cfg = loadConfig();
   if (!cfg.geminiApiKey) {
     llog("hasGeminiKey=false — config.json 裡沒有 geminiApiKey，已跳過 LLM");
+    return null;
+  }
+  // v0.8.10：1 小時內已知 quota 用完 → 直接 short-circuit，不要再打 API 拿 429
+  if (_quotaExhaustedAt > 0 && Date.now() - _quotaExhaustedAt < QUOTA_RETRY_AFTER_MS) {
     return null;
   }
   const model = cfg.geminiModel ?? "gemini-2.5-flash";
@@ -96,6 +131,10 @@ export async function generateText(
         try { snippet = (await res.body.text()).slice(0, 200); } catch { /* ignore */ }
       }
       llog(`Gemini ${res.statusCode}: ${snippet}`);
+      // v0.8.10：429 = quota — 1 小時內接著的呼叫直接 short-circuit，不要每題都打
+      if (res.statusCode === 429 && _quotaExhaustedAt === 0) {
+        markQuotaExhausted();
+      }
       return null;
     }
     const json = (await res.body.json()) as {
