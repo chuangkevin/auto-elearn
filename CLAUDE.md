@@ -265,10 +265,34 @@ elearn 各機關的測驗 row 版型差很多，原本 `closest('label')` / `clo
 - **永遠不要 auto-click UNSAFE 按鈕**。v0.8.4 配 generic「繼續」regex 點下去就是把使用者進度砍掉，緊急 v0.8.5 回滾
 - 偵測程式碼：`src/main/browser/view.ts maybeFireHahowLimit`，content-based regex（不靠 URL pattern；hahow URL 可能變但限制頁文字相對穩）
 
-### Hahow 為什麼單一帳號也撞 limit（v0.8.5 已知 issue，待 v0.8.6+）
-- chain 並行 `Promise.all([examTask, surveyTask])`（v0.7.3 設計）→ 同時開 2 個 hidden window 都載入 hahow → hahow 看成 2 裝置
-- `acquireElearnWindowSlot` 只在 `enterLC` 期間 hold，window 載完 LC 後 slot 就 release
-- 修法：refactor `lc-nav.ts` 把 slot ownership 給 caller（solveExam / fillSurvey），讓整個 hidden window lifecycle 都 hold slot
+### Hahow chain 並行同時掛在 hahow 撞 limit（v0.8.6 已修）
+- chain 並行 `Promise.all([examTask, surveyTask])`（v0.7.3 設計）→ 各自開 hidden window 同時掛在 hahow → hahow 看成 2 裝置
+- v0.8.5 之前 `acquireElearnWindowSlot` 只在 `enterLC` 期間 hold，window 載完 LC 後 slot 就 release → 兩個 window 並存掛在 hahow
+- v0.8.6 修法：slot ownership 從 `enterLC` 內部上移到 caller — `solveExam` / `fillSurvey` / `setupLcAndFindLatestEid` (history-solver) / `executeScormFinish` 都在 win 建立**前** `acquireElearnWindowSlot`，`finally win.destroy` 後 release。`enterLC` 加 `skipSlotAcquire: true` 選項給已 hold 的 caller 用避免 deadlock。chain 兩 task 因此 serialize，hahow 同時間只看到 1 個 hidden window。
+
+### 背景 tab Chromium throttle（v0.8.8 已修）
+- 預設 BrowserView 跟 `show: false` 的 BrowserWindow 都受 Chromium background throttling — bounds 0×0 view 的 setTimeout/setInterval 被降到 1Hz
+- 影響：SCORM iframe `manifest.js` callback chain、hidden window polling 全部慢成廢物。多帳號切到別的 tab → 背景 tab heartbeat / chain 卡住
+- v0.8.8 修法：所有 `webPreferences` 加 `backgroundThrottling: false`（7 處：`attachElearnView` + `extractTicket` + `executeScormFinish` + `solveExam` + `fillSurvey` + `setupLcAndFindLatestEid` + `unenrollCourse`）
+- 之後新加任何 hidden BrowserWindow 都**必須帶這個 flag**，否則多帳號背景跑會卡
+
+### 跨帳號同一堂課必須排他 + 排隊（v0.8.7→v0.8.8）
+- 實測同一 cid 被 2 個帳號同時 heartbeat → server SCORM session 互砍，先進場的 readSec 歸零
+- 但「多人同時刷課」是核心功能，**不能直接擋**
+- v0.8.7 第一版用「跳過 + markHeartbeatDone」做法，等於假裝完成，課程其實沒上 — 立刻 v0.8.8 改成排隊
+- v0.8.8 設計：
+  - `courseOwners: Map<cid, {accountId, nickname}>` 記持有者
+  - `acquireCourseOwnership(cid, s)` 拿到 ok / 失敗回傳被誰佔
+  - 拿不到的進 `queued` 陣列，UI 顯示 `card.waitingForOwner` badge「⏸ 等候 XXX 上完」
+  - 主批跑完進入排隊 loop，每 15s 重 acquire；持有者完成 heartbeat 立即 `releaseCourseOwnership(cid)`，queued 帳號最多等 15s 接手
+  - destroy / done / back 都 `releaseAllCoursesForAccount`
+- 教訓：永遠不要用「跳過 + markHeartbeatDone」當「跳過此 cid」訊號，那會被 chain 當成完成。要跳過就用 `card.waitingForOwner` 這類等候標記，不要碰完成相關旗標
+
+### 本地 timer extrapolation 必須 per-account key（v0.8.9）
+- Renderer Monitor 元件用 tickInfo Map 推算「上次 server 回 readSec → 之間每秒 +1」的本地計時器
+- v0.8.9 之前 key 只用 cid → 多帳號同 cid 切 tab 時對方的 readSec 蓋掉自己的 lastSyncAt → 切回時 timer 倒退 1-2 分鐘
+- v0.8.9 修法：tickInfo 提到 module-level，key `${accountId}:${cid}`
+- 注意：這純粹 UI 視覺層；main 端 `card.readSec` 是 per-session in-memory state，切 tab 從來沒影響它
 
 ### Cross-domain nav logger（v0.8.1+）
 - BrowserView 沒有 URL bar，使用者看不到撞到哪個 host
