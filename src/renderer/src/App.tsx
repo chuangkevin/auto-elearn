@@ -1290,26 +1290,32 @@ function Selecting({ state }: { state: AppState }) {
   }, [pending]);
 
   // v0.8.7：使用者退選某 cid 之後 main 會 refreshCourses → pending 不再包含它，
-  // 但 selected 還記著（didInit guard 不再 fire 整個 reset）→ 上方計數「選了 X 堂」
-  // 仍包含已退課 → 按開始時 main 會把已退課 auto-enrol 回去（已被 v0.8.7
-  // recentlyUnenrolled 防呆住，但 UI 數字還是錯）。這個 effect 把 selected 裡
-  // 「既不在 pending 也不在 search results」的孤兒 cid 清掉。
-  // 注意：不能無條件清掉「不在 pending」的 — 使用者剛從搜尋結果勾的新課還
-  // 沒 enrol，會在 results 裡但不在 pending 裡，那是合法的選擇。
+  // 但 selected 還記著 → 計數「選了 X 堂」仍包含已退課 → 按開始時 main auto-enrol
+  // 回去（已被 v0.8.7 recentlyUnenrolled 防呆住，但 UI 數字還是錯）。
+  //
+  // v0.8.12：之前的 prune effect 把 results 也當成 valid，搜尋切換時 results
+  // 換掉了 → 上一輪搜尋勾的新課（不在 pending 但在舊 results）被誤殺。改成只
+  // drop「曾經在 pending 但現在不在 pending」的 cid（= 真的退選了），其他選擇
+  // 都保留，跟搜尋結果無關。
+  const prevPendingCidsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    const newPending = new Set(pending.map((c) => c.cid));
     setSelected((prev) => {
-      const valid = new Set<string>();
-      for (const c of pending) valid.add(c.cid);
-      for (const r of results) valid.add(r.cid);
-      let pruned = false;
+      let changed = false;
       const next = new Set<string>();
       for (const c of prev) {
-        if (valid.has(c)) next.add(c);
-        else pruned = true;
+        const wasInPending = prevPendingCidsRef.current.has(c);
+        const isInPending = newPending.has(c);
+        if (wasInPending && !isInPending) {
+          changed = true; // 真的被退選了 → drop
+          continue;
+        }
+        next.add(c);
       }
-      return pruned ? next : prev;
+      prevPendingCidsRef.current = newPending;
+      return changed ? next : prev;
     });
-  }, [pending, results]);
+  }, [pending]);
 
   function togglePendingAll() {
     const allCids = pending.map((c) => c.cid);
@@ -2799,6 +2805,11 @@ function PinModal({
 }: {
   target: NonNullable<AppState["multi"]["pinTarget"]>;
 }) {
+  // v0.8.12：鎖定狀態下 PinModal 顯示時要把 BrowserView 藏到 0×0；不然視窗
+  // resize 觸發 ResizeObserver → pushBrowserViewBounds 把 view 推回正常 bounds
+  // → 蓋住 PIN modal。useHideBrowserViewWhileMounted 把 _modalDepth 加 1 讓
+  // pushBrowserViewBounds 變 no-op。
+  useHideBrowserViewWhileMounted();
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);

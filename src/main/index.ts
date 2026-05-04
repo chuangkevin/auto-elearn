@@ -2582,6 +2582,11 @@ ipcMain.on(IPC.VIEW_BOUNDS, (_evt, b: ViewBounds) => {
   lastBounds = { x, y, width, height };
   const active = getActiveSession();
   if (active?.view) {
+    // v0.8.12：active session 但被鎖定（PinModal 顯示中）時，renderer 的 resize
+    // observer 仍會 push bounds — 不能套用，否則 view 會蓋住 PinModal。defense-
+    // in-depth 在 main 端 gate：locked = 不套 bounds，view 維持上次 hideElearnView
+    // 設的 0×0。
+    if (!isWithinPinGrace(active)) return;
     try {
       active.view.setBounds(lastBounds);
     } catch {
