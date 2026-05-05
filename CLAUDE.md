@@ -363,16 +363,19 @@ if (attempt === 1 && bySource["web-prefetch"] === 0 && score < passingScore - 30
 - bank fuzzy match course title ≠ 題目集相同。「同名異年」「同名異版」課程 prefetch 寫進去但對不上題目，整門課 web-prefetch 失效（fall through 到原 4 層）。早退 guard 至少不卡 slot
 - ✅ **v0.8.14 解法**：bulk prefetch 全 2056 篇 bank 進 learned_answers（背景 ~15 min、24h cache），lookup 直接靠題目文字 normalized LIKE，繞過課名 fuzzy 假陽性
 
-### Bulk web-bank prefetch (v0.8.14+)
-v0.8.13 的 per-course prefetch 對「同名異年」課失效。v0.8.14 加 `bulkPrefetchBankIndex` 一次性把全站抓進 learned_answers：
+### Bulk web-bank prefetch (v0.8.14+，v0.8.15 限縮 500)
+v0.8.13 的 per-course prefetch 對「同名異年」課失效。v0.8.14 加 `bulkPrefetchBankIndex` 把站抓進 learned_answers：
 
 - 觸發：`runPipelineFor` 啟動時 check `<storageDir>/web-bank-bulk-done.json` mtime；> 24h 或不存在 → fire 背景 task（不 await）
-- 並行 5、~15 min 處理 2056 篇、~20K 題寫入 learned_answers (`source="web-prefetch"`, `courseId=null` 表「來源是 bank、不綁特定課」)
+- v0.8.15 起只抓**最新 500 篇**（`BULK_RECENT_LIMIT`），不抓全 2056。RSS feed 是 newest-first，500 篇覆蓋 115 年（當期）+ 114 年大部分 — 使用者真實會考的範圍。舊年份課已從 elearn 下架，bulk 抓進來也用不到
+- 並行 5、~3-4 min 處理 500 篇、~5K 題寫入 learned_answers (`source="web-prefetch"`, `courseId=null` 表「來源是 bank、不綁特定課」)
 - saveLearnedAnswer priority gate 自動 idempotent — 重跑命中既存 row 直接 skip
-- per-course prefetch 保留 — 它 cover 勾選課程比較快（per-fetch < 1s vs bulk 15 min）。bulk 是把剩下沒 fuzzy 命中的 corpus 也塞進來
+- per-course prefetch 保留 — 它 cover 勾選課程比較快（per-fetch < 1s vs bulk 3-4 min）。bulk 是把剩下沒 fuzzy 命中的 active corpus 也塞進來
 - 跨帳號自然共享：第一個 user fire 完後，所有帳號考任何 bank 收錄的題目都直接命中
 
-**成本**：第一次 ~15 min fetch（背景）+ ~5MB JSON 索引 + learned_answers 表多 ~20K 行（SQLite 沒壓力）。穩態 24h cache 重用。
+**成本**：第一次 ~3-4 min fetch（背景）+ ~1.5MB JSON 索引 + learned_answers 表多 ~5K 行（SQLite 沒壓力）。穩態 24h cache 重用。
+
+**為什麼不抓全 2056**：站方收錄過去 2-3 年的解答頁，但 elearn 上「我的課程 / 機關推薦」99% 是當年新版 + 部分前一年。舊年份課使用者根本看不到、無法選，bulk 抓進來純浪費頻寬跟 SQLite 空間。
 
 #### p-limit ESM/CJS 衝突（v0.8.13 教訓）
 `p-limit@6` 是 ESM-only，Electron main 是 CJS。`require('p-limit')` 直接 `ERR_REQUIRE_ESM`。專案其他模組（heartbeat/engine.ts、course/discovery.ts）早就改成 inline limiter。新模組要寫並行控制**直接寫 6 行 inline semaphore**，不要 import p-limit。typecheck 不會抓到，要實際跑 dev 才會炸。
