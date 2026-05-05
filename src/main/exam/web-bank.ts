@@ -393,32 +393,57 @@ export async function prefetchCoursesViaWebBank(
         : ""),
   );
 
-  // Parallel fetch + parse + persist.
+  // v0.8.23: parallel fetch + retry loop. Heartbeat reading phase is
+  // 60 min long — plenty of opportunity to keep trying failed pages
+  // (rate limit / temporary 5xx / parser miss). Loop until all hit OR
+  // max retries OR aborted.
   const limit = makeLimiter(FETCH_CONCURRENCY);
   let hit = 0;
   let failed = 0;
-  await Promise.all(
-    tasks.map((t) =>
-      limit(async () => {
-        const qas = await fetchAndParseCourse(t.entry.url, log);
-        if (qas.length === 0) {
-          failed++;
-          return;
-        }
-        for (const qa of qas) {
-          saveLearnedAnswer({
-            question: qa.question,
-            answers: qa.answers,
-            source: "web-prefetch",
-            confidence: 1.0,
-            courseId: t.cid,
-          });
-        }
-        hit += qas.length;
-        log(`✓「${t.caption.slice(0, 20)}」: ${qas.length} 題寫入 learned_answers`);
-      }),
-    ),
-  );
+  const succeeded = new Set<string>(); // cid set
+  const RETRY_MAX = 6;          // 6 rounds total
+  const RETRY_BACKOFF_MS = 45_000; // 45s between rounds
+
+  for (let round = 1; round <= RETRY_MAX; round++) {
+    const pending = tasks.filter((t) => !succeeded.has(t.cid));
+    if (pending.length === 0) break;
+    if (round > 1) {
+      log(`per-course retry 第 ${round}/${RETRY_MAX} 輪：剩 ${pending.length} 課，${RETRY_BACKOFF_MS / 1000}s 後重試`);
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+    }
+    let roundHit = 0;
+    let roundFail = 0;
+    await Promise.all(
+      pending.map((t) =>
+        limit(async () => {
+          const qas = await fetchAndParseCourse(t.entry.url, log);
+          if (qas.length === 0) {
+            roundFail++;
+            return;
+          }
+          for (const qa of qas) {
+            saveLearnedAnswer({
+              question: qa.question,
+              answers: qa.answers,
+              source: "web-prefetch",
+              confidence: 1.0,
+              courseId: t.cid,
+            });
+          }
+          hit += qas.length;
+          succeeded.add(t.cid);
+          roundHit++;
+          log(`✓「${t.caption.slice(0, 20)}」: ${qas.length} 題寫入 learned_answers (round ${round})`);
+        }),
+      ),
+    );
+    if (round === 1) failed = roundFail; // initial-round fail count for return
+    else if (roundHit > 0) {
+      log(`per-course retry 第 ${round} 輪：${roundHit} 課補回成功 / ${roundFail} 仍失敗`);
+    }
+  }
+  // Final fail = courses that never succeeded across all retries.
+  failed = tasks.length - succeeded.size;
 
   const coursesHit = tasks.length - failed;
   log(`題庫 prefetch 完成：${hit} 題寫入 / ${coursesHit} 課成功 / ${failed} 課失敗 / ${missCount} 課無對應`);
