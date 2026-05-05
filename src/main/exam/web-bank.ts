@@ -2,10 +2,38 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "no
 import { join } from "node:path";
 import { app } from "electron";
 import * as cheerio from "cheerio";
-import pLimit from "p-limit";
 import { saveLearnedAnswer } from "./answer-store";
 import { diceSimilarity } from "./matcher";
 import { getStorageDir } from "../persist/storage-paths";
+
+/**
+ * Tiny in-process concurrency limiter. Drop-in for `p-limit` without the
+ * ESM/CJS interop pain — `p-limit@6` is ESM-only and Electron main is
+ * CommonJS, which causes ERR_REQUIRE_ESM at startup.
+ */
+function makeLimiter(concurrency: number) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const next = () => {
+    if (active >= concurrency) return;
+    const job = queue.shift();
+    if (job) job();
+  };
+  return <T>(fn: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const run = () => {
+        active++;
+        fn()
+          .then(resolve, reject)
+          .finally(() => {
+            active--;
+            next();
+          });
+      };
+      if (active < concurrency) run();
+      else queue.push(run);
+    });
+}
 
 const FEED_BASE = "https://www.rodiyer.idv.tw/feeds/posts/default";
 const FEED_PAGE_SIZE = 500;
@@ -278,7 +306,7 @@ export async function prefetchCoursesViaWebBank(
   );
 
   // Parallel fetch + parse + persist.
-  const limit = pLimit(FETCH_CONCURRENCY);
+  const limit = makeLimiter(FETCH_CONCURRENCY);
   let hit = 0;
   let failed = 0;
   await Promise.all(
