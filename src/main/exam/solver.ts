@@ -895,6 +895,23 @@ async function runExamLoop(
         // capture the baseline as `best`. Subsequent probes compare
         // against this number until the ↑ branch promotes it.
         best = score;
+
+        // v0.8.13 early-exit guard: if the first attempt got NOTHING from
+        // web-prefetch AND the score is severely below passing, brute-force
+        // is unlikely to recover. Common cause: bank fuzzy-matched the
+        // course title (e.g. "行政中立暨公務倫理") but its question set is
+        // a different year's edition than the elearn exam page. Burning
+        // 30 attempts of brute on hopeless content blocks all other queued
+        // chains (ELEARN_WINDOW_CONCURRENCY=1). Bail early instead.
+        const webPrefetchHits = bySource["web-prefetch"] ?? 0;
+        const severelyLow = score < passingScore - 30;
+        if (webPrefetchHits === 0 && severelyLow) {
+          onProgress(
+            `[${label}] 提早放棄：web-prefetch 0 命中、score=${score} 距門檻 ${passingScore} > 30 分（題庫疑為異年版本，brute 救不了；釋放 slot）`,
+          );
+          break;
+        }
+
         bfStates = new Map();
         bfQueue = [];
         for (const q of questions) {
