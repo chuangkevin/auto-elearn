@@ -1,0 +1,315 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { app } from "electron";
+import * as cheerio from "cheerio";
+import pLimit from "p-limit";
+import { saveLearnedAnswer } from "./answer-store";
+import { diceSimilarity } from "./matcher";
+import { getStorageDir } from "../persist/storage-paths";
+
+const FEED_BASE = "https://www.rodiyer.idv.tw/feeds/posts/default";
+const FEED_PAGE_SIZE = 500;
+const MATCH_THRESHOLD = 0.85;
+const INDEX_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const FETCH_CONCURRENCY = 5;
+const FETCH_TIMEOUT_MS = 15_000;
+const ANSWER_MARKER = /^[✓✔〇●*]\s*(.+)$/;
+const QUESTION_MARKER = /^[ \t　]*問\s+/m;
+
+interface IndexEntry {
+  title: string;
+  url: string;
+}
+
+export interface ParsedQA {
+  question: string;
+  answers: string[];
+  distractors: string[];
+}
+
+export interface PrefetchResult {
+  /** 寫入 learned_answers 的題目總數（所有命中課程加總） */
+  questionsWritten: number;
+  /** 命中題庫網站且成功 parse 的課程數 */
+  coursesHit: number;
+  /** index 比對沒過 threshold 的課程數 */
+  coursesMiss: number;
+  /** index 命中但 fetch / parse 失敗的課程數 */
+  coursesFailed: number;
+}
+
+// ── Index loader (cache + paginated fetch) ──────────────────────────────────
+
+function indexCachePath(): string {
+  const dir = getStorageDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, "web-bank-index.json");
+}
+
+function indexFresh(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return Date.now() - stat.mtimeMs < INDEX_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Pull the full Atom feed paginated 500 entries at a time. Stops when a page
+ * returns fewer than FEED_PAGE_SIZE entries (last page).
+ */
+async function fetchFullIndex(log: (m: string) => void): Promise<IndexEntry[]> {
+  const out: IndexEntry[] = [];
+  for (let start = 1; ; start += FEED_PAGE_SIZE) {
+    const url = `${FEED_BASE}?max-results=${FEED_PAGE_SIZE}&start-index=${start}`;
+    let xml: string;
+    try {
+      xml = await fetchWithTimeout(url, 30_000);
+    } catch (e) {
+      log(`索引第 ${start} 頁 fetch 失敗：${(e as Error).message}`);
+      break;
+    }
+    const $ = cheerio.load(xml, { xmlMode: true });
+    const entries = $("entry");
+    if (entries.length === 0) break;
+    entries.each((_, el) => {
+      const title = $(el).find("title").first().text().trim();
+      // Atom <link rel="alternate" href="..."/>
+      const link = $(el).find('link[rel="alternate"]').attr("href") ?? "";
+      if (title && link) out.push({ title, url: link });
+    });
+    if (entries.length < FEED_PAGE_SIZE) break;
+  }
+  return out;
+}
+
+async function loadIndex(log: (m: string) => void): Promise<IndexEntry[]> {
+  const path = indexCachePath();
+  if (existsSync(path) && indexFresh(path)) {
+    try {
+      const raw = readFileSync(path, "utf8");
+      const parsed = JSON.parse(raw) as IndexEntry[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        log(`索引從快取載入：${parsed.length} 篇（24h 內有效）`);
+        return parsed;
+      }
+    } catch {
+      /* fall through to refetch */
+    }
+  }
+  log(`抓取題庫索引...`);
+  const entries = await fetchFullIndex(log);
+  if (entries.length > 0) {
+    try {
+      writeFileSync(path, JSON.stringify(entries), "utf8");
+      log(`索引已更新：${entries.length} 篇，存於 ${path}`);
+    } catch (e) {
+      log(`索引寫檔失敗（不影響本次執行）：${(e as Error).message}`);
+    }
+  }
+  return entries;
+}
+
+// ── Fuzzy match + title normalization ───────────────────────────────────────
+
+/**
+ * Strip cosmetic prefixes/suffixes so that
+ *   "【解答】行政院與所屬中央...勤休制度宣導課程-115年"
+ * normalises identically to the elearn caption
+ *   "行政院與所屬中央...勤休制度宣導課程-115年"
+ * after both lose the year-tag/spacing chrome.
+ */
+function normTitle(s: string): string {
+  return s
+    .replace(/^【解答】/, "")
+    .replace(/^[\s　]+|[\s　]+$/g, "")
+    .replace(/[\s　]+/g, "")
+    .replace(/-?(11[0-9]|10[0-9])年(度)?$/u, "")
+    .trim();
+}
+
+function findBestMatch(
+  caption: string,
+  index: IndexEntry[],
+): { entry: IndexEntry; sim: number } | null {
+  const target = normTitle(caption);
+  if (!target) return null;
+  let best: { entry: IndexEntry; sim: number } | null = null;
+  for (const entry of index) {
+    const sim = diceSimilarity(target, normTitle(entry.title));
+    if (!best || sim > best.sim) best = { entry, sim };
+  }
+  if (!best || best.sim < MATCH_THRESHOLD) return null;
+  return best;
+}
+
+// ── HTML parser ─────────────────────────────────────────────────────────────
+
+/**
+ * Parse a bank article's HTML into question/answer blocks.
+ *
+ * Format (verified against rodiyer.idv.tw 2026-04 articles):
+ *   問 <question text>
+ *   ✓ <correct option text>
+ *   <distractor option text>
+ *   ✓ <correct option text> (multi-select can have multiple)
+ *
+ * Selectors tried in order, first non-empty wins:
+ *   .post-body → .entry-content → article → body
+ */
+export function parseQA(html: string): ParsedQA[] {
+  const $ = cheerio.load(html);
+  let text = "";
+  for (const sel of [".post-body", ".entry-content", "article", "body"]) {
+    const t = $(sel).first().text();
+    if (t && t.trim()) {
+      text = t;
+      break;
+    }
+  }
+  if (!text) return [];
+
+  // Split by line-start "問 " (with optional leading whitespace).
+  const blocks = text.split(/(?:^|\n)[ \t　]*問[ \t　]+/);
+  const result: ParsedQA[] = [];
+  for (const block of blocks) {
+    const lines = block
+      .split(/\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) continue;
+    const question = lines[0];
+    const answers: string[] = [];
+    const distractors: string[] = [];
+    for (const line of lines.slice(1)) {
+      const m = line.match(ANSWER_MARKER);
+      if (m) answers.push(m[1].trim());
+      else distractors.push(line);
+    }
+    if (question && answers.length > 0) {
+      result.push({ question, answers, distractors });
+    }
+  }
+  return result;
+}
+
+let parseDumpDone = false;
+
+async function fetchAndParseCourse(
+  url: string,
+  log: (m: string) => void,
+): Promise<ParsedQA[]> {
+  let html: string;
+  try {
+    html = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
+  } catch (e) {
+    log(`HTML fetch 失敗 ${url}：${(e as Error).message}`);
+    return [];
+  }
+  const parsed = parseQA(html);
+  if (parsed.length === 0 && html.length > 0) {
+    // Diagnostic dump on parse failure (one-shot per process).
+    if (!parseDumpDone) {
+      parseDumpDone = true;
+      try {
+        const dumpPath = join(app.getPath("temp"), "auto-elearn-web-bank-parse.txt");
+        writeFileSync(dumpPath, html.slice(0, 8000), "utf8");
+        log(`Parse 0 questions; first 8KB body dumped to ${dumpPath}`);
+      } catch {
+        /* non-fatal */
+      }
+    }
+  }
+  return parsed;
+}
+
+// ── Public orchestrator ──────────────────────────────────────────────────────
+
+export async function prefetchCoursesViaWebBank(
+  cids: string[],
+  courseNamesByCid: Map<string, string>,
+  log: (msg: string) => void,
+): Promise<PrefetchResult> {
+  if (cids.length === 0) return { questionsWritten: 0, coursesHit: 0, coursesMiss: 0, coursesFailed: 0 };
+
+  let index: IndexEntry[];
+  try {
+    index = await loadIndex(log);
+  } catch (e) {
+    log(`索引載入失敗，跳過題庫 prefetch：${(e as Error).message}`);
+    return { questionsWritten: 0, coursesHit: 0, coursesMiss: 0, coursesFailed: cids.length };
+  }
+  if (index.length === 0) {
+    log(`索引為空，跳過題庫 prefetch`);
+    return { questionsWritten: 0, coursesHit: 0, coursesMiss: 0, coursesFailed: cids.length };
+  }
+
+  // Match each course caption to the best bank entry (above threshold).
+  const tasks: Array<{ cid: string; caption: string; entry: IndexEntry; sim: number }> = [];
+  let missCount = 0;
+  for (const cid of cids) {
+    const caption = courseNamesByCid.get(cid);
+    if (!caption) continue;
+    const match = findBestMatch(caption, index);
+    if (!match) {
+      missCount++;
+      continue;
+    }
+    tasks.push({ cid, caption, entry: match.entry, sim: match.sim });
+  }
+  log(
+    `索引比對完成：${tasks.length} 命中 / ${missCount} miss（共 ${cids.length} 課）` +
+      (tasks.length > 0
+        ? `；範例：「${tasks[0].caption.slice(0, 20)}」→「${tasks[0].entry.title.slice(0, 20)}」(sim ${tasks[0].sim.toFixed(2)})`
+        : ""),
+  );
+
+  // Parallel fetch + parse + persist.
+  const limit = pLimit(FETCH_CONCURRENCY);
+  let hit = 0;
+  let failed = 0;
+  await Promise.all(
+    tasks.map((t) =>
+      limit(async () => {
+        const qas = await fetchAndParseCourse(t.entry.url, log);
+        if (qas.length === 0) {
+          failed++;
+          return;
+        }
+        for (const qa of qas) {
+          saveLearnedAnswer({
+            question: qa.question,
+            answers: qa.answers,
+            source: "web-prefetch",
+            confidence: 1.0,
+            courseId: t.cid,
+          });
+        }
+        hit += qas.length;
+        log(`✓「${t.caption.slice(0, 20)}」: ${qas.length} 題寫入 learned_answers`);
+      }),
+    ),
+  );
+
+  const coursesHit = tasks.length - failed;
+  log(`題庫 prefetch 完成：${hit} 題寫入 / ${coursesHit} 課成功 / ${failed} 課失敗 / ${missCount} 課無對應`);
+  return {
+    questionsWritten: hit,
+    coursesHit,
+    coursesMiss: missCount,
+    coursesFailed: failed,
+  };
+}
