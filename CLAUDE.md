@@ -322,6 +322,50 @@ elearn 各機關的測驗 row 版型差很多，原本 `closest('label')` / `clo
 - 不檢查直接 enrol → server silently 302 到 login → 看似報名 200 OK 實則沒寫成功
 - `runPipelineFor` 在 enrol 前 ping 一下 dashboard，沒 idx 就先 `tryAutoLogin`
 
+### Web 題庫 prefetch (v0.8.13+)
+v0.8.12 實測 C 帳號 9 門考試 0/9 通過 — brute force 對 elearn 隨機抽題、多選題、是非題結構性無解。引入 `rodiyer.idv.tw`（2056 篇 Blogger 解答頁）做 prefetch：
+
+- enrol 完 fire `prefetchCoursesViaWebBank` 跟 heartbeat 並行
+- 索引 `<storageDir>/web-bank-index.json`、24h cache、`MIN_VALID_INDEX_ENTRIES=500` 健全性檢查（pre-fix bug 留下的 150 篇 cache 自動 invalidate）
+- RSS feed `?max-results=N&start-index=N` 分頁 — Blogger silent cap 每頁 25，要看 truly empty 才 stop
+- fast-fuzzy dice 比對 0.85，title 預處理去 `【解答】` + `-11X年` 後綴
+- 命中課用 cheerio 解 HTML，**`.post-body → .entry-content → article → body`** 順序
+- parser **line-walking** 不是 same-line：`問\n題目\n✓\n選項`（cheerio.text() 把每個 block-level 元素拆 \n）
+- 是非題標 `╳`（false） / `○`（true）→ 寫 learned_answers 前 map 成「否」/「是」匹配 elearn 考試頁 option 文字
+
+#### Multi-select v0.8.13 同時修
+v0.8.12 之前 solver 偵測 `isMultiple = inputs[0].type === 'checkbox'` 但 `pickedIdx: number` + `selectOption(value: string)` 都單值送出，server 多選必判錯。修法：
+- `learned_answers.answer` 改存 JSON array (`["A","B"]`)，`decodeAnswers` 對舊單字串 row fallback `[raw]`
+- `findBestAnswer` 回 `pickedIdxs: number[]`
+- `selectOption(values: string[])` 對每個 value 找 input checked + dispatch change
+- saveLearnedAnswer call sites 改 `answers: string[]`（含 history-solver、score=100 perfect-attempt 路徑）
+
+#### Source priority gate
+saveLearnedAnswer 加守則：新 priority < 既存則 silent skip（normalized LIKE 比對找最高 priority 的既存 row）。優先序：
+
+```
+web-prefetch (10) > history-solve (8) > perfect-attempt (7) > llm (5)
+> db (4) > fuzzy (3) > result-page (2) > brute (1) > random (0)
+```
+
+ORDER BY CASE 在 `lookupLearnedAnswer` 跟 SOURCE_PRIORITY 對齊，DESC（不再用舊版 ASC）。
+
+#### Early-exit guard（v0.8.13 e2e 教訓）
+T8 實測：bank 對「**行政中立暨公務倫理**」fuzzy match 1.00 命中（標題完全相同）但**內容是 2026/02 異年版本**，跟 elearn cid=10046536 的 2026 題目集**不重疊**。lookupLearnedAnswer 全 miss → fall through random/db → score 20 → brute 30 場全失敗 → ELEARN_WINDOW_CONCURRENCY=1 卡住其他 8 條 chain 30 分鐘。
+
+修法（`solver.ts runExamLoop` 第一場後）：
+```
+if (attempt === 1 && bySource["web-prefetch"] === 0 && score < passingScore - 30) break;
+```
+直接放棄該課（chain 結束、釋放 slot），不浪費 brute attempts。
+
+#### v0.8.13 已知限制
+- bank fuzzy match course title ≠ 題目集相同。「同名異年」「同名異版」課程 prefetch 寫進去但對不上題目，整門課 web-prefetch 失效（fall through 到原 4 層）。早退 guard 至少不卡 slot
+- v0.8.14 規劃：用「題目文字」直接 fuzzy match bank 文章（建倒排索引「題目 normalize → bank URL」），繞過課名 fuzzy 假陽性
+
+#### p-limit ESM/CJS 衝突（v0.8.13 教訓）
+`p-limit@6` 是 ESM-only，Electron main 是 CJS。`require('p-limit')` 直接 `ERR_REQUIRE_ESM`。專案其他模組（heartbeat/engine.ts、course/discovery.ts）早就改成 inline limiter。新模組要寫並行控制**直接寫 6 行 inline semaphore**，不要 import p-limit。typecheck 不會抓到，要實際跑 dev 才會炸。
+
 ## Release 流程
 
 **觸發時機（強制）**：每當一輪功能/修復告一段落、`package.json` 有 bump 版號的意圖，就必須走完下列 7 步。**只 bump 版號不打 tag = 未完成的 release**，等同沒做。
