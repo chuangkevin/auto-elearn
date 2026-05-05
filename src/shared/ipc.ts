@@ -144,7 +144,7 @@ export interface AppState {
   };
   /** 多帳號層的狀態（picker / tabs / 模式）。永遠存在，renderer 第一個 case 看 multi.mode 決定要 render 什麼。 */
   multi: MultiInfo;
-  /** v0.8.13: web-bank prefetch progress badge on Monitor screen. */
+  /** v0.8.13: per-course web-bank prefetch progress badge on Monitor. */
   webBankProgress?: {
     running: boolean;
     questionsWritten: number;
@@ -152,6 +152,16 @@ export interface AppState {
     coursesMiss: number;
     coursesFailed: number;
     coursesTotal: number;
+  };
+  /** v0.8.17: bulk web-bank prefetch (full corpus) progress badge. Runs
+   *  in background, fires once per 24h. Independent from per-course
+   *  prefetch; both badges may show simultaneously on first run. */
+  webBankBulkProgress?: {
+    running: boolean;
+    pagesProcessed: number;
+    pagesTotal: number;
+    pagesFailed: number;
+    questionsWritten: number;
   };
 }
 

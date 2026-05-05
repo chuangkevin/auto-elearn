@@ -1595,14 +1595,23 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   // ones whose course-name fuzzy match was a false positive — can hit
   // learned_answers by question text alone.
   if (!isBulkPrefetchFresh()) {
-    bulkPrefetchBankIndex((msg) =>
-      logSession(s, "info", `[題庫·全量] ${msg}`),
+    bulkPrefetchBankIndex(
+      (msg) => logSession(s, "info", `[題庫·全量] ${msg}`),
+      (p) => {
+        if (s.abortSignal.aborted) return; // session 已 abort 不要動 state
+        s.state.webBankBulkProgress = p;
+        pushState();
+      },
     ).catch((e) => {
       logSession(
         s,
         "warn",
         `[題庫·全量] 例外（不影響本次刷課）：${(e as Error)?.message ?? e}`,
       );
+      if (!s.abortSignal.aborted) {
+        s.state.webBankBulkProgress = undefined;
+        pushState();
+      }
     });
   }
 
@@ -1947,6 +1956,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   s.state.now.courseName = undefined;
   s.state.now.detail = undefined;
   s.state.webBankProgress = undefined;
+  s.state.webBankBulkProgress = undefined;
   s.runningCids.clear();
   s.focusedCid = null;
   clearRun(s.id);

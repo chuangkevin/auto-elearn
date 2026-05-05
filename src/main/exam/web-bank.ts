@@ -464,6 +464,14 @@ export interface BulkPrefetchResult {
   questionsWritten: number;
 }
 
+export interface BulkProgressUpdate {
+  running: boolean;
+  pagesProcessed: number;
+  pagesTotal: number;
+  pagesFailed: number;
+  questionsWritten: number;
+}
+
 /**
  * Iterate the most recent BULK_RECENT_LIMIT bank pages and write every
  * parsed question into learned_answers (source=web-prefetch). Idempotent —
@@ -478,6 +486,7 @@ export interface BulkPrefetchResult {
  */
 export async function bulkPrefetchBankIndex(
   log: (msg: string) => void,
+  onProgress?: (p: BulkProgressUpdate) => void,
 ): Promise<BulkPrefetchResult> {
   const startedAt = Date.now();
 
@@ -505,6 +514,15 @@ export async function bulkPrefetchBankIndex(
   let processed = 0;
   let failed = 0;
   let questionsWritten = 0;
+
+  // Push initial progress so the badge appears immediately.
+  onProgress?.({
+    running: true,
+    pagesProcessed: 0,
+    pagesTotal: index.length,
+    pagesFailed: 0,
+    questionsWritten: 0,
+  });
 
   await Promise.all(
     index.map((entry) =>
@@ -534,6 +552,13 @@ export async function bulkPrefetchBankIndex(
           log(
             `Bulk prefetch 進度：${processed}/${index.length} 篇（${questionsWritten} 題寫入，${failed} 失敗，已花 ${elapsedSec}s）`,
           );
+          onProgress?.({
+            running: true,
+            pagesProcessed: processed,
+            pagesTotal: index.length,
+            pagesFailed: failed,
+            questionsWritten,
+          });
         }
       }),
     ),
@@ -560,5 +585,12 @@ export async function bulkPrefetchBankIndex(
   log(
     `Bulk prefetch 完成：${processed} 篇處理 / ${failed} 失敗 / ${questionsWritten} 題寫入（總耗時 ${totalSec}s）`,
   );
+  onProgress?.({
+    running: false,
+    pagesProcessed: processed,
+    pagesTotal: index.length,
+    pagesFailed: failed,
+    questionsWritten,
+  });
   return { pagesProcessed: processed, pagesFailed: failed, questionsWritten };
 }

@@ -2152,21 +2152,44 @@ function Monitor({ state }: { state: AppState }) {
         </p>
       </div>
 
-      {/* v0.8.13: 題庫預抓進度小 badge */}
-      {state.webBankProgress && (
-        <div className="text-xs text-slate-400 px-3 py-1 bg-slate-800/50 rounded inline-flex items-center gap-2">
-          <span>📥 題庫</span>
-          {state.webBankProgress.running ? (
-            <span className="text-amber-400">抓取中...</span>
-          ) : (
-            <span>
-              {state.webBankProgress.questionsWritten} 題 ·{" "}
-              {state.webBankProgress.coursesHit}/
-              {state.webBankProgress.coursesTotal} 課命中
-            </span>
-          )}
-        </div>
-      )}
+      {/* v0.8.13: 題庫預抓進度小 badge（per-course） */}
+      {/* v0.8.17: 並排顯示 bulk（全量）進度 */}
+      <div className="flex flex-wrap gap-2">
+        {state.webBankProgress && (
+          <div className="text-xs text-slate-400 px-3 py-1 bg-slate-800/50 rounded inline-flex items-center gap-2">
+            <span>📥 題庫</span>
+            {state.webBankProgress.running ? (
+              <span className="text-amber-400">抓取中...</span>
+            ) : (
+              <span>
+                {state.webBankProgress.questionsWritten} 題 ·{" "}
+                {state.webBankProgress.coursesHit}/
+                {state.webBankProgress.coursesTotal} 課命中
+              </span>
+            )}
+          </div>
+        )}
+        {state.webBankBulkProgress && (
+          <div className="text-xs text-slate-400 px-3 py-1 bg-slate-800/50 rounded inline-flex items-center gap-2">
+            <span>📚 全量題庫</span>
+            {state.webBankBulkProgress.running ? (
+              <span className="text-amber-400">
+                抓取中 {state.webBankBulkProgress.pagesProcessed}/
+                {state.webBankBulkProgress.pagesTotal} 篇 ·{" "}
+                {state.webBankBulkProgress.questionsWritten} 題
+              </span>
+            ) : (
+              <span>
+                {state.webBankBulkProgress.questionsWritten} 題寫入 ·{" "}
+                {state.webBankBulkProgress.pagesProcessed}/
+                {state.webBankBulkProgress.pagesTotal} 篇
+                {state.webBankBulkProgress.pagesFailed > 0 &&
+                  ` · ${state.webBankBulkProgress.pagesFailed} 失敗`}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* 上下兩塊（課程列表 / 日誌）+ 中間可拖曳分隔條 */}
       <div ref={splitContainerRef} className="flex-1 flex flex-col min-h-0">
