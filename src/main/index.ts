@@ -1418,7 +1418,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
             logSession(
               s,
               "info",
-              `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / LLM ${res.bySource.llm} / brute ${res.bySource.brute} / random ${res.bySource.random}）`,
+              `測驗完成 ${name}：${res.passed ? "✅ 通過" : "⚠ 判定不明"} ${scoreStr}${readStr}，共 ${res.total} 題（題庫 ${res.bySource["web-prefetch"]} / DB ${res.bySource.db} / fuzzy ${res.bySource.fuzzy} / LLM ${res.bySource.llm} / brute ${res.bySource.brute} / random ${res.bySource.random}）`,
             );
             if (card && res.passed) card.examDone = true;
             return res.passed === true || res.total === 0;
@@ -1948,6 +1948,30 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   }
 
   stopSessionWatchdog(s);
+
+  // v0.8.19: pipeline-end summary — count pass/fail across cards.
+  const cards = s.state.courses.filter((c) => selected.has(c.cid));
+  let passCount = 0;
+  let failCount = 0;
+  let pendingCount = 0;
+  const failed: string[] = [];
+  for (const c of cards) {
+    if (c.phase === "done") {
+      passCount++;
+    } else if (
+      c.phase === "exam" ||
+      c.phase === "survey" ||
+      c.phase === "verifying"
+    ) {
+      failCount++;
+      failed.push(c.name);
+    } else {
+      pendingCount++;
+    }
+  }
+  const summary = `📊 本批 ${cards.length} 門總結：✅ ${passCount} 過 / ❌ ${failCount} 沒過${pendingCount ? ` / ⏳ ${pendingCount} 未跑完` : ""}${failed.length > 0 ? `；失敗：${failed.slice(0, 5).join("、")}${failed.length > 5 ? `…(共 ${failed.length} 門)` : ""}` : ""}`;
+  logSession(s, "info", summary);
+
   // v0.8.7+v0.8.8：pipeline 結束 → 釋放擁有權，queue 下一個帳號接手
   releaseAllCoursesForAccount(s.id);
   s.state.status = "done";
