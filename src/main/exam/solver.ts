@@ -597,7 +597,8 @@ async function runOneAttempt(
     `[${label}] ${questions.length} 題${opts.skipMixedDb ? "（跳過 mixed.db，強制 LLM/learned）" : ""}${opts.forcedAnswers && opts.forcedAnswers.size > 0 ? `（暴力覆蓋 ${opts.forcedAnswers.size} 題）` : ""}`,
   );
 
-  const llmAnswered: Array<{ question: string; answer: string }> = [];
+  // v0.8.25：原本的 llmAnswered 暫存被砍 — score<100 不再存 LLM picks（毒 DB），
+  // 所以也不需要單獨追蹤。allPicks 已涵蓋 score===100 path 需要的 source 資訊。
   const allPicks: Array<{ question: string; answer: string; source: AnswerSource }> = [];
   const picksByIdx: number[] = new Array(questions.length).fill(0);
   const picksSource: AnswerSource[] = new Array(questions.length).fill("random");
@@ -653,9 +654,6 @@ async function runOneAttempt(
 
     for (const idx of pickedIdxs) {
       const answerText = q.options[idx] ?? "";
-      if (source === "llm") {
-        llmAnswered.push({ question: q.text, answer: answerText });
-      }
       if (answerText) {
         allPicks.push({ question: q.text, answer: answerText, source });
       }
@@ -668,60 +666,46 @@ async function runOneAttempt(
   const score = await submitAndParseScore(win);
   onProgress(`[${label}] 分數：${score ?? "?"}`);
 
-  // Persistence policy (revised v0.7.0):
+  // v0.8.25 Persistence policy (strict — only score=100 saves):
   //
-  //   • score === 100: every pick is provably correct. Save ALL picks
-  //     (even random / brute-force ones) as "perfect-attempt" — this is
-  //     the highest-value backfill path: questions the matcher couldn't
-  //     handle this round get cached for next time.
+  // 之前 (v0.7.0~v0.8.24) score < 100 時還是會存 LLM picks，confidence 0.85。
+  // 但 LLM 6/10 對的時候，**4 個錯答案** 被當成 ground truth 寫進 DB；下次同
+  // 題目 lookupLearnedAnswer 命中那些錯答案 → 一直繼承錯誤。
   //
-  //   • score >= passingScore (and < 100): only save LLM picks. Random
-  //     and DB picks at <100 might include wrong answers; we can't tell
-  //     which without per-Q score deltas (that's brute-force's job).
+  // 改成嚴格：**只有 score === 100 才存**，其他 case 不存。
+  //   - score=100 整份試卷都對，所有 picks 都是 ground truth → 安全存
+  //   - score<100 不知道哪題對哪題錯（沒有 per-Q delta）→ 不存
+  //   - brute force 走 score 增減比較（已在自己 path 安全存）→ 那條不受此影響
+  //   - history-solver / web-prefetch 走自己的 ground-truth path → 不受影響
   //
-  //   • score < passingScore: save LLM picks anyway (was gated at >=60).
-  //     The matcher already filters Gemini at confidence>=0.4 — those
-  //     answers carry information even if the exam as a whole fell short.
-  //     They get re-validated on subsequent attempts via the brute-force
-  //     loop so wrong LLM picks do get corrected.
-  if (score !== null) {
-    if (score === 100) {
-      // Group all picks for the same question, then save the multi-answer
-      // array. This catches multi-select questions where pickedIdxs covered
-      // multiple options.
-      const grouped = new Map<string, string[]>();
-      const sources = new Map<string, AnswerSource>();
-      for (const { question, answer, source: src } of allPicks) {
-        if (src === "random") continue;
-        const arr = grouped.get(question) ?? [];
-        arr.push(answer);
-        grouped.set(question, arr);
-        // Latest source wins; in practice all picks for a question share
-        // a source (either web-prefetch, llm, etc).
-        sources.set(question, src);
-      }
-      for (const [question, answers] of grouped) {
-        const src = sources.get(question) ?? "perfect-attempt";
-        saveLearnedAnswer({
-          question,
-          answers,
-          source: src === "llm" ? "llm" : "perfect-attempt",
-          confidence: src === "llm" ? 0.95 : 1.0,
-          courseId: cid,
-        });
-      }
-    } else {
-      for (const { question, answer } of llmAnswered) {
-        saveLearnedAnswer({
-          question,
-          answers: [answer],
-          source: "llm",
-          confidence: 0.85,
-          courseId: cid,
-        });
-      }
+  // 代價：學習速度變慢（要等湊到 100 分才累積），但 DB 不會被毒。配 brute
+  // force probe 收斂仍能拿到 100。如果使用者反應學習太慢，再考慮 score>=95
+  // 之類折衷。
+  if (score !== null && score === 100) {
+    // Group all picks for the same question, then save the multi-answer
+    // array. This catches multi-select questions where pickedIdxs covered
+    // multiple options.
+    const grouped = new Map<string, string[]>();
+    const sources = new Map<string, AnswerSource>();
+    for (const { question, answer, source: src } of allPicks) {
+      if (src === "random") continue;
+      const arr = grouped.get(question) ?? [];
+      arr.push(answer);
+      grouped.set(question, arr);
+      sources.set(question, src);
+    }
+    for (const [question, answers] of grouped) {
+      const src = sources.get(question) ?? "perfect-attempt";
+      saveLearnedAnswer({
+        question,
+        answers,
+        source: src === "llm" ? "llm" : "perfect-attempt",
+        confidence: src === "llm" ? 0.95 : 1.0,
+        courseId: cid,
+      });
     }
   }
+  // 非 100 分不存，避免毒化 DB。
 
   // The result-page parser was the source of repeated learned_answers
   // pollution: even with cross-validation it kept picking the user's

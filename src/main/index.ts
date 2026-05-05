@@ -2266,14 +2266,30 @@ function createWindow() {
   // toggles. Without this the BrowserView keeps its old bounds and ends up
   // misaligned with the new chrome (left half of UI overlaps blank space,
   // right half shows clipped elearn page).
+  //
+  // v0.8.25：debounce — show/restore/maximize/unmaximize/full-screen 一連串
+  // event 同時 fire（最多 4-5 個 in tens of ms），加上 renderer 的 ResizeObserver
+  // 也會推 bounds，瞬間 N 倍 setBounds + IPC 灌進 main → tray restore 後 UI
+  // 凍住要強關。改成 200ms debounce + 不再 listen resize（renderer 已 handle）。
+  let _reapplyTimer: NodeJS.Timeout | null = null;
   const reapplyActiveBounds = () => {
-    const active = getActiveSession();
-    if (!active?.view || !mainWindow || mainWindow.isDestroyed()) return;
-    try {
-      active.view.setBounds(lastBounds);
-    } catch {
-      /* swallow */
-    }
+    if (_reapplyTimer) clearTimeout(_reapplyTimer);
+    _reapplyTimer = setTimeout(() => {
+      _reapplyTimer = null;
+      const active = getActiveSession();
+      if (!active?.view || !mainWindow || mainWindow.isDestroyed()) return;
+      try {
+        active.view.setBounds(lastBounds);
+      } catch {
+        /* swallow */
+      }
+      // v0.8.25：tray restore 後讓 renderer 重拿 focus，避免 input 看起來鎖死
+      try {
+        mainWindow?.webContents.focus();
+      } catch {
+        /* swallow */
+      }
+    }, 200);
   };
   mainWindow.on("show", reapplyActiveBounds);
   mainWindow.on("restore", reapplyActiveBounds);
@@ -2281,7 +2297,8 @@ function createWindow() {
   mainWindow.on("unmaximize", reapplyActiveBounds);
   mainWindow.on("enter-full-screen", reapplyActiveBounds);
   mainWindow.on("leave-full-screen", reapplyActiveBounds);
-  mainWindow.on("resize", reapplyActiveBounds);
+  // 不再 listen "resize" — renderer ResizeObserver 已即時推 lastBounds 過來，
+  // main 端再加一條會 dup + race 造成 tray restore flood
   setupTray(iconPath);
   buildAppMenu();
   mainWindow.webContents.setWindowOpenHandler((details) => {
