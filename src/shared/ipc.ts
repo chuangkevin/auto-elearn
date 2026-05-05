@@ -144,6 +144,15 @@ export interface AppState {
   };
   /** 多帳號層的狀態（picker / tabs / 模式）。永遠存在，renderer 第一個 case 看 multi.mode 決定要 render 什麼。 */
   multi: MultiInfo;
+  /** v0.8.13: web-bank prefetch progress badge on Monitor screen. */
+  webBankProgress?: {
+    running: boolean;
+    questionsWritten: number;
+    coursesHit: number;
+    coursesMiss: number;
+    coursesFailed: number;
+    coursesTotal: number;
+  };
 }
 
 export const IPC = {

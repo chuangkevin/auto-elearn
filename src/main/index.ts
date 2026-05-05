@@ -1584,20 +1584,54 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   const prefetchCids = allTracked.map((t) => t.course.cid);
   let prefetchPromise: Promise<PrefetchResult>;
   if (prefetchCids.length > 0) {
+    s.state.webBankProgress = {
+      running: true,
+      questionsWritten: 0,
+      coursesHit: 0,
+      coursesMiss: 0,
+      coursesFailed: 0,
+      coursesTotal: prefetchCids.length,
+    };
+    pushState();
     prefetchPromise = prefetchCoursesViaWebBank(
       prefetchCids,
       courseNamesByCid,
       (msg) => logSession(s, "info", `[題庫] ${msg}`),
-    ).catch((e) => {
-      logSession(s, "warn", `[題庫] prefetch 例外：${(e as Error)?.message ?? e}`);
-      return {
-        questionsWritten: 0,
-        coursesHit: 0,
-        coursesMiss: 0,
-        coursesFailed: prefetchCids.length,
-      };
-    });
+    )
+      .then((res) => {
+        if (s.abortSignal.aborted) return res; // session 已 abort，state 不要動
+        s.state.webBankProgress = {
+          running: false,
+          questionsWritten: res.questionsWritten,
+          coursesHit: res.coursesHit,
+          coursesMiss: res.coursesMiss,
+          coursesFailed: res.coursesFailed,
+          coursesTotal: prefetchCids.length,
+        };
+        pushState();
+        return res;
+      })
+      .catch((e) => {
+        logSession(s, "warn", `[題庫] prefetch 例外：${(e as Error)?.message ?? e}`);
+        const failResult: PrefetchResult = {
+          questionsWritten: 0,
+          coursesHit: 0,
+          coursesMiss: 0,
+          coursesFailed: prefetchCids.length,
+        };
+        if (!s.abortSignal.aborted) {
+          s.state.webBankProgress = {
+            running: false,
+            ...failResult,
+            coursesTotal: prefetchCids.length,
+          };
+          pushState();
+        }
+        return failResult;
+      });
   } else {
+    s.state.webBankProgress = undefined;
+    pushState();
     prefetchPromise = Promise.resolve({
       questionsWritten: 0,
       coursesHit: 0,
@@ -1888,6 +1922,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   s.state.now.courseId = undefined;
   s.state.now.courseName = undefined;
   s.state.now.detail = undefined;
+  s.state.webBankProgress = undefined;
   s.runningCids.clear();
   s.focusedCid = null;
   clearRun(s.id);
