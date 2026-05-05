@@ -410,3 +410,139 @@ export async function prefetchCoursesViaWebBank(
     coursesFailed: failed,
   };
 }
+
+// ── Bulk prefetch (v0.8.14) ─────────────────────────────────────────────────
+//
+// Why this exists:
+//   Per-course prefetch (above) maps a selected elearn course name → bank
+//   article via fuzzy similarity. T8 verification on v0.8.13 found this is
+//   prone to "same title, different year" false positives — the bank's
+//   "行政中立暨公務倫理" page is a 2026/02 edition, but elearn's current
+//   cid 10046536 has a different question set. Per-course prefetch wrote
+//   20 unrelated answers; lookupLearnedAnswer found nothing on exam time.
+//
+// Bulk prefetch sidesteps the title-fuzzy assumption: download every bank
+// page over time, parse all ~20K questions, write them all into the shared
+// learned_answers cache. lookupLearnedAnswer's existing normalized LIKE
+// query then matches the elearn exam page's question text against every
+// bank-known question — by content, not by course name.
+//
+// First run: ~15 min for 2056 pages × 5 concurrency. Persisted as a
+// timestamp file `<storageDir>/web-bank-bulk-done.json`. Subsequent runs
+// within 24h skip entirely (data already in learned_answers).
+
+const BULK_DONE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const BULK_PROGRESS_LOG_EVERY = 100;          // emit a log line every N pages
+
+function bulkDonePath(): string {
+  const dir = getStorageDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, "web-bank-bulk-done.json");
+}
+
+export function isBulkPrefetchFresh(): boolean {
+  const path = bulkDonePath();
+  try {
+    const stat = statSync(path);
+    return Date.now() - stat.mtimeMs < BULK_DONE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+export interface BulkPrefetchResult {
+  pagesProcessed: number;
+  pagesFailed: number;
+  questionsWritten: number;
+}
+
+/**
+ * Iterate the entire bank index and write every parsed question into
+ * learned_answers (source=web-prefetch). Idempotent — saveLearnedAnswer's
+ * priority gate skips rows that already exist with equal-or-higher source.
+ *
+ * Caller should fire this in the background (no await) on pipeline start
+ * when isBulkPrefetchFresh() is false. The work is heavy (~15 min) but
+ * happens off the user's hot path; per-course prefetch above still covers
+ * selected courses fast.
+ */
+export async function bulkPrefetchBankIndex(
+  log: (msg: string) => void,
+): Promise<BulkPrefetchResult> {
+  const startedAt = Date.now();
+
+  let index: IndexEntry[];
+  try {
+    index = await loadIndex(log);
+  } catch (e) {
+    log(`Bulk prefetch 索引載入失敗：${(e as Error).message}`);
+    return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
+  }
+  if (index.length === 0) {
+    log(`Bulk prefetch 索引為空，跳過`);
+    return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
+  }
+
+  log(`Bulk prefetch 開始：${index.length} 篇全站抓取（並行 ${FETCH_CONCURRENCY}，預估 ~15 分鐘）`);
+
+  const limit = makeLimiter(FETCH_CONCURRENCY);
+  let processed = 0;
+  let failed = 0;
+  let questionsWritten = 0;
+
+  await Promise.all(
+    index.map((entry) =>
+      limit(async () => {
+        const qas = await fetchAndParseCourse(entry.url, () => {
+          /* swallow per-page parse-fail spam */
+        });
+        if (qas.length === 0) {
+          failed++;
+        } else {
+          for (const qa of qas) {
+            // courseId left undefined: this row is bank-content not tied to
+            // any specific elearn cid. lookupLearnedAnswer matches on
+            // normalized question text alone, which is what we want.
+            saveLearnedAnswer({
+              question: qa.question,
+              answers: qa.answers,
+              source: "web-prefetch",
+              confidence: 1.0,
+            });
+            questionsWritten++;
+          }
+        }
+        processed++;
+        if (processed % BULK_PROGRESS_LOG_EVERY === 0) {
+          const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+          log(
+            `Bulk prefetch 進度：${processed}/${index.length} 篇（${questionsWritten} 題寫入，${failed} 失敗，已花 ${elapsedSec}s）`,
+          );
+        }
+      }),
+    ),
+  );
+
+  // Mark complete with timestamp file so the next pipeline start can skip.
+  try {
+    writeFileSync(
+      bulkDonePath(),
+      JSON.stringify({
+        completedAt: Date.now(),
+        pagesProcessed: processed,
+        pagesFailed: failed,
+        questionsWritten,
+        indexSize: index.length,
+      }),
+      "utf8",
+    );
+  } catch (e) {
+    log(`Bulk prefetch 時間戳寫檔失敗（不影響本次結果）：${(e as Error).message}`);
+  }
+
+  const totalSec = Math.round((Date.now() - startedAt) / 1000);
+  log(
+    `Bulk prefetch 完成：${processed} 篇處理 / ${failed} 失敗 / ${questionsWritten} 題寫入（總耗時 ${totalSec}s）`,
+  );
+  return { pagesProcessed: processed, pagesFailed: failed, questionsWritten };
+}

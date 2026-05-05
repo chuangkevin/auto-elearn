@@ -61,7 +61,12 @@ import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
 import { fillSurvey } from "./survey/filler";
-import { prefetchCoursesViaWebBank, type PrefetchResult } from "./exam/web-bank";
+import {
+  prefetchCoursesViaWebBank,
+  bulkPrefetchBankIndex,
+  isBulkPrefetchFresh,
+  type PrefetchResult,
+} from "./exam/web-bank";
 import {
   clearSecret as stealthClearSecret,
   currentState as stealthCurrentState,
@@ -1582,6 +1587,25 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   const courseNamesByCid = new Map<string, string>();
   for (const t of allTracked) courseNamesByCid.set(t.course.cid, t.course.caption ?? "");
   const prefetchCids = allTracked.map((t) => t.course.cid);
+
+  // v0.8.14: bulk prefetch the entire bank into learned_answers in the
+  // background, once per 24h. Per-course prefetch (below) still covers the
+  // selected cids fast for the chain that's about to fire; bulk fills in
+  // the rest of the corpus over ~15 min so subsequent exam pages — even
+  // ones whose course-name fuzzy match was a false positive — can hit
+  // learned_answers by question text alone.
+  if (!isBulkPrefetchFresh()) {
+    bulkPrefetchBankIndex((msg) =>
+      logSession(s, "info", `[題庫·全量] ${msg}`),
+    ).catch((e) => {
+      logSession(
+        s,
+        "warn",
+        `[題庫·全量] 例外（不影響本次刷課）：${(e as Error)?.message ?? e}`,
+      );
+    });
+  }
+
   let prefetchPromise: Promise<PrefetchResult>;
   if (prefetchCids.length > 0) {
     s.state.webBankProgress = {
