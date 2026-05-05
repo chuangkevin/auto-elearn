@@ -64,7 +64,6 @@ import { fillSurvey } from "./survey/filler";
 import {
   prefetchCoursesViaWebBank,
   bulkPrefetchBankIndex,
-  isBulkPrefetchFresh,
   type PrefetchResult,
 } from "./exam/web-bank";
 import {
@@ -1594,26 +1593,27 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   // the rest of the corpus over ~15 min so subsequent exam pages — even
   // ones whose course-name fuzzy match was a false positive — can hit
   // learned_answers by question text alone.
-  if (!isBulkPrefetchFresh()) {
-    bulkPrefetchBankIndex(
-      (msg) => logSession(s, "info", `[題庫·全量] ${msg}`),
-      (p) => {
-        if (s.abortSignal.aborted) return; // session 已 abort 不要動 state
-        s.state.webBankBulkProgress = p;
-        pushState();
-      },
-    ).catch((e) => {
-      logSession(
-        s,
-        "warn",
-        `[題庫·全量] 例外（不影響本次刷課）：${(e as Error)?.message ?? e}`,
-      );
-      if (!s.abortSignal.aborted) {
-        s.state.webBankBulkProgress = undefined;
-        pushState();
-      }
-    });
-  }
+  // v0.8.18: always fire bulk on every pipeline start. Bulk is incremental
+  // (delta vs processedUrls snapshot) — no work if top-500 fully cached;
+  // automatic retry of previously-failed pages.
+  bulkPrefetchBankIndex(
+    (msg) => logSession(s, "info", `[題庫·全量] ${msg}`),
+    (p) => {
+      if (s.abortSignal.aborted) return;
+      s.state.webBankBulkProgress = p;
+      pushState();
+    },
+  ).catch((e) => {
+    logSession(
+      s,
+      "warn",
+      `[題庫·全量] 例外（不影響本次刷課）：${(e as Error)?.message ?? e}`,
+    );
+    if (!s.abortSignal.aborted) {
+      s.state.webBankBulkProgress = undefined;
+      pushState();
+    }
+  });
 
   let prefetchPromise: Promise<PrefetchResult>;
   if (prefetchCids.length > 0) {

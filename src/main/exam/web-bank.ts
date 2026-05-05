@@ -169,6 +169,25 @@ async function loadIndex(log: (m: string) => void): Promise<IndexEntry[]> {
   return entries;
 }
 
+/**
+ * v0.8.18: always re-fetch the index (no 24h cache check), persist on
+ * success. Used by `bulkPrefetchBankIndex` so each pipeline start can
+ * detect newly-published bank pages and incrementally fetch only those.
+ */
+async function fetchFreshIndex(log: (m: string) => void): Promise<IndexEntry[]> {
+  log(`抓取題庫索引（v0.8.18 不靠 24h 快取，每次都重抓 RSS）...`);
+  const entries = await fetchFullIndex(log);
+  if (entries.length > 0) {
+    try {
+      writeFileSync(indexCachePath(), JSON.stringify(entries), "utf8");
+      log(`索引已更新：${entries.length} 篇`);
+    } catch (e) {
+      log(`索引寫檔失敗（不影響本次執行）：${(e as Error).message}`);
+    }
+  }
+  return entries;
+}
+
 // ── Fuzzy match + title normalization ───────────────────────────────────────
 
 /**
@@ -431,7 +450,6 @@ export async function prefetchCoursesViaWebBank(
 // timestamp file `<storageDir>/web-bank-bulk-done.json`. Subsequent runs
 // within 24h skip entirely (data already in learned_answers).
 
-const BULK_DONE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const BULK_PROGRESS_LOG_EVERY = 50;           // emit a log line every N pages
 // v0.8.15: Bank has ~2056 articles spanning multiple years. Users can only
 // see / enrol in current-year + recent courses on elearn (older editions
@@ -448,13 +466,41 @@ function bulkDonePath(): string {
   return join(dir, "web-bank-bulk-done.json");
 }
 
-export function isBulkPrefetchFresh(): boolean {
-  const path = bulkDonePath();
+/**
+ * v0.8.18: snapshot of bank pages already fetched + parsed into
+ * learned_answers. Failed pages are NOT in processedUrls, so they get
+ * re-tried on the next pipeline start automatically (no 24h wait).
+ */
+interface BulkSnapshot {
+  updatedAt: number;
+  /** URLs successfully fetched + parsed + persisted to learned_answers. */
+  processedUrls: string[];
+  /** Last index.length we observed; informational only. */
+  lastIndexSize: number;
+}
+
+function readBulkSnapshot(): BulkSnapshot | null {
   try {
-    const stat = statSync(path);
-    return Date.now() - stat.mtimeMs < BULK_DONE_TTL_MS;
+    const raw = readFileSync(bulkDonePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<BulkSnapshot>;
+    if (Array.isArray(parsed.processedUrls) && parsed.processedUrls.every((u) => typeof u === "string")) {
+      return {
+        updatedAt: parsed.updatedAt ?? 0,
+        processedUrls: parsed.processedUrls,
+        lastIndexSize: parsed.lastIndexSize ?? 0,
+      };
+    }
   } catch {
-    return false;
+    /* fall through */
+  }
+  return null;
+}
+
+function writeBulkSnapshot(snapshot: BulkSnapshot, log: (msg: string) => void): void {
+  try {
+    writeFileSync(bulkDonePath(), JSON.stringify(snapshot), "utf8");
+  } catch (e) {
+    log(`Bulk snapshot 寫檔失敗（不影響本次結果）：${(e as Error).message}`);
   }
 }
 
@@ -473,16 +519,19 @@ export interface BulkProgressUpdate {
 }
 
 /**
- * Iterate the most recent BULK_RECENT_LIMIT bank pages and write every
- * parsed question into learned_answers (source=web-prefetch). Idempotent —
- * saveLearnedAnswer's priority gate skips rows that already exist with
- * equal-or-higher source.
+ * v0.8.18: incremental bank prefetch.
  *
- * Caller should fire this in the background (no await) on pipeline start
- * when isBulkPrefetchFresh() is false. RSS feed is newest-first, so we
- * take the index head — that's the active-year coverage users actually
- * see / enrol in. Older bank pages cover courses that were retired from
- * elearn and are unreachable to enrol; bulk-fetching them wastes time.
+ * Each pipeline start:
+ *   1. Always re-fetch the RSS index (no 24h cache; ~5s).
+ *   2. Read snapshot of URLs we've already parsed into learned_answers.
+ *   3. Compute delta = top-BULK_RECENT_LIMIT entries minus processedUrls.
+ *      - 0 delta → 題庫已完整覆蓋最新 N 篇，skip.
+ *      - N delta → fetch + parse only those, append to processedUrls.
+ *   4. Failed pages are NOT added to processedUrls — they retry next time.
+ *
+ * Replaces the old 24h timestamp-cache. saveLearnedAnswer is still
+ * idempotent (priority gate prevents downgrades), so a failed-and-retried
+ * page that succeeds this time correctly writes its answers.
  */
 export async function bulkPrefetchBankIndex(
   log: (msg: string) => void,
@@ -492,7 +541,7 @@ export async function bulkPrefetchBankIndex(
 
   let fullIndex: IndexEntry[];
   try {
-    fullIndex = await loadIndex(log);
+    fullIndex = await fetchFreshIndex(log);
   } catch (e) {
     log(`Bulk prefetch 索引載入失敗：${(e as Error).message}`);
     return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
@@ -502,41 +551,60 @@ export async function bulkPrefetchBankIndex(
     return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
   }
 
-  // Take only the newest BULK_RECENT_LIMIT entries — older ones are dead
-  // corpus (course retired from elearn).
-  const index = fullIndex.slice(0, BULK_RECENT_LIMIT);
+  // Top BULK_RECENT_LIMIT recent entries are the active-edition corpus.
+  const candidates = fullIndex.slice(0, BULK_RECENT_LIMIT);
+
+  // Diff against snapshot — only fetch URLs we haven't successfully
+  // processed yet. Previous-run failures (parse error, 404, timeout) are
+  // not in processedUrls, so they automatically retry now.
+  const snapshot = readBulkSnapshot();
+  const processedSet = new Set(snapshot?.processedUrls ?? []);
+  const delta = candidates.filter((e) => !processedSet.has(e.url));
+
+  if (delta.length === 0) {
+    log(
+      `題庫完整度檢查：top-${candidates.length} 篇全已處理（snapshot 含 ${processedSet.size} URL），無需增量抓取`,
+    );
+    onProgress?.({
+      running: false,
+      pagesProcessed: 0,
+      pagesTotal: 0,
+      pagesFailed: 0,
+      questionsWritten: 0,
+    });
+    return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
+  }
+
   log(
-    `Bulk prefetch 開始：${index.length} 篇（最新；全索引 ${fullIndex.length} 篇，舊版略過）` +
-      `（並行 ${FETCH_CONCURRENCY}，預估 ~3-4 分鐘）`,
+    `Bulk prefetch 開始：${delta.length} 篇增量（snapshot 已有 ${processedSet.size} URL，top-${candidates.length} 候選）` +
+      `（並行 ${FETCH_CONCURRENCY}，預估 ~${Math.max(1, Math.ceil(delta.length / 9))} 分鐘）`,
   );
 
   const limit = makeLimiter(FETCH_CONCURRENCY);
   let processed = 0;
   let failed = 0;
   let questionsWritten = 0;
+  const newlyProcessed: string[] = [];
 
-  // Push initial progress so the badge appears immediately.
   onProgress?.({
     running: true,
     pagesProcessed: 0,
-    pagesTotal: index.length,
+    pagesTotal: delta.length,
     pagesFailed: 0,
     questionsWritten: 0,
   });
 
   await Promise.all(
-    index.map((entry) =>
+    delta.map((entry) =>
       limit(async () => {
         const qas = await fetchAndParseCourse(entry.url, () => {
           /* swallow per-page parse-fail spam */
         });
         if (qas.length === 0) {
           failed++;
+          // Do NOT add entry.url to newlyProcessed — let next start retry.
         } else {
           for (const qa of qas) {
-            // courseId left undefined: this row is bank-content not tied to
-            // any specific elearn cid. lookupLearnedAnswer matches on
-            // normalized question text alone, which is what we want.
             saveLearnedAnswer({
               question: qa.question,
               answers: qa.answers,
@@ -545,17 +613,18 @@ export async function bulkPrefetchBankIndex(
             });
             questionsWritten++;
           }
+          newlyProcessed.push(entry.url);
         }
         processed++;
         if (processed % BULK_PROGRESS_LOG_EVERY === 0) {
           const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
           log(
-            `Bulk prefetch 進度：${processed}/${index.length} 篇（${questionsWritten} 題寫入，${failed} 失敗，已花 ${elapsedSec}s）`,
+            `Bulk prefetch 進度：${processed}/${delta.length} 篇（${questionsWritten} 題寫入，${failed} 失敗，已花 ${elapsedSec}s）`,
           );
           onProgress?.({
             running: true,
             pagesProcessed: processed,
-            pagesTotal: index.length,
+            pagesTotal: delta.length,
             pagesFailed: failed,
             questionsWritten,
           });
@@ -564,31 +633,25 @@ export async function bulkPrefetchBankIndex(
     ),
   );
 
-  // Mark complete with timestamp file so the next pipeline start can skip.
-  try {
-    writeFileSync(
-      bulkDonePath(),
-      JSON.stringify({
-        completedAt: Date.now(),
-        pagesProcessed: processed,
-        pagesFailed: failed,
-        questionsWritten,
-        indexSize: index.length,
-      }),
-      "utf8",
-    );
-  } catch (e) {
-    log(`Bulk prefetch 時間戳寫檔失敗（不影響本次結果）：${(e as Error).message}`);
-  }
+  // Persist snapshot — append newly successful URLs only.
+  for (const url of newlyProcessed) processedSet.add(url);
+  writeBulkSnapshot(
+    {
+      updatedAt: Date.now(),
+      processedUrls: [...processedSet],
+      lastIndexSize: fullIndex.length,
+    },
+    log,
+  );
 
   const totalSec = Math.round((Date.now() - startedAt) / 1000);
   log(
-    `Bulk prefetch 完成：${processed} 篇處理 / ${failed} 失敗 / ${questionsWritten} 題寫入（總耗時 ${totalSec}s）`,
+    `Bulk prefetch 完成：${processed} 篇處理 / ${failed} 失敗（next-start 自動重試）/ ${questionsWritten} 題寫入（總耗時 ${totalSec}s）；snapshot 累計 ${processedSet.size} URL`,
   );
   onProgress?.({
     running: false,
     pagesProcessed: processed,
-    pagesTotal: index.length,
+    pagesTotal: delta.length,
     pagesFailed: failed,
     questionsWritten,
   });
