@@ -36,13 +36,17 @@ function makeLimiter(concurrency: number) {
 }
 
 const FEED_BASE = "https://www.rodiyer.idv.tw/feeds/posts/default";
-const FEED_PAGE_SIZE = 500;
+// Blogger Atom feeds silently cap max-results at ~25 regardless of what we
+// ask for. Asking for 500 returned 25-entry pages (verified 2026-05-05).
+// 25 keeps each page small and the request count manageable for a 2056-post
+// corpus (≈ 83 page fetches, sequential, fine).
+const FEED_PAGE_SIZE = 25;
 const MATCH_THRESHOLD = 0.85;
 const INDEX_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const FETCH_CONCURRENCY = 5;
 const FETCH_TIMEOUT_MS = 15_000;
-const ANSWER_MARKER = /^[✓✔〇●*]\s*(.+)$/;
-const QUESTION_MARKER = /^[ \t　]*問\s+/m;
+const ANSWER_MARKER_LINE = /^[✓✔〇●*]+$/;
+const NOISE_LINE = /^(?:www\.|http|\(adsbygoogle|rodiyer\.idv\.tw)/i;
 
 interface IndexEntry {
   title: string;
@@ -119,10 +123,21 @@ async function fetchFullIndex(log: (m: string) => void): Promise<IndexEntry[]> {
       const link = $(el).find('link[rel="alternate"]').attr("href") ?? "";
       if (title && link) out.push({ title, url: link });
     });
-    if (entries.length < FEED_PAGE_SIZE) break;
+    // Blogger silently caps page size; only stop on a truly empty page.
+    // Sanity safeguard: if we somehow ran 200+ requests, bail.
+    if (start > 200 * FEED_PAGE_SIZE) {
+      log(`索引分頁達 ${start} 仍未結束，提前停止避免無限迴圈`);
+      break;
+    }
   }
   return out;
 }
+
+// Bank totalResults observed 2026-05-05 was ~2056. A pre-fix bug capped
+// pagination at the first page that returned fewer than 500 entries —
+// Blogger silently caps page size at 25, so the loop bailed at 150 entries.
+// Reject any cached index that's suspiciously short and refetch instead.
+const MIN_VALID_INDEX_ENTRIES = 500;
 
 async function loadIndex(log: (m: string) => void): Promise<IndexEntry[]> {
   const path = indexCachePath();
@@ -130,9 +145,12 @@ async function loadIndex(log: (m: string) => void): Promise<IndexEntry[]> {
     try {
       const raw = readFileSync(path, "utf8");
       const parsed = JSON.parse(raw) as IndexEntry[];
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed) && parsed.length >= MIN_VALID_INDEX_ENTRIES) {
         log(`索引從快取載入：${parsed.length} 篇（24h 內有效）`);
         return parsed;
+      }
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        log(`快取索引只 ${parsed.length} 篇（< ${MIN_VALID_INDEX_ENTRIES}），可能是 pre-fix 舊資料；忽略並重抓`);
       }
     } catch {
       /* fall through to refetch */
@@ -189,11 +207,31 @@ function findBestMatch(
 /**
  * Parse a bank article's HTML into question/answer blocks.
  *
- * Format (verified against rodiyer.idv.tw 2026-04 articles):
- *   問 <question text>
- *   ✓ <correct option text>
+ * Real format observed at rodiyer.idv.tw (2026-04 articles, verified
+ * with a debug fetch on 2026-05-05): each token sits on its own line —
+ *
+ *   問
+ *   <question text>
+ *   ✓
+ *   <correct option text>
  *   <distractor option text>
- *   ✓ <correct option text> (multi-select can have multiple)
+ *   ✓
+ *   <another correct option text>   ← multi-select
+ *
+ * Earlier assumption (`問 <text>` on the same line, `✓ <text>` on the
+ * same line) was wrong — cheerio's text() puts each block-level element
+ * on its own line, so the marker and its content end up on separate
+ * lines.
+ *
+ * Algorithm:
+ *   - Walk lines linearly. When we hit "問", the next non-empty line is
+ *     the question text. Then keep reading lines until the next "問" or
+ *     end of text:
+ *       - A line matching ANSWER_MARKER_LINE flips a "next line is a
+ *         correct answer" flag.
+ *       - Otherwise the line is either a distractor (when no marker is
+ *         pending) or the answer itself (when a marker is pending).
+ *       - NOISE_LINE patterns (ads, footer URLs) are dropped.
  *
  * Selectors tried in order, first non-empty wins:
  *   .post-body → .entry-content → article → body
@@ -210,27 +248,58 @@ export function parseQA(html: string): ParsedQA[] {
   }
   if (!text) return [];
 
-  // Split by line-start "問 " (with optional leading whitespace).
-  const blocks = text.split(/(?:^|\n)[ \t　]*問[ \t　]+/);
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
   const result: ParsedQA[] = [];
-  for (const block of blocks) {
-    const lines = block
-      .split(/\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    if (lines.length === 0) continue;
-    const question = lines[0];
+
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i] !== "問") {
+      i++;
+      continue;
+    }
+    // Found "問" — the next non-empty line is the question text.
+    let j = i + 1;
+    while (j < lines.length && !lines[j]) j++;
+    if (j >= lines.length) break;
+    const question = lines[j];
+
     const answers: string[] = [];
     const distractors: string[] = [];
-    for (const line of lines.slice(1)) {
-      const m = line.match(ANSWER_MARKER);
-      if (m) answers.push(m[1].trim());
-      else distractors.push(line);
+    let pendingAnswerMarker = false;
+    let k = j + 1;
+    for (; k < lines.length; k++) {
+      const line = lines[k];
+      if (line === "問") break; // start of next question
+      if (!line) continue;
+      if (NOISE_LINE.test(line)) continue;
+      if (ANSWER_MARKER_LINE.test(line)) {
+        pendingAnswerMarker = true;
+        continue;
+      }
+      if (pendingAnswerMarker) {
+        answers.push(line);
+        pendingAnswerMarker = false;
+      } else {
+        distractors.push(line);
+      }
     }
-    if (question && answers.length > 0) {
-      result.push({ question, answers, distractors });
+    // True/false questions on rodiyer mark the correct answer with a
+    // single ╳ / ○ glyph (verified 2026-05-05 — the bank uses ╳ when the
+    // statement is FALSE, ○ when TRUE). The elearn exam page renders
+    // its T/F options with the option text "是" / "否", so we map back
+    // before persisting; otherwise pickOptionIndex fuzzy-falls-back to
+    // index 0 and the answer is wrong half the time.
+    const mappedAnswers = answers.map((a) => {
+      if (a === "╳") return "否";
+      if (a === "○") return "是";
+      return a;
+    });
+    if (question && mappedAnswers.length > 0) {
+      result.push({ question, answers: mappedAnswers, distractors });
     }
+    i = k;
   }
+
   return result;
 }
 
