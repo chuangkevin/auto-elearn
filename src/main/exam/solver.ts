@@ -235,17 +235,33 @@ let diagnosticDumped = false;
 async function selectOption(
   win: BrowserWindow,
   inputName: string,
-  value: string,
+  values: string[],
 ): Promise<void> {
-  if (!inputName) return;
-  const safeN = inputName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const safeV = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  if (!inputName || values.length === 0) return;
+  // safeN: escaped for the surrounding template literal AND the selector
+  // attribute string. Order matters — backslash first so we don't escape
+  // our own escapes.
+  const safeN = inputName
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/`/g, "\\`");
+  // values are routed through JSON.stringify which already handles
+  // backslash + double-quote escaping correctly. No manual pre-pass:
+  // doing both produces double-escaped strings whose [value="..."]
+  // selectors don't match the real DOM input value.
+  // Submit each value: for radios, only the last sticks (single-select
+  // behaviour preserved). For checkboxes, every match is checked.
   await execJs(
     win,
     `(() => {
-      const el = document.querySelector('input[name="${safeN}"][value="${safeV}"]');
-      if (el) { el.checked = true; el.dispatchEvent(new Event('change',{bubbles:true})); return true; }
-      return null;
+      const vals = ${JSON.stringify(values)};
+      let any = false;
+      for (const v of vals) {
+        const sel = 'input[name="${safeN}"][value="' + v.replace(/"/g, '\\\\"') + '"]';
+        const el = document.querySelector(sel);
+        if (el) { el.checked = true; el.dispatchEvent(new Event('change',{bubbles:true})); any = true; }
+      }
+      return any;
     })()`,
   );
 }
@@ -573,17 +589,15 @@ async function runOneAttempt(
   const picksByIdx: number[] = new Array(questions.length).fill(0);
 
   for (const q of questions) {
-    let pickedIdx: number;
+    let pickedIdxs: number[];
     let source: AnswerSource;
     let confidence: number;
 
     const forcedKey = normalizeQuestion(q.text);
     const forcedIdx = opts.forcedAnswers?.get(forcedKey);
     if (typeof forcedIdx === "number" && forcedIdx >= 0 && forcedIdx < q.options.length) {
-      pickedIdx = forcedIdx;
-      // Brute-force probe path: tag as "brute" (was "random" — that inflated
-      // the random count to look like the matcher had failed everywhere when
-      // really the brute-force loop was just locking in known-good picks).
+      // Brute-force probe path is single-only (it flips ONE option per round).
+      pickedIdxs = [forcedIdx];
       source = "brute";
       confidence = 0;
     } else {
@@ -591,26 +605,49 @@ async function runOneAttempt(
         skipMixedDb: opts.skipMixedDb,
         courseName: opts.courseName,
       });
-      pickedIdx = r.pickedIdx;
+      pickedIdxs = r.pickedIdxs;
       source = r.source;
       confidence = r.confidence;
     }
 
+    // Sanitize pickedIdxs against this exam's option count (defensive — bank
+    // could in theory have stale options that no longer exist on the page).
+    pickedIdxs = pickedIdxs.filter((i) => i >= 0 && i < q.options.length);
+    if (pickedIdxs.length === 0) {
+      // Fall back to a random pick rather than skipping the question.
+      pickedIdxs = [Math.floor(Math.random() * Math.max(1, q.options.length))];
+      source = "random";
+      confidence = 0;
+    }
+
     bySource[source]++;
-    picksByIdx[q.index] = pickedIdx;
+    // picksByIdx tracks the FIRST chosen index per question for brute-force
+    // bookkeeping (which only operates on single-select). Multi-select still
+    // reports its first answer here; brute won't probe multi-select rows
+    // since their answers are already cached as web-prefetch.
+    picksByIdx[q.index] = pickedIdxs[0];
 
-    const value = q.values[pickedIdx] ?? String(pickedIdx + 1);
-    onProgress(`  Q${q.index + 1} [${source} ${confidence.toFixed(2)}] → ${q.options[pickedIdx]?.slice(0, 30) ?? value}`);
+    const optsText = pickedIdxs
+      .map((i) => q.options[i]?.slice(0, 30) ?? String(i + 1))
+      .join(" | ");
+    onProgress(
+      `  Q${q.index + 1} [${source} ${confidence.toFixed(2)}]${
+        pickedIdxs.length > 1 ? ` ×${pickedIdxs.length}` : ""
+      } → ${optsText}`,
+    );
 
-    const answerText = q.options[pickedIdx] ?? "";
-    if (source === "llm") {
-      llmAnswered.push({ question: q.text, answer: answerText });
+    for (const idx of pickedIdxs) {
+      const answerText = q.options[idx] ?? "";
+      if (source === "llm") {
+        llmAnswered.push({ question: q.text, answer: answerText });
+      }
+      if (answerText) {
+        allPicks.push({ question: q.text, answer: answerText, source });
+      }
     }
-    if (answerText) {
-      allPicks.push({ question: q.text, answer: answerText, source });
-    }
 
-    await selectOption(win, q.inputName, value);
+    const values = pickedIdxs.map((i) => q.values[i] ?? String(i + 1));
+    await selectOption(win, q.inputName, values);
   }
 
   const score = await submitAndParseScore(win);
@@ -634,11 +671,25 @@ async function runOneAttempt(
   //     loop so wrong LLM picks do get corrected.
   if (score !== null) {
     if (score === 100) {
+      // Group all picks for the same question, then save the multi-answer
+      // array. This catches multi-select questions where pickedIdxs covered
+      // multiple options.
+      const grouped = new Map<string, string[]>();
+      const sources = new Map<string, AnswerSource>();
       for (const { question, answer, source: src } of allPicks) {
-        if (src === "random") continue; // never persist a literal coin-flip
+        if (src === "random") continue;
+        const arr = grouped.get(question) ?? [];
+        arr.push(answer);
+        grouped.set(question, arr);
+        // Latest source wins; in practice all picks for a question share
+        // a source (either web-prefetch, llm, etc).
+        sources.set(question, src);
+      }
+      for (const [question, answers] of grouped) {
+        const src = sources.get(question) ?? "perfect-attempt";
         saveLearnedAnswer({
           question,
-          answer,
+          answers,
           source: src === "llm" ? "llm" : "perfect-attempt",
           confidence: src === "llm" ? 0.95 : 1.0,
           courseId: cid,
@@ -646,7 +697,13 @@ async function runOneAttempt(
       }
     } else {
       for (const { question, answer } of llmAnswered) {
-        saveLearnedAnswer({ question, answer, source: "llm", confidence: 0.85, courseId: cid });
+        saveLearnedAnswer({
+          question,
+          answers: [answer],
+          source: "llm",
+          confidence: 0.85,
+          courseId: cid,
+        });
       }
     }
   }
@@ -863,7 +920,7 @@ async function runExamLoop(
             st.bestScore = score;
             saveLearnedAnswer({
               question: st.questionText,
-              answer: st.options[probingOption] ?? "",
+              answers: [st.options[probingOption] ?? ""],
               source: "brute",
               confidence: 0.95,
               courseId: cid,
@@ -992,7 +1049,7 @@ export async function solveExam(
   const result: SolveResult = {
     ok: false,
     total: 0,
-    bySource: { db: 0, fuzzy: 0, llm: 0, random: 0, brute: 0 },
+    bySource: { db: 0, fuzzy: 0, llm: 0, random: 0, brute: 0, "web-prefetch": 0 },
   };
 
   // v0.8.6：在 win 建立**前**就 hold elearn slot，整個 win lifecycle 都 hold 著
@@ -1067,7 +1124,7 @@ export async function solveExam(
         opts.courseName,
       );
       result.score = score ?? undefined;
-      result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute;
+      result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute + result.bySource["web-prefetch"];
       result.passed = (score ?? 0) >= passingScore;
       result.ok = true;
     }
@@ -1087,7 +1144,7 @@ export async function solveExam(
       );
       result.readExamScore = rScore ?? undefined;
       if (!hasMainExam) {
-        result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute;
+        result.total = result.bySource.db + result.bySource.fuzzy + result.bySource.llm + result.bySource.random + result.bySource.brute + result.bySource["web-prefetch"];
         result.score = rScore ?? undefined;
         result.passed = (rScore ?? 0) >= passingScore;
         result.ok = true;

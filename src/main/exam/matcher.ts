@@ -1,7 +1,7 @@
 import { lookupByLike, lookupLearnedAnswer, normalizeQuestion, type DbRow } from "./answer-store";
 import { generateText, isGeminiUsable } from "../llm/gemini";
 
-export type AnswerSource = "db" | "fuzzy" | "llm" | "random" | "brute";
+export type AnswerSource = "db" | "fuzzy" | "llm" | "random" | "brute" | "web-prefetch";
 
 export interface MatchResult {
   /** The option text we believe is correct */
@@ -98,10 +98,18 @@ export function matchAgainstDb(questionText: string): MatchResult | null {
  */
 const LLM_GATE_CONFIDENCE = 0.8;
 
+export interface AnswerPick {
+  source: AnswerSource;
+  /** Index list into the question's options[]. Length 1 for single-select,
+   *  >=1 for multi-select. */
+  pickedIdxs: number[];
+  confidence: number;
+}
+
 /**
  * Pipeline: learned_answers → DB (high-conf only) → Gemini LLM → DB (low-conf
  * fallback) → random. Returns the best answer with source label and 0-based
- * option index.
+ * option index list.
  *
  * `skipMixedDb` skips the read-only 98K bank and goes straight to LLM. The
  * solver flips this on after a retry where mixed.db gave a confidence-1.0
@@ -113,46 +121,67 @@ export async function findBestAnswer(
   questionText: string,
   options: string[],
   opts: { skipMixedDb?: boolean; courseName?: string } = {},
-): Promise<{ source: AnswerSource; pickedIdx: number; confidence: number }> {
-  // Layer 1: learned_answers (highest priority — we observed this correct before)
+): Promise<AnswerPick> {
+  // Layer 1: learned_answers — highest priority. May contain multi-select
+  // answers (length >=2) sourced from web-prefetch, or single from any
+  // earlier perfect-attempt / brute / llm hit.
   const learned = lookupLearnedAnswer(questionText);
   if (learned) {
-    return { source: "db", pickedIdx: pickOptionIndex(learned.correct, options), confidence: 1.0 };
+    const idxs = learned.answers
+      .map((ans) => pickOptionIndex(ans, options))
+      .filter((i) => i >= 0);
+    // Dedupe: pickOptionIndex's fuzzy fallback can map two different bank
+    // answer texts to the same option (rare but possible). Keep first.
+    const seen = new Set<number>();
+    const dedup = idxs.filter((i) => (seen.has(i) ? false : (seen.add(i), true)));
+    if (dedup.length > 0) {
+      // Map source: if learned came from web-prefetch tag it as such so
+      // the bySource counter in solver shows real provenance. Other sources
+      // already use names compatible with AnswerSource.
+      const src: AnswerSource =
+        learned.source === "web-prefetch" ? "web-prefetch" : "db";
+      return { source: src, pickedIdxs: dedup, confidence: learned.confidence };
+    }
+    // All bank answers failed to map to current exam options (e.g. wording
+    // drift). Fall through to mixed.db / LLM as today.
   }
 
-  // Layer 2a: 98K question bank — accept immediately only at high confidence.
-  // Below the gate, hold onto the row but try the LLM first since fuzzy
-  // 0.25-0.79 matches are frequently the wrong question with overlapping
-  // vocabulary (this used to lock answers to bad picks and never let the
-  // LLM run, see CLAUDE.md note on v0.7.0).
-  let dbFallback: { source: AnswerSource; pickedIdx: number; confidence: number } | null = null;
+  // Layer 2a: 98K question bank.
+  let dbFallback: AnswerPick | null = null;
   if (!opts.skipMixedDb) {
     const dbMatch = matchAgainstDb(questionText);
     if (dbMatch) {
       const pickedIdx = pickOptionIndex(dbMatch.correctText, options);
       if (dbMatch.confidence >= LLM_GATE_CONFIDENCE) {
-        return { source: dbMatch.source, pickedIdx, confidence: dbMatch.confidence };
+        return {
+          source: dbMatch.source,
+          pickedIdxs: [pickedIdx],
+          confidence: dbMatch.confidence,
+        };
       }
-      dbFallback = { source: dbMatch.source, pickedIdx, confidence: dbMatch.confidence };
+      dbFallback = {
+        source: dbMatch.source,
+        pickedIdxs: [pickedIdx],
+        confidence: dbMatch.confidence,
+      };
     }
   }
 
-  // Layer 3: Gemini LLM with course-name context (when available)
+  // Layer 3: Gemini LLM
   const llmMatch = await matchWithLlm(questionText, options, opts.courseName);
   if (llmMatch) {
-    return { source: "llm", pickedIdx: llmMatch.pickedIdx, confidence: llmMatch.confidence };
+    return {
+      source: "llm",
+      pickedIdxs: [llmMatch.pickedIdx],
+      confidence: llmMatch.confidence,
+    };
   }
 
-  // Layer 2b: low-confidence DB fallback — better than coin flip when the
-  // LLM is unavailable (no API key) or failed (quota / timeout / parse).
-  // Brute-force probe at the runExamLoop level will still correct it if
-  // wrong, just like before.
   if (dbFallback) return dbFallback;
 
-  // Random guess as last resort
   return {
     source: "random",
-    pickedIdx: Math.floor(Math.random() * Math.max(1, options.length)),
+    pickedIdxs: [Math.floor(Math.random() * Math.max(1, options.length))],
     confidence: 0,
   };
 }

@@ -436,7 +436,7 @@ export async function solveExamFromHistory(
     }
     saveLearnedAnswer({
       question: q.text,
-      answer: q.options[optIdx],
+      answers: [q.options[optIdx]],
       source: "history-solve",
       confidence: 1.0,
       courseId: cid,
