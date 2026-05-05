@@ -5,6 +5,29 @@ import fs from "node:fs";
 import { getDb } from "../db";
 
 /**
+ * Source priority — higher number wins. New writes only `INSERT OR REPLACE`
+ * if their priority >= the existing row's priority. This stops brute-force
+ * probes (priority 1) from clobbering web-prefetch ground truth (priority 10).
+ *
+ * Keep in sync with the ORDER BY CASE in lookupLearnedAnswer.
+ */
+const SOURCE_PRIORITY: Record<string, number> = {
+  "web-prefetch": 10,
+  "history-solve": 8,
+  "perfect-attempt": 7,
+  llm: 5,
+  db: 4,
+  fuzzy: 3,
+  "result-page": 2,
+  brute: 1,
+  random: 0,
+};
+
+function sourcePriority(s: string): number {
+  return SOURCE_PRIORITY[s] ?? 0;
+}
+
+/**
  * Answer-store wraps `resources/mixed.db`, the 98,569-row question bank decompiled
  * from 原 E等閱讀家. Schema: single `questions` table with
  *   題目 TEXT, 答案_1 TEXT, 答案_2 TEXT, 答案_3 TEXT, 答案_4 TEXT
@@ -103,6 +126,9 @@ export function normalizeQuestion(s: string): string {
  */
 const NORM_EXPR = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(題目, ' ', ''), '　', ''), '?', ''), '？', ''), '，', '')`;
 
+/** Same normalization expression for the `learned_answers` table (column: `question`). */
+const LEARNED_NORM_EXPR = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(question,' ',''),'　',''),'?',''),'？',''),'，','')`;
+
 const GENERIC_GRAMS = new Set([
   "下列何", "列何者", "何者正", "何者錯", "何者非", "何者為", "下列關",
   "列關於", "關於下", "為下列", "下列敘", "下列描", "下列選", "依據下",
@@ -193,42 +219,58 @@ export function closeDb(): void {
   }
 }
 
+export interface LearnedAnswerRow {
+  question: string;
+  answers: string[];
+  source: string;
+  confidence: number;
+}
+
 /**
  * Query the writable `learned_answers` table (in userData/auto-elearn.db).
- * Returns the best match or null. Checked before the read-only `questions` bank.
+ * Returns the highest-priority row for the question, decoded into
+ * `answers: string[]` (single-element for single-select, multi for
+ * multi-select). Older rows that are plain strings are auto-promoted to
+ * single-element arrays via `decodeAnswers`.
  */
-export function lookupLearnedAnswer(raw: string): DbRow | null {
+export function lookupLearnedAnswer(raw: string): LearnedAnswerRow | null {
   try {
     const d = getDb();
     const norm = normalizeQuestion(raw);
     if (!norm) return null;
-    const NORM_EXPR = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(question,' ',''),'　',''),'?',''),'？',''),'，','')`;
-    // Source priority — newer + more reliable sources win when multiple
-    // rows match the same question. history-solve (mathematically derived
-    // from N past attempts' scores) > brute (single score-delta probe) >
-    // llm > result-page (the v0.4.10 parser was buggy and saved the
-    // user's submitted answer as "正解"; its rows linger in old DBs).
-    // Then by captured_at so a re-run of history-solve overrides earlier
-    // entries from the same source.
+    // Source priority — higher number wins. web-prefetch (10) is ground
+    // truth from rodiyer.idv.tw; brute (1) is a score-delta probe that's
+    // often wrong on randomly-sampled exams. See spec §"Source priority".
     const row = d
       .prepare(
-        `SELECT question, answer AS correct FROM learned_answers
-         WHERE ${NORM_EXPR} LIKE ?
+        `SELECT question, answer, source, confidence FROM learned_answers
+         WHERE ${LEARNED_NORM_EXPR} LIKE ?
          ORDER BY
            CASE source
-             WHEN 'history-solve' THEN 0
-             WHEN 'brute'         THEN 1
-             WHEN 'llm'           THEN 2
-             WHEN 'result-page'   THEN 3
-             ELSE 4
-           END ASC,
+             WHEN 'web-prefetch'    THEN 10
+             WHEN 'history-solve'   THEN 8
+             WHEN 'perfect-attempt' THEN 7
+             WHEN 'llm'             THEN 5
+             WHEN 'db'              THEN 4
+             WHEN 'fuzzy'           THEN 3
+             WHEN 'result-page'     THEN 2
+             WHEN 'brute'           THEN 1
+             ELSE 0
+           END DESC,
            captured_at DESC,
            confidence DESC
          LIMIT 1`,
       )
-      .get(`%${norm}%`) as { question: string; correct: string } | undefined;
+      .get(`%${norm}%`) as
+      | { question: string; answer: string; source: string; confidence: number }
+      | undefined;
     if (!row) return null;
-    return { question: row.question, correct: row.correct, distractors: [] };
+    return {
+      question: row.question,
+      answers: decodeAnswers(row.answer),
+      source: row.source,
+      confidence: row.confidence ?? 1.0,
+    };
   } catch {
     return null;
   }
@@ -236,7 +278,8 @@ export function lookupLearnedAnswer(raw: string): DbRow | null {
 
 export interface SaveAnswerOpts {
   question: string;
-  answer: string;
+  /** Length 1 for single-select; >=1 for multi-select. */
+  answers: string[];
   source: string;
   courseId?: string;
   confidence?: number;
@@ -271,22 +314,79 @@ export function clearAllLearnedForCourse(courseId: string): void {
 
 /** Persist a newly learned Q&A pair to the writable DB. */
 export function saveLearnedAnswer(opts: SaveAnswerOpts): void {
+  if (!opts.answers || opts.answers.length === 0) return;
+  const payload = JSON.stringify(opts.answers);
   try {
-    getDb()
-      .prepare(
-        `INSERT OR REPLACE INTO learned_answers
-           (question, answer, source, captured_at, course_id, confidence)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        opts.question,
-        opts.answer,
-        opts.source,
-        Date.now(),
-        opts.courseId ?? null,
-        opts.confidence ?? 1.0,
-      );
+    const d = getDb();
+
+    // Priority gate: don't overwrite a higher-priority answer with a
+    // lower-priority probe. Equal priority is allowed (re-affirms or
+    // updates the answers list, e.g. brute → brute on a different option).
+    //
+    // Match against normalized question (not raw) because callers write
+    // raw question strings with different framing prefixes (solver includes
+    // "單選配分：[10.00] 1." chrome, history-solver strips it, web-bank
+    // has no chrome at all). Without normalization, the gate exact-match
+    // would miss rows for the same logical question and let a lower-priority
+    // source insert a duplicate alongside the higher-priority one.
+    const norm = normalizeQuestion(opts.question);
+    const existing = norm
+      ? (d
+          .prepare(
+            `SELECT source FROM learned_answers
+             WHERE ${LEARNED_NORM_EXPR} LIKE ?
+             ORDER BY
+               CASE source
+                 WHEN 'web-prefetch'    THEN 10
+                 WHEN 'history-solve'   THEN 8
+                 WHEN 'perfect-attempt' THEN 7
+                 WHEN 'llm'             THEN 5
+                 WHEN 'db'              THEN 4
+                 WHEN 'fuzzy'           THEN 3
+                 WHEN 'result-page'     THEN 2
+                 WHEN 'brute'           THEN 1
+                 ELSE 0
+               END DESC
+             LIMIT 1`,
+          )
+          .get(`%${norm}%`) as { source: string } | undefined)
+      : undefined;
+    if (existing && sourcePriority(opts.source) < sourcePriority(existing.source)) {
+      return;
+    }
+
+    d.prepare(
+      `INSERT OR REPLACE INTO learned_answers
+         (question, answer, source, captured_at, course_id, confidence)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      opts.question,
+      payload,
+      opts.source,
+      Date.now(),
+      opts.courseId ?? null,
+      opts.confidence ?? 1.0,
+    );
   } catch {
     /* non-fatal */
   }
+}
+
+/**
+ * Decode the `answer` column. v0.8.13+ stores JSON arrays
+ * (`["選項A","選項B"]`); legacy rows from earlier versions are plain strings
+ * (`"選項A"`). On JSON.parse failure or non-array result, fall back to a
+ * single-element array containing the raw text.
+ */
+export function decodeAnswers(raw: string): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed;
+    }
+  } catch {
+    /* fall through */
+  }
+  return [raw];
 }
