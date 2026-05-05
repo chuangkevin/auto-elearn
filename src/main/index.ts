@@ -2073,6 +2073,16 @@ async function keywordSearch(
 
   return Array.from(allByCid.values())
     .filter((c) => c.isClassing)
+    // v0.8.13：client-side 二次過濾 hours — 本來 elearn server 應該照 body
+    // certification_hours_minimum/maximum 過濾，使用者實測沒效果（可能 server
+    // 不認那兩個 param 或 silently ignore），加 client filter 確保使用者輸的
+    // 範圍真的會生效。沒 hoursMin / hoursMax 的話這個 filter 是 no-op。
+    .filter((c) => {
+      const h = c.certification_hours ?? 0;
+      if (hoursMin !== undefined && h < hoursMin) return false;
+      if (hoursMax !== undefined && h > hoursMax) return false;
+      return true;
+    })
     .map<CourseCandidate>((c) => ({
       cid: c.cid,
       caption: c.caption,
@@ -2544,7 +2554,26 @@ async function submitNewAccount(payload: {
   }
 
   logGlobal("info", `正在背景登入 ${maskAccount(resolved)} ...`);
-  const r = await loginViaEcpa(partSess, resolved, password);
+  // v0.8.13：每步進度推給 UI，使用者看得到沒卡死。stage label 中文化讓使用者知道
+  // 在做什麼。
+  const stageLabels: Record<string, string> = {
+    prime: "連線 e 等公務園",
+    clogin: "進入 eCPA 登入頁",
+    getuid: "解析帳號",
+    ticket: "驗證帳密",
+    "twoway-log": "登入紀錄",
+    "twoway-app": "切到應用",
+    "sso-verify": "SSO 跳回 e 等",
+    "verify-cookie": "確認 session",
+  };
+  const r = await loginViaEcpa(partSess, resolved, password, (s, ms) => {
+    const label = stageLabels[s] ?? s;
+    if (ms > 5000) {
+      logGlobal("warn", `登入步驟 [${label}] ${ms}ms — server 較慢`);
+    } else {
+      logGlobal("info", `登入步驟 [${label}] ${ms}ms ✓`);
+    }
+  });
   if (!r.ok) {
     // v0.8.11：第一次登入要先啟用帳號 → 把 activation 資訊一起傳給 renderer
     // 顯示「前往啟用帳號」按鈕（用 shell.openExternal 開外部瀏覽器）。
@@ -2752,11 +2781,12 @@ ipcMain.on(IPC.VIEW_BOUNDS, (_evt, b: ViewBounds) => {
   lastBounds = { x, y, width, height };
   const active = getActiveSession();
   if (active?.view) {
-    // v0.8.12：active session 但被鎖定（PinModal 顯示中）時，renderer 的 resize
-    // observer 仍會 push bounds — 不能套用，否則 view 會蓋住 PinModal。defense-
-    // in-depth 在 main 端 gate：locked = 不套 bounds，view 維持上次 hideElearnView
-    // 設的 0×0。
-    if (!isWithinPinGrace(active)) return;
+    // v0.8.13：原本 v0.8.12 用 isWithinPinGrace gate 是 bug — grace 5 分鐘後過期，
+    // 但使用者其實還在這個 tab 上正常使用，沒主動鎖定。grace 過期後 resize 推
+    // 過來的 bounds 被拒絕，BrowserView 卡舊 bounds → 黑色空隙。
+    // 改用 unlocked 旗標：unlocked=true 一直到使用者主動鎖或 PIN modal 出現
+    // 才會翻 false，跟「使用了多久」無關。
+    if (!active.unlocked) return;
     try {
       active.view.setBounds(lastBounds);
     } catch {

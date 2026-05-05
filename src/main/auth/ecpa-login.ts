@@ -46,14 +46,44 @@ const UA =
 const CLOGIN_ASPX_URL =
   "https://ecpa.dgpa.gov.tw/webform/clogin.aspx?returnUrl=https://elearn.hrd.gov.tw/sso_verify.php&Naminglogo=https://ecpa.dgpa.gov.tw/webform/logo-hrd.png&showecpa=Y";
 
+/** v0.8.13：每個 SSO step 跑多久 + log，給 UI 顯示進度。caller 不傳就只記在
+ *  main console，不影響流程。 */
+export type SsoStage =
+  | "prime"
+  | "clogin"
+  | "getuid"
+  | "ticket"
+  | "twoway-log"
+  | "twoway-app"
+  | "sso-verify"
+  | "verify-cookie";
+export type SsoProgressFn = (stage: SsoStage, elapsedMs: number) => void;
+
 export async function loginViaEcpa(
   session: Session,
   account: string,
   password: string,
+  onProgress?: SsoProgressFn,
 ): Promise<EcpaLoginResult> {
+  // v0.8.13：每步計時 — 找出哪一步真的慢
+  const t0 = Date.now();
+  let prev = t0;
+  const stage = (s: SsoStage) => {
+    const now = Date.now();
+    const dt = now - prev;
+    prev = now;
+    // eslint-disable-next-line no-console
+    console.log(`[loginViaEcpa] ${s}: ${dt}ms (total ${now - t0}ms)`);
+    try {
+      onProgress?.(s, dt);
+    } catch {
+      /* swallow */
+    }
+  };
   try {
     // 1. Prime elearn session (makes sure we have a PHPSESSID to write idx/suc into later).
     await req(session, "GET", "https://elearn.hrd.gov.tw/mooc/index.php");
+    stage("prime");
 
     // 2. Enter eCPA clogin. The uIAM entry 302s across to webform/clogin.aspx;
     //    useSessionCookies=true + redirect=follow takes us there automatically.
@@ -67,6 +97,7 @@ export async function loginViaEcpa(
     if (clogin.status >= 400) {
       return { ok: false, stage: "clogin", error: `HTTP ${clogin.status}` };
     }
+    stage("clogin");
 
     // 2.5 If `account` doesn't look like a full 身分證字號 (one letter + 9 digits),
     //     call Home/GetUID to resolve the short alias. The response is PLAIN
@@ -81,6 +112,7 @@ export async function loginViaEcpa(
         CLOGIN_ASPX_URL,
         "https://ecpa.dgpa.gov.tw",
       );
+      stage("getuid");
       if (uid.status >= 400) {
         return { ok: false, stage: "GetUID", error: `HTTP ${uid.status}` };
       }
@@ -146,32 +178,37 @@ export async function loginViaEcpa(
       };
     }
     const encoded = hex;
+    stage("ticket");
 
-    // 4. EnterTwoWayLog — records the login event. Body responds "0" on success.
-    await req(
-      session,
-      "POST",
-      "https://ecpa.dgpa.gov.tw/Home/EnterTwoWayLog",
-      {
-        account: fullAccount,
-        loginType: "0",
-        sn: "",
-        ticket: "",
-        appId: "CrossHRD",
-      },
-      CLOGIN_ASPX_URL,
-      "https://ecpa.dgpa.gov.tw",
-    );
-
-    // 5. EnterApplicationTwoWay — signals "I'm about to jump to the app". Body "0".
-    await req(
-      session,
-      "POST",
-      "https://ecpa.dgpa.gov.tw/Home/EnterApplicationTwoWay",
-      { appId: "CrossHRD" },
-      CLOGIN_ASPX_URL,
-      "https://ecpa.dgpa.gov.tw",
-    );
+    // v0.8.13：4 + 5 是兩個獨立的 logging POST，互不依賴，可以並行省 ~1-2s。
+    // 任一失敗不影響後續 sso_verify（兩個都是 logging，ticket 已經拿到了）。
+    await Promise.all([
+      // 4. EnterTwoWayLog — records the login event. Body responds "0" on success.
+      req(
+        session,
+        "POST",
+        "https://ecpa.dgpa.gov.tw/Home/EnterTwoWayLog",
+        {
+          account: fullAccount,
+          loginType: "0",
+          sn: "",
+          ticket: "",
+          appId: "CrossHRD",
+        },
+        CLOGIN_ASPX_URL,
+        "https://ecpa.dgpa.gov.tw",
+      ).catch(() => null),
+      // 5. EnterApplicationTwoWay — signals "I'm about to jump to the app". Body "0".
+      req(
+        session,
+        "POST",
+        "https://ecpa.dgpa.gov.tw/Home/EnterApplicationTwoWay",
+        { appId: "CrossHRD" },
+        CLOGIN_ASPX_URL,
+        "https://ecpa.dgpa.gov.tw",
+      ).catch(() => null),
+    ]);
+    stage("twoway-log"); // 兩個一起 ms
 
     // 6. POST sso_verify.php with the encoded ticket. 302 → sso_home → 302
     //    /mooc/index.php; net.request auto-follows with useSessionCookies so
@@ -185,6 +222,7 @@ export async function loginViaEcpa(
       "https://ecpa.dgpa.gov.tw/",
       "https://ecpa.dgpa.gov.tw",
     );
+    stage("sso-verify");
     if (sso.status >= 400) {
       return { ok: false, stage: "sso_verify", error: `HTTP ${sso.status}` };
     }
@@ -219,6 +257,7 @@ export async function loginViaEcpa(
         resolvedAccount: fullAccount,
       };
     }
+    stage("verify-cookie");
     return { ok: true, resolvedAccount: fullAccount };
   } catch (e) {
     return { ok: false, stage: "exception", error: e instanceof Error ? e.message : String(e) };
@@ -289,6 +328,19 @@ function req(
       useSessionCookies: true,
       redirect: "follow",
     });
+    // v0.8.13：每個 SSO request 最多 25s — eCPA / 政府主機偶爾掛或慢爆會吃滿
+    // event loop，使用者看起來「程式凍住」。25s 沒回就回 timeout error，整條 SSO
+    // 鏈被 caller 標記登入失敗，UI 可以重試或回報。
+    const timeoutMs = 25_000;
+    const timer = setTimeout(() => {
+      try {
+        r.abort();
+      } catch {
+        /* abort 不一定永遠成功 */
+      }
+      reject(new Error(`req timeout ${timeoutMs}ms ${method} ${url}`));
+    }, timeoutMs);
+    const clearTimer = () => clearTimeout(timer);
     r.setHeader("User-Agent", UA);
     r.setHeader("Accept", "application/json, text/html, */*");
     r.setHeader("Accept-Language", "zh-TW,zh;q=0.9");
@@ -311,12 +363,19 @@ function req(
       const chunks: Buffer[] = [];
       res.on("data", (c) => chunks.push(c as Buffer));
       res.on("end", () => {
+        clearTimer();
         const text = Buffer.concat(chunks).toString("utf-8");
         resolve({ status: res.statusCode, body: text });
       });
-      res.on("error", reject);
+      res.on("error", (e) => {
+        clearTimer();
+        reject(e);
+      });
     });
-    r.on("error", reject);
+    r.on("error", (e) => {
+      clearTimer();
+      reject(e);
+    });
     r.end();
   });
 }
