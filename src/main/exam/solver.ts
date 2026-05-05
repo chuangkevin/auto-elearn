@@ -1105,7 +1105,10 @@ export async function solveExam(
   // 直到 finally win.destroy。這樣 chain 並行 examTask + surveyTask 時不會有兩
   // 個 hidden window 同時掛在 hahow 頁面上 — hahow 看成 2 裝置 → 撞 limit 頁
   // → 我們之中某個會被踢 → 課程進度歸零（v0.8.4/v0.8.5 反覆撞的根因）。
-  await acquireElearnWindowSlot();
+  await acquireElearnWindowSlot({
+    label: `考試「${opts.courseName ?? cid}」`,
+    log: (msg) => onProgress(msg),
+  });
 
   // disableDialogs kills alert/prompt at Chromium level. confirm() is
   // overridden to return true via JS injection in lc-nav.ts before any

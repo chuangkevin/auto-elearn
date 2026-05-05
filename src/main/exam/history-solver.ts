@@ -333,7 +333,10 @@ export async function solveExamFromHistory(
   // v0.8.6：hold elearn slot 整個 history-solve lifecycle（含 setup 內部建 win
   // + 本函式持續用 win 跑 fetch view_result），確保跟 chain 並行的
   // examTask / surveyTask 排隊，hahow 同時間只看到一個 hidden window。
-  await acquireElearnWindowSlot();
+  await acquireElearnWindowSlot({
+    label: `歷史反推 cid=${cid}`,
+    log,
+  });
   let slotReleased = false;
   const releaseSlotOnce = () => {
     if (slotReleased) return;

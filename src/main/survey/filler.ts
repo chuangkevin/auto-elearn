@@ -177,7 +177,7 @@ async function tryFillOnce(
 ): Promise<AttemptResult> {
   // v0.8.6：hold elearn slot 整個 win lifecycle — 跟 solveExam 競爭時排隊，
   // 確保同時間只有一個 hidden window 掛在 hahow，避免 hahow 看成 2 裝置。
-  await acquireElearnWindowSlot();
+  await acquireElearnWindowSlot({ label: `問卷 cid=${cid}`, log });
   const win = new BrowserWindow({
     show: false,
     width: 1280,

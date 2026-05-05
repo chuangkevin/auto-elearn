@@ -105,21 +105,49 @@ function pickBestActid(
 // BrowserWindow-driven /info → 上課去 startup is throttled.
 export const ELEARN_WINDOW_CONCURRENCY = 1;
 let _extractActive = 0;
-const _extractWaiters: Array<() => void> = [];
+const _extractWaiters: Array<{ resolve: () => void; label: string | null }> = [];
+let _slotHolder: string | null = null;
 
-export async function acquireElearnWindowSlot(): Promise<void> {
+export interface AcquireSlotOpts {
+  /** 「考試 / 問卷 / 歷史反推」+ 課名 — 顯示給其他正在等的 chain 看 */
+  label?: string;
+  /** 真的要等時 fire 一次的 log callback。已經能立刻拿到 slot 不會 fire。 */
+  log?: (msg: string) => void;
+}
+
+export async function acquireElearnWindowSlot(opts?: AcquireSlotOpts): Promise<void> {
+  const label = opts?.label ?? null;
   if (_extractActive < ELEARN_WINDOW_CONCURRENCY) {
     _extractActive++;
+    _slotHolder = label;
     return;
   }
-  await new Promise<void>((resolve) => _extractWaiters.push(resolve));
+  // Need to wait. v0.8.20: tell the user why.
+  if (opts?.log) {
+    const queueAhead = _extractWaiters.length;
+    const holderTxt = _slotHolder ?? "其他課程";
+    const queueTxt = queueAhead > 0 ? `（前面還有 ${queueAhead} 條也在等）` : "";
+    opts.log(
+      `⏸ 等候 elearn 視窗排隊${label ? `：「${label}」` : ""} — 目前由「${holderTxt}」占用${queueTxt}。注意：同帳號或同電腦 2 個視窗同時操作 elearn 會被伺服器擋（多重視窗鎖定 / SCORM 互砍），所以一次只能 1 條跑，請等前面跑完接手`,
+    );
+  }
+  await new Promise<void>((resolve) => _extractWaiters.push({ resolve, label }));
   _extractActive++;
+  _slotHolder = label;
 }
 
 export function releaseElearnWindowSlot(): void {
   _extractActive--;
+  _slotHolder = null;
   const next = _extractWaiters.shift();
-  if (next) next();
+  if (next) next.resolve();
+}
+
+export function getElearnSlotHolder(): string | null {
+  return _slotHolder;
+}
+export function getElearnSlotWaiters(): number {
+  return _extractWaiters.length;
 }
 
 export interface TicketInfo {
