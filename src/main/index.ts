@@ -2250,6 +2250,28 @@ function createWindow() {
       mainWindow.hide();
     }
   }) as never);
+
+  // v0.8.22: re-apply last-known BrowserView bounds after window state
+  // changes — show (from tray), restore, maximize / unmaximize, full-screen
+  // toggles. Without this the BrowserView keeps its old bounds and ends up
+  // misaligned with the new chrome (left half of UI overlaps blank space,
+  // right half shows clipped elearn page).
+  const reapplyActiveBounds = () => {
+    const active = getActiveSession();
+    if (!active?.view || !mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      active.view.setBounds(lastBounds);
+    } catch {
+      /* swallow */
+    }
+  };
+  mainWindow.on("show", reapplyActiveBounds);
+  mainWindow.on("restore", reapplyActiveBounds);
+  mainWindow.on("maximize", reapplyActiveBounds);
+  mainWindow.on("unmaximize", reapplyActiveBounds);
+  mainWindow.on("enter-full-screen", reapplyActiveBounds);
+  mainWindow.on("leave-full-screen", reapplyActiveBounds);
+  mainWindow.on("resize", reapplyActiveBounds);
   setupTray(iconPath);
   buildAppMenu();
   mainWindow.webContents.setWindowOpenHandler((details) => {
