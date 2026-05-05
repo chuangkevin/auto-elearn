@@ -432,7 +432,15 @@ export async function prefetchCoursesViaWebBank(
 // within 24h skip entirely (data already in learned_answers).
 
 const BULK_DONE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-const BULK_PROGRESS_LOG_EVERY = 100;          // emit a log line every N pages
+const BULK_PROGRESS_LOG_EVERY = 50;           // emit a log line every N pages
+// v0.8.15: Bank has ~2056 articles spanning multiple years. Users can only
+// see / enrol in current-year + recent courses on elearn (older editions
+// are removed once their replacement publishes), so bulk-fetching the full
+// archive wastes ~70% of fetches on dead corpus. RSS feed is newest-first,
+// so taking the first N entries hits the active year coverage. 500 covers
+// roughly the 115 (current) + 114 editions, where actual exam content
+// lives. Tunable later if site coverage shifts.
+const BULK_RECENT_LIMIT = 500;
 
 function bulkDonePath(): string {
   const dir = getStorageDir();
@@ -457,33 +465,41 @@ export interface BulkPrefetchResult {
 }
 
 /**
- * Iterate the entire bank index and write every parsed question into
- * learned_answers (source=web-prefetch). Idempotent — saveLearnedAnswer's
- * priority gate skips rows that already exist with equal-or-higher source.
+ * Iterate the most recent BULK_RECENT_LIMIT bank pages and write every
+ * parsed question into learned_answers (source=web-prefetch). Idempotent —
+ * saveLearnedAnswer's priority gate skips rows that already exist with
+ * equal-or-higher source.
  *
  * Caller should fire this in the background (no await) on pipeline start
- * when isBulkPrefetchFresh() is false. The work is heavy (~15 min) but
- * happens off the user's hot path; per-course prefetch above still covers
- * selected courses fast.
+ * when isBulkPrefetchFresh() is false. RSS feed is newest-first, so we
+ * take the index head — that's the active-year coverage users actually
+ * see / enrol in. Older bank pages cover courses that were retired from
+ * elearn and are unreachable to enrol; bulk-fetching them wastes time.
  */
 export async function bulkPrefetchBankIndex(
   log: (msg: string) => void,
 ): Promise<BulkPrefetchResult> {
   const startedAt = Date.now();
 
-  let index: IndexEntry[];
+  let fullIndex: IndexEntry[];
   try {
-    index = await loadIndex(log);
+    fullIndex = await loadIndex(log);
   } catch (e) {
     log(`Bulk prefetch 索引載入失敗：${(e as Error).message}`);
     return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
   }
-  if (index.length === 0) {
+  if (fullIndex.length === 0) {
     log(`Bulk prefetch 索引為空，跳過`);
     return { pagesProcessed: 0, pagesFailed: 0, questionsWritten: 0 };
   }
 
-  log(`Bulk prefetch 開始：${index.length} 篇全站抓取（並行 ${FETCH_CONCURRENCY}，預估 ~15 分鐘）`);
+  // Take only the newest BULK_RECENT_LIMIT entries — older ones are dead
+  // corpus (course retired from elearn).
+  const index = fullIndex.slice(0, BULK_RECENT_LIMIT);
+  log(
+    `Bulk prefetch 開始：${index.length} 篇（最新；全索引 ${fullIndex.length} 篇，舊版略過）` +
+      `（並行 ${FETCH_CONCURRENCY}，預估 ~3-4 分鐘）`,
+  );
 
   const limit = makeLimiter(FETCH_CONCURRENCY);
   let processed = 0;
