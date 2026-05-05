@@ -551,6 +551,12 @@ interface AttemptResult {
   learnedFromResult: ResultEntry[];
   /** Option idx that was actually selected for each question, by question index. */
   picksByIdx: number[];
+  /** AnswerSource per question (parallel to picksByIdx). v0.8.16: lets
+   *  runExamLoop seed bfStates without including web-prefetch hits — those
+   *  are already ground truth (priority 10) and brute-force probing them
+   *  via forcedAnswers overwrites the correct answer with each round's
+   *  baseline picksByIdx[0], dropping scores. */
+  picksSource: AnswerSource[];
 }
 
 async function runOneAttempt(
@@ -578,7 +584,14 @@ async function runOneAttempt(
   const questions = await extractQuestions(win);
   if (questions.length === 0) {
     onProgress(`[${label}] 無法取得題目`);
-    return { score: null, questions: [], learned: 0, learnedFromResult: [], picksByIdx: [] };
+    return {
+      score: null,
+      questions: [],
+      learned: 0,
+      learnedFromResult: [],
+      picksByIdx: [],
+      picksSource: [],
+    };
   }
   onProgress(
     `[${label}] ${questions.length} 題${opts.skipMixedDb ? "（跳過 mixed.db，強制 LLM/learned）" : ""}${opts.forcedAnswers && opts.forcedAnswers.size > 0 ? `（暴力覆蓋 ${opts.forcedAnswers.size} 題）` : ""}`,
@@ -587,6 +600,7 @@ async function runOneAttempt(
   const llmAnswered: Array<{ question: string; answer: string }> = [];
   const allPicks: Array<{ question: string; answer: string; source: AnswerSource }> = [];
   const picksByIdx: number[] = new Array(questions.length).fill(0);
+  const picksSource: AnswerSource[] = new Array(questions.length).fill("random");
 
   for (const q of questions) {
     let pickedIdxs: number[];
@@ -626,6 +640,7 @@ async function runOneAttempt(
     // reports its first answer here; brute won't probe multi-select rows
     // since their answers are already cached as web-prefetch.
     picksByIdx[q.index] = pickedIdxs[0];
+    picksSource[q.index] = source;
 
     const optsText = pickedIdxs
       .map((i) => q.options[i]?.slice(0, 30) ?? String(i + 1))
@@ -723,7 +738,7 @@ async function runOneAttempt(
     await dumpResultHtml(win, cid);
   }
 
-  return { score, questions, learned: 0, learnedFromResult: [], picksByIdx };
+  return { score, questions, learned: 0, learnedFromResult: [], picksByIdx, picksSource };
 }
 
 // ─── Exam loop (retry until 100 or max attempts) ──────────────
@@ -867,7 +882,7 @@ async function runExamLoop(
       }
     }
 
-    const { score, learned, learnedFromResult, questions, picksByIdx } = await runOneAttempt(
+    const { score, learned, learnedFromResult, questions, picksByIdx, picksSource } = await runOneAttempt(
       win,
       cid,
       examUrl,
@@ -914,9 +929,21 @@ async function runExamLoop(
 
         bfStates = new Map();
         bfQueue = [];
+        let webPrefetchSkipped = 0;
         for (const q of questions) {
           const key = normalizeQuestion(q.text);
           if (!key) continue;
+          // v0.8.16: skip seeding bfStates for questions whose first-attempt
+          // pick came from web-prefetch (priority 10 ground truth). Brute
+          // probing them via forcedAnswers replaces the correct multi-✓
+          // submission with picksByIdx[0] (single index), instantly turning
+          // a correct answer wrong. By keeping these out of bfStates, they
+          // never enter forcedAnswers, so subsequent attempts re-run the
+          // matcher → web-prefetch hit again → keep the right answer.
+          if (picksSource[q.index] === "web-prefetch") {
+            webPrefetchSkipped++;
+            continue;
+          }
           const optIdx = picksByIdx[q.index] ?? 0;
           bfStates.set(key, {
             questionText: q.text,
@@ -926,6 +953,11 @@ async function runExamLoop(
             tested: new Set([optIdx]),
           });
           bfQueue.push(key);
+        }
+        if (webPrefetchSkipped > 0) {
+          onProgress(
+            `[${label}] 暴力探測準備：跳過 ${webPrefetchSkipped} 題 web-prefetch 題目（已是 ground truth），只 probe 其餘 ${bfQueue.length} 題`,
+          );
         }
       } else if (probingKey !== null && probingOption !== null) {
         const st = bfStates.get(probingKey);
