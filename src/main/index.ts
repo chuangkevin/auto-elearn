@@ -2235,9 +2235,21 @@ function createWindow() {
     if (x !== bounds.x || y !== bounds.y) mainWindow.setPosition(x, y);
   });
   mainWindow.on("ready-to-show", () => mainWindow?.show());
-  mainWindow.on("close", () => {
-    isQuittingForReal = true;
+  // v0.8.21: close button → hide to tray, only really quit via tray menu
+  // 「結束」(which sets isQuittingForReal=true first). Minimise also hides
+  // so the taskbar entry disappears, matching user's stealth use case.
+  mainWindow.on("close", (e) => {
+    if (!isQuittingForReal && mainWindow && !mainWindow.isDestroyed()) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
   });
+  mainWindow.on("minimize", ((e: Electron.Event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  }) as never);
   setupTray(iconPath);
   buildAppMenu();
   mainWindow.webContents.setWindowOpenHandler((details) => {
