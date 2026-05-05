@@ -380,6 +380,48 @@ v0.8.13 的 per-course prefetch 對「同名異年」課失效。v0.8.14 加 `bu
 #### p-limit ESM/CJS 衝突（v0.8.13 教訓）
 `p-limit@6` 是 ESM-only，Electron main 是 CJS。`require('p-limit')` 直接 `ERR_REQUIRE_ESM`。專案其他模組（heartbeat/engine.ts、course/discovery.ts）早就改成 inline limiter。新模組要寫並行控制**直接寫 6 行 inline semaphore**，不要 import p-limit。typecheck 不會抓到，要實際跑 dev 才會炸。
 
+### v0.8.16 — Brute 不覆蓋 web-prefetch 答案
+v0.8.15 實測：partial 命中課（5/10 web-prefetch 命中、baseline 60 vs 門檻 75）brute force 反而把分數拖下來 60→30→50→20→40 來回震盪。
+
+**根因**：runOneAttempt 的 picksByIdx 不分 source，bfStates seeding 時把全 10 題（含 5 個 web-prefetch 命中）都納入 bfQueue，forcedAnswers 強制覆蓋成單一 idx → 多選 multi-✓ submission 被 squash 成單選 → 對的答案變錯。
+
+**修法**：runOneAttempt 回傳 `picksSource: AnswerSource[]`（parallel to picksByIdx）；bfStates seeding 時 skip `picksSource[i] === "web-prefetch"` 的題目，那些不入 bfQueue → 不被 forcedAnswers 蓋寫 → 後續 attempt 自然從 matcher.lookupLearnedAnswer 命中 web-prefetch。
+
+### v0.8.17 — Bulk progress 進入 UI badge
+v0.8.13 的 `📥 題庫 N 題 · X/Y 課命中` badge 只顯示 per-course prefetch 數。bulk 在背景跑但 4721 題沒在 badge。修法：AppState 加獨立的 `webBankBulkProgress` field、bulk 函式接 `onProgress` callback、App.tsx 加第二個並排 badge `📚 全量題庫 抓取中 N/M 篇 · K 題`。
+
+### v0.8.18 — Bulk 改增量 (URL diff)
+v0.8.17 用 24h timestamp file 判定要不要重抓：first run 165/500 失敗，那 165 篇要等 24h 才重試 — 但失敗那批可能正是 elearn 抽到的題目，「平白放廢」一整天。
+
+**修法**：`web-bank-bulk-done.json` 改存 `processedUrls: string[]` (只含**成功** parse 過的 URL)。每次 pipeline 啟動：
+1. 永遠重抓 RSS index（~5s，無 24h cache）
+2. delta = top-500 entries minus processedUrls
+3. delta 為空 → log「題庫已完整覆蓋」skip；delta 有內容 → 抓 + parse + 加入 processedUrls
+4. 失敗 URL 不入 processedUrls → 下次自動重試
+
+steady state：top-500 全 cached → bulk 一秒內就 skip。
+
+### v0.8.19 — bySource counter 加 web-prefetch + pipeline-end summary
+- 「測驗完成 ... DB 0/fuzzy 0/LLM 0/brute 0/random 4」漏列 web-prefetch — display bug，實際 6 題 web-prefetch 命中卻沒顯示。修法把 `題庫 N` 加在最前面
+- pipeline 結束時 log `📊 本批 N 門總結：✅ X 過 / ❌ Y 沒過；失敗：<list>`，省去使用者翻看每課 log
+
+### v0.8.20 — Slot 等候時告訴使用者為什麼
+chain log「開始測驗：xxx」之後常常沉默幾分鐘，使用者懷疑 hang。實際是 `acquireElearnWindowSlot` 排隊。
+
+**修法**：`acquireElearnWindowSlot({ label, log })` 簽名加可選 callback。slot 被佔住要等時 fire 一條 log：「⏸ 等候 elearn 視窗排隊：「考試「xxx」」 — 目前由「歷史反推 cid=...」占用（前面還有 N 條也在等）。注意：同帳號或同電腦 2 個視窗同時操作 elearn 會被伺服器擋（多重視窗鎖定 / SCORM 互砍）」。`solveExam`、`solveExamFromHistory`、`fillSurvey` 都 wired 對應 label。
+
+### v0.8.21 — 關閉 / 最小化收進 tray
+之前點 X 直接 `app.quit()`。現在：
+- `mainWindow.on("close")` preventDefault + hide → 程式還在背景跑，tray icon 留著
+- `mainWindow.on("minimize")` preventDefault + hide → taskbar 也不顯示（偽裝模式友善）
+- 真退出只能透過 tray 右鍵「結束」（set `isQuittingForReal = true` → app.quit）
+
+### v0.8.22 — BrowserView bounds 跟視窗狀態走
+從 tray 還原 / 最大化 / 全螢幕 toggle 時，BrowserView 還用 hide 之前的 bounds，畫面會錯位。修法：`mainWindow` 的 7 個 events (`show / restore / maximize / unmaximize / enter-full-screen / leave-full-screen / resize`) 全部 hook 重 apply lastBounds 到 active session view。idempotent — renderer 之後 push 新值仍會覆蓋。
+
+### v0.8.13~v0.8.22 累積實測戰況
+v0.8.12 baseline：C 帳號 9/9 fail；v0.8.22 同樣 9 課 C：6 過（80~100 分）+ 2 早退（題庫無覆蓋）+ 1 brute 卡 70；B 帳號（4 + 後續 AI 課）：100% 全過、多 100 分。**真實命中關鍵看 elearn 那課當下抽題是否落在 bank 收錄子集**（rodiyer 2056 篇 / 我們抓最新 500 / bulk 完成寫入 ~5K 題到 learned_answers）。
+
 ## Release 流程
 
 **觸發時機（強制）**：每當一輪功能/修復告一段落、`package.json` 有 bump 版號的意圖，就必須走完下列 7 步。**只 bump 版號不打 tag = 未完成的 release**，等同沒做。
