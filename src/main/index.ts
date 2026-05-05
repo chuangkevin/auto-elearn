@@ -61,6 +61,7 @@ import { isSessionAlive } from "./auth/session-watchdog";
 import { clearRun, loadRun, saveRun } from "./persist/run-state";
 import { solveExam } from "./exam/solver";
 import { fillSurvey } from "./survey/filler";
+import { prefetchCoursesViaWebBank, type PrefetchResult } from "./exam/web-bank";
 import {
   clearSecret as stealthClearSecret,
   currentState as stealthCurrentState,
@@ -1330,6 +1331,17 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
 
       let examOK = passed;
       if (!passed && !s.abortSignal.aborted) {
+        // v0.8.13: race the shared prefetch promise with a 30s timeout.
+        // Fast path (heartbeat-driven chains): prefetch already resolved.
+        // Edge path (skipRead courses with no heartbeat): chain hits this
+        // before web-bank has finished — wait briefly so learned_answers
+        // is populated before solveExam reads it.
+        const PREFETCH_TIMEOUT_MS = 30_000;
+        await Promise.race([
+          prefetchPromise,
+          new Promise<void>((resolve) => setTimeout(resolve, PREFETCH_TIMEOUT_MS)),
+        ]);
+
         try {
           const { solveExamFromHistory } = await import("./exam/history-solver");
           const r = await solveExamFromHistory(session, cid, (m) =>
@@ -1562,6 +1574,37 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     }
   }
   if (queued.length > 0) pushState();
+
+  // v0.8.13: fire web-bank prefetch in parallel with heartbeat. Promise is
+  // held so per-course chains can await it (especially skipRead courses
+  // that go straight to chain without a heartbeat phase).
+  const allTracked = [...immediate, ...queued, ...skipRead];
+  const courseNamesByCid = new Map<string, string>();
+  for (const t of allTracked) courseNamesByCid.set(t.course.cid, t.course.caption ?? "");
+  const prefetchCids = allTracked.map((t) => t.course.cid);
+  let prefetchPromise: Promise<PrefetchResult>;
+  if (prefetchCids.length > 0) {
+    prefetchPromise = prefetchCoursesViaWebBank(
+      prefetchCids,
+      courseNamesByCid,
+      (msg) => logSession(s, "info", `[題庫] ${msg}`),
+    ).catch((e) => {
+      logSession(s, "warn", `[題庫] prefetch 例外：${(e as Error)?.message ?? e}`);
+      return {
+        questionsWritten: 0,
+        coursesHit: 0,
+        coursesMiss: 0,
+        coursesFailed: prefetchCids.length,
+      };
+    });
+  } else {
+    prefetchPromise = Promise.resolve({
+      questionsWritten: 0,
+      coursesHit: 0,
+      coursesMiss: 0,
+      coursesFailed: 0,
+    });
+  }
 
   // v0.8.1：caption map 給 reauthFn 重抽 ticket 用 — extractTicket 需要 caption
   // 才能在多 lesson 共用 SCORM tree 時挑對課，沒帶會抓到 sibling 變成 noop 心跳。
