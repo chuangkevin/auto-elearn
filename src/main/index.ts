@@ -85,6 +85,7 @@ import { getStorageDir, storagePath } from "./persist/storage-paths";
 import { migrateUserDataToPortableIfNeeded } from "./persist/migrate-portable";
 import { groupByCategory, resolveAgencyCodes } from "./course/agency-code-map";
 import { randomBytes } from "node:crypto";
+import { msUntilNextMidnight, runPurge } from "./cleanup/purge";
 
 // ── 多帳號模組 ─────────────────────────────────────────────────
 import {
@@ -158,6 +159,7 @@ const KNOWN_CATEGORIES = [
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuittingForReal = false;
+let purgeTimer: NodeJS.Timeout | null = null;
 const bus = createBus();
 
 // 多帳號 UI 模式
@@ -224,6 +226,38 @@ function releaseAllCoursesForAccount(accountId: string): void {
 function releaseCourseOwnership(cid: string, accountId: string): void {
   const existing = courseOwners.get(cid);
   if (existing?.accountId === accountId) courseOwners.delete(cid);
+}
+
+function runScheduledPurge(reason: "startup" | "midnight"): void {
+  try {
+    const report = runPurge();
+    const deleted =
+      report.logsDeleted +
+      report.tempDeleted +
+      report.debugHistoryDeleted +
+      report.runStateDeleted;
+    const summary =
+      deleted === 0
+        ? `🧹 purge(${reason})：無需清理`
+        : `🧹 purge(${reason})：共清 ${deleted} 個檔案（logs ${report.logsDeleted}、temp ${report.tempDeleted}、history ${report.debugHistoryDeleted}、run-state ${report.runStateDeleted}）`;
+    appendLogLine("info", summary);
+    if (report.errors.length > 0) {
+      appendLogLine("warn", `🧹 purge(${reason}) 錯誤 ${report.errors.length} 筆：${report.errors.join(" | ")}`);
+    }
+  } catch (e) {
+    appendLogLine(
+      "error",
+      `🧹 purge(${reason}) 失敗：${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+function scheduleNextMidnightPurge(): void {
+  if (purgeTimer) clearTimeout(purgeTimer);
+  purgeTimer = setTimeout(() => {
+    runScheduledPurge("midnight");
+    scheduleNextMidnightPurge();
+  }, msUntilNextMidnight());
 }
 
 /** Renderer 推來的 active view bounds */
@@ -2717,6 +2751,10 @@ if (!gotLock) {
   });
 
   app.on("will-quit", () => {
+    if (purgeTimer) {
+      clearTimeout(purgeTimer);
+      purgeTimer = null;
+    }
     if (tray) {
       tray.destroy();
       tray = null;
@@ -2759,6 +2797,9 @@ if (!gotLock) {
         `資料夾：${getStorageDir()}（portable 模式：${app.isPackaged ? "是" : "否（dev）"}）`,
       );
     }
+
+    runScheduledPurge("startup");
+    scheduleNextMidnightPurge();
 
     app.on("browser-window-created", (_, w) => optimizer.watchWindowShortcuts(w));
     createWindow();
