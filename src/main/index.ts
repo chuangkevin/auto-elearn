@@ -42,7 +42,7 @@ import { loadConfig, saveConfig, setGeminiLogger } from "./llm/gemini";
 import { discover } from "./course/discovery";
 import { enrollMany } from "./course/enrollment";
 import { unenrollCourse } from "./course/unenroll";
-import type { Tracked } from "./course/types";
+import { classify, requiredSecondsFor, type Tracked } from "./course/types";
 import {
   ElearnAuthError,
   getCategoryChildren,
@@ -200,6 +200,23 @@ const courseOwners = new Map<
   string,
   { accountId: string; nickname: string; startedAt: number }
 >();
+
+// Dashboard getSigningCourses is capped by the server (currently the first 100 rows).
+// Keep search metadata so selected courses beyond that cap can still enter this run.
+const searchedCourseMetadata = new Map<string, Map<string, Course>>();
+
+function rememberCourseMetadata(s: AccountSession, courses: Course[]): void {
+  let byCid = searchedCourseMetadata.get(s.id);
+  if (!byCid) {
+    byCid = new Map<string, Course>();
+    searchedCourseMetadata.set(s.id, byCid);
+  }
+  for (const course of courses) byCid.set(course.cid, course);
+}
+
+function getRememberedCourse(s: AccountSession, cid: string): Course | null {
+  return searchedCourseMetadata.get(s.id)?.get(cid) ?? null;
+}
 
 function acquireCourseOwnership(
   cid: string,
@@ -1157,11 +1174,87 @@ function updateStats(s: AccountSession) {
       : Math.round((s.state.stats.done / s.state.stats.total) * 100);
 }
 
+async function addSelectedCoursesMissingFromDashboard(
+  s: AccountSession,
+  session: Session,
+  tracked: Tracked[],
+  selectedCids: string[],
+): Promise<Tracked[]> {
+  const trackedCids = new Set(tracked.map((t) => t.course.cid));
+  const stateCardsByCid = new Map(s.state.courses.map((c) => [c.cid, c]));
+  const extras: Tracked[] = [];
+  const missing = selectedCids.filter((cid) => !trackedCids.has(cid));
+
+  for (const cid of missing) {
+    const remembered = getRememberedCourse(s, cid);
+    const card = stateCardsByCid.get(cid);
+    if (!remembered && !card) {
+      logSession(
+        s,
+        "warn",
+        `選取課程 ${cid} 不在 dashboard 前 100 筆，也沒有搜尋快取；本輪無法自動加入`,
+      );
+      continue;
+    }
+
+    const detail = await fetchCourseDetail(session, cid);
+    const course: Course = {
+      cid,
+      caption: remembered?.caption ?? card?.name ?? cid,
+      certification_hours: remembered?.certification_hours ?? (card?.requiredSec ?? 0) / 3600,
+      content: remembered?.content,
+      category_full_path: remembered?.category_full_path,
+      fromSchoolName: remembered?.fromSchoolName,
+      studentTargetTypeCaption: remembered?.studentTargetTypeCaption,
+      classPeriod: remembered?.classPeriod,
+      isClassing: remembered?.isClassing ?? true,
+      isReadtimeValidCaption: detail?.passed === true ? "已通過" : "",
+      isReadDones: 0,
+      isExamDones: detail?.examScore != null && detail.examScore >= (detail.passingScore ?? 80) ? 1 : 0,
+      isSurveyDones: detail?.surveyDone === true ? 1 : 0,
+      exam_exists: remembered?.exam_exists,
+      passPercent: remembered?.passPercent,
+      platform: remembered?.platform,
+      portal_cid: remembered?.portal_cid,
+    };
+    const extra: Tracked = {
+      course,
+      phase: classify(course, detail),
+      readSec: detail?.readSec ?? card?.readSec ?? 0,
+      requiredSec: card?.requiredSec ?? requiredSecondsFor(course),
+      detail,
+    };
+    extras.push(extra);
+  }
+
+  if (extras.length === 0) return tracked;
+
+  const existingCards = new Set(s.state.courses.map((c) => c.cid));
+  for (const extra of extras) {
+    if (!existingCards.has(extra.course.cid)) {
+      s.state.courses.push(trackedToCard(extra));
+      existingCards.add(extra.course.cid);
+    }
+  }
+  updateStats(s);
+  pushState();
+  logSession(
+    s,
+    "info",
+    `已補入 ${extras.length} 門 dashboard 前 100 筆以外的本次選取課程`,
+  );
+  return [...tracked, ...extras];
+}
+
 async function refreshCourses(s: AccountSession): Promise<void> {
   if (!s.view) return;
   try {
     const sess = s.view.webContents.session;
     const tracked = await discover(sess);
+    rememberCourseMetadata(
+      s,
+      tracked.map((t) => t.course),
+    );
     s.state.courses = tracked.map(trackedToCard);
     updateStats(s);
     pushState();
@@ -1312,7 +1405,8 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
 
   // 2. Heartbeat
   s.state.status = "running";
-  const tracked = await discover(session);
+  let tracked = await discover(session);
+  tracked = await addSelectedCoursesMissingFromDashboard(s, session, tracked, cids);
   const selected = new Set(cids);
   const skipRead = tracked.filter(
     (t) =>
@@ -2105,7 +2199,7 @@ async function keywordSearch(
     logSession(s, "warn", "搜尋過程偵測到 session 失效。請等待自動重登後再試一次。");
   }
 
-  return Array.from(allByCid.values())
+  const filteredCourses = Array.from(allByCid.values())
     .filter((c) => c.isClassing)
     // v0.8.13：client-side 二次過濾 hours — 本來 elearn server 應該照 body
     // certification_hours_minimum/maximum 過濾，使用者實測沒效果（可能 server
@@ -2116,7 +2210,10 @@ async function keywordSearch(
       if (hoursMin !== undefined && h < hoursMin) return false;
       if (hoursMax !== undefined && h > hoursMax) return false;
       return true;
-    })
+    });
+  rememberCourseMetadata(s, filteredCourses);
+
+  return filteredCourses
     .map<CourseCandidate>((c) => ({
       cid: c.cid,
       caption: c.caption,
@@ -3092,6 +3189,11 @@ ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
   if (codeAuthFailed) {
     logSession(s, "warn", "搜尋過程偵測到 session 失效。請等待自動重登後再試一次。");
   }
+  const outCids = new Set(out.map((c) => c.cid));
+  rememberCourseMetadata(
+    s,
+    Array.from(byCid.values()).filter((c) => outCids.has(c.cid)),
+  );
   return out;
 });
 

@@ -2,6 +2,8 @@ import type { Session } from "electron";
 import { elearnRequest } from "./client";
 
 const BASE = "https://elearn.hrd.gov.tw";
+const SIGNING_COURSES_PER_PAGE = 100;
+const SIGNING_COURSES_MAX_PAGES = 50;
 
 export interface Course {
   cid: string;
@@ -111,18 +113,17 @@ function flattenCourseList(body: string): Course[] {
   return out;
 }
 
-/** Our already-signed-up courses with per-phase status. */
-export async function getSigningCourses(session: Session): Promise<Course[]> {
+async function getSigningCoursesPage(session: Session, page: number): Promise<Course[]> {
   const { text } = await elearnRequest(
     session,
-    `${BASE}/mooc/controllers/course_ajax.php?course_type=all&page=0`,
+    `${BASE}/mooc/controllers/course_ajax.php?course_type=all&page=${page}`,
     {
       method: "POST",
       body: {
         action: "getSigningCourses",
         id: "new",
-        selectPage: "0",
-        perpage: "100",
+        selectPage: String(page),
+        perpage: String(SIGNING_COURSES_PER_PAGE),
         "course-type": "all",
         keyword: "",
         is_readtime_valid: "",
@@ -132,6 +133,30 @@ export async function getSigningCourses(session: Session): Promise<Course[]> {
     },
   );
   return flattenCourseList(text);
+}
+
+/** Our already-signed-up courses with per-phase status. */
+export async function getSigningCourses(session: Session): Promise<Course[]> {
+  const out: Course[] = [];
+  const seen = new Set<string>();
+
+  for (let page = 0; page < SIGNING_COURSES_MAX_PAGES; page++) {
+    const courses = await getSigningCoursesPage(session, page);
+    if (courses.length === 0) break;
+
+    let added = 0;
+    for (const course of courses) {
+      if (seen.has(course.cid)) continue;
+      seen.add(course.cid);
+      out.push(course);
+      added++;
+    }
+
+    // If the server ignores page/selectPage and repeats page 0, stop instead of looping.
+    if (added === 0) break;
+  }
+
+  return out;
 }
 
 /**
