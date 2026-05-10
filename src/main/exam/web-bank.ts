@@ -72,6 +72,14 @@ export interface PrefetchResult {
   coursesFailed: number;
 }
 
+export interface WebBankCoverage {
+  cid: string;
+  status: "hit" | "miss";
+  title?: string;
+  url?: string;
+  similarity?: number;
+}
+
 // ── Index loader (cache + paginated fetch) ──────────────────────────────────
 
 function indexCachePath(): string {
@@ -140,6 +148,7 @@ async function fetchFullIndex(log: (m: string) => void): Promise<IndexEntry[]> {
 // Blogger silently caps page size at 25, so the loop bailed at 150 entries.
 // Reject any cached index that's suspiciously short and refetch instead.
 const MIN_VALID_INDEX_ENTRIES = 500;
+let inFlightIndexLoad: Promise<IndexEntry[]> | null = null;
 
 async function loadIndex(log: (m: string) => void): Promise<IndexEntry[]> {
   const path = indexCachePath();
@@ -158,17 +167,26 @@ async function loadIndex(log: (m: string) => void): Promise<IndexEntry[]> {
       /* fall through to refetch */
     }
   }
-  log(`抓取題庫索引...`);
-  const entries = await fetchFullIndex(log);
-  if (entries.length > 0) {
-    try {
-      writeFileSync(path, JSON.stringify(entries), "utf8");
-      log(`索引已更新：${entries.length} 篇，存於 ${path}`);
-    } catch (e) {
-      log(`索引寫檔失敗（不影響本次執行）：${(e as Error).message}`);
-    }
+  if (inFlightIndexLoad) {
+    log(`題庫索引已有載入中的請求，重用同一批結果`);
+    return inFlightIndexLoad;
   }
-  return entries;
+  log(`抓取題庫索引...`);
+  inFlightIndexLoad = (async () => {
+    const entries = await fetchFullIndex(log);
+    if (entries.length > 0) {
+      try {
+        writeFileSync(path, JSON.stringify(entries), "utf8");
+        log(`索引已更新：${entries.length} 篇，存於 ${path}`);
+      } catch (e) {
+        log(`索引寫檔失敗（不影響本次執行）：${(e as Error).message}`);
+      }
+    }
+    return entries;
+  })().finally(() => {
+    inFlightIndexLoad = null;
+  });
+  return inFlightIndexLoad;
 }
 
 /**
@@ -221,6 +239,35 @@ function findBestMatch(
   }
   if (!best || best.sim < MATCH_THRESHOLD) return null;
   return best;
+}
+
+export async function findWebBankCoverage(
+  courses: Array<{ cid: string; caption: string }>,
+  log: (m: string) => void,
+): Promise<Map<string, WebBankCoverage>> {
+  const out = new Map<string, WebBankCoverage>();
+  if (courses.length === 0) return out;
+
+  const index = await loadIndex(log);
+  if (index.length < MIN_VALID_INDEX_ENTRIES) {
+    throw new Error(`題庫索引不足：${index.length} 篇`);
+  }
+  for (const course of courses) {
+    const match = findBestMatch(course.caption, index);
+    out.set(
+      course.cid,
+      match
+        ? {
+            cid: course.cid,
+            status: "hit",
+            title: match.entry.title,
+            url: match.entry.url,
+            similarity: match.sim,
+          }
+        : { cid: course.cid, status: "miss" },
+    );
+  }
+  return out;
 }
 
 // ── HTML parser ─────────────────────────────────────────────────────────────

@@ -410,6 +410,9 @@ steady state：top-500 全 cached → bulk 一秒內就 skip。
 
 本輪也修 pipeline ordering：skipRead（已過閱讀、直接進考試）的 chain 必須在 `prefetchPromise` / `bulkPrefetchPromise` 建立後才啟動。考試前先等 per-course prefetch 最多 30s；如果沒寫入題目，再等 full bulk prefetch 最多 300s，避免「全量題庫正在背景抓，但考試已先用舊 DB/brute 跑完失敗」。
 
+### v0.8.29 — 選課前顯示題庫覆蓋
+搜尋課程（關鍵字 / 代碼）時用同一套 rodiyer web-bank index 與 `MATCH_THRESHOLD=0.85` 課名 fuzzy match 標註每門課：`有題庫` / `無題庫` / `題庫未知`。搜尋覆蓋檢查最多等 12 秒；索引不足、網路失敗、逾時都顯示 `題庫未知`，避免把「查不到」誤判成「無題庫」。索引載入有 in-flight promise 去重，連續搜尋不會堆疊多批 RSS 抓取。這是選課風險提示，不代表保證通過；真正考試仍以 per-course prefetch + bulk prefetch + learned_answers 命中為準。
+
 ### v0.8.20 — Slot 等候時告訴使用者為什麼
 chain log「開始測驗：xxx」之後常常沉默幾分鐘，使用者懷疑 hang。實際是 `acquireElearnWindowSlot` 排隊。
 

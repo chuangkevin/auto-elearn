@@ -1736,6 +1736,9 @@ function Selecting({ state }: { state: AppState }) {
               checked={selected.has(r.cid)}
               onToggle={() => toggle(r.cid)}
               badge={r.already_enrolled ? "已報名" : undefined}
+              bankStatus={r.webBankStatus}
+              bankTitle={r.webBankTitle}
+              bankSimilarity={r.webBankSimilarity}
               onPreview={() =>
                 window.api.navigateView(`https://elearn.hrd.gov.tw/info/${r.cid}`)
               }
@@ -1903,6 +1906,9 @@ function CourseRow({
   checked,
   onToggle,
   badge,
+  bankStatus,
+  bankTitle,
+  bankSimilarity,
   onPreview,
   stagedForUnenroll,
   onToggleUnenroll,
@@ -1914,6 +1920,9 @@ function CourseRow({
   checked: boolean;
   onToggle: () => void;
   badge?: string;
+  bankStatus?: "hit" | "miss" | "unknown";
+  bankTitle?: string;
+  bankSimilarity?: number;
   onPreview?: () => void;
   stagedForUnenroll?: boolean;
   onToggleUnenroll?: () => void;
@@ -1947,6 +1956,26 @@ function CourseRow({
           {stagedForUnenroll && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-700 text-white">
               待退選
+            </span>
+          )}
+          {bankStatus && (
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded ${
+                bankStatus === "hit"
+                  ? "bg-emerald-700/80 text-emerald-50"
+                  : bankStatus === "miss"
+                  ? "bg-rose-800/80 text-rose-100"
+                  : "bg-slate-700 text-slate-300"
+              }`}
+              title={
+                bankStatus === "hit"
+                  ? `rodiyer 題庫命中${bankSimilarity ? ` ${(bankSimilarity * 100).toFixed(0)}%` : ""}${bankTitle ? `：${bankTitle}` : ""}`
+                  : bankStatus === "miss"
+                  ? "rodiyer 最新題庫索引未命中，考試可能需要靠既有題庫 / Gemini / brute force"
+                  : "題庫覆蓋狀態暫時無法確認"
+              }
+            >
+              {bankStatus === "hit" ? "有題庫" : bankStatus === "miss" ? "無題庫" : "題庫未知"}
             </span>
           )}
         </div>

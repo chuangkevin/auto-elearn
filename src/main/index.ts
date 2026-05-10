@@ -64,6 +64,7 @@ import { fillSurvey } from "./survey/filler";
 import {
   prefetchCoursesViaWebBank,
   bulkPrefetchBankIndex,
+  findWebBankCoverage,
   type PrefetchResult,
 } from "./exam/web-bank";
 import {
@@ -2161,6 +2162,47 @@ function normaliseKeyword(raw: string | undefined): string {
   return raw.replace(/[\s　﻿​]+/g, " ").trim();
 }
 
+const SEARCH_WEB_BANK_COVERAGE_TIMEOUT_MS = 12_000;
+
+async function annotateWebBankCoverage(
+  s: AccountSession,
+  candidates: CourseCandidate[],
+): Promise<CourseCandidate[]> {
+  if (candidates.length === 0) return candidates;
+  try {
+    const coverage = await Promise.race([
+      findWebBankCoverage(
+        candidates.map((c) => ({ cid: c.cid, caption: c.caption })),
+        (m) => logSession(s, "info", `題庫覆蓋檢查：${m}`),
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`題庫覆蓋檢查超過 ${SEARCH_WEB_BANK_COVERAGE_TIMEOUT_MS / 1000}s`)),
+          SEARCH_WEB_BANK_COVERAGE_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+    let hit = 0;
+    const annotated = candidates.map<CourseCandidate>((c) => {
+      const cov = coverage.get(c.cid);
+      if (!cov) return { ...c, webBankStatus: "unknown" };
+      if (cov.status === "hit") hit++;
+      return {
+        ...c,
+        webBankStatus: cov.status,
+        webBankTitle: cov.title,
+        webBankSimilarity: cov.similarity,
+        webBankUrl: cov.url,
+      };
+    });
+    logSession(s, "info", `題庫覆蓋：${hit}/${candidates.length} 門命中 rodiyer`);
+    return annotated;
+  } catch (e) {
+    logSession(s, "warn", `題庫覆蓋檢查失敗：${e instanceof Error ? e.message : String(e)}`);
+    return candidates.map<CourseCandidate>((c) => ({ ...c, webBankStatus: "unknown" }));
+  }
+}
+
 async function keywordSearch(
   s: AccountSession,
   opts: SearchOptions,
@@ -2250,7 +2292,7 @@ async function keywordSearch(
     });
   rememberCourseMetadata(s, filteredCourses);
 
-  return filteredCourses
+  const candidates = filteredCourses
     .map<CourseCandidate>((c) => ({
       cid: c.cid,
       caption: c.caption,
@@ -2268,6 +2310,7 @@ async function keywordSearch(
       if (aZero !== bZero) return aZero ? 1 : -1;
       return a.certification_hours - b.certification_hours;
     });
+  return annotateWebBankCoverage(s, candidates);
 }
 
 // ── Stuck-state watchdog（per-session）─────────────────────────
@@ -3202,7 +3245,7 @@ ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
         return a.certification_hours - b.certification_hours;
       });
 
-  let out = applyPostFilter(byCid);
+  let out = await annotateWebBankCoverage(s, applyPostFilter(byCid));
   logSession(s, "info", `代碼搜尋共 ${out.length} 筆`);
   if (out.length === 0 && anyKeywordRequested && !codeAuthFailed) {
     const fallbackTerms = Array.from(new Set([...allKeywords, ...allLabels])).filter(Boolean);
@@ -3220,7 +3263,7 @@ ipcMain.handle(IPC.SEARCH_BY_CODES, async (_evt, codes: string[]) => {
         logSession(s, "warn", `fallback "${term}" 失敗：${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    out = applyPostFilter(byCid);
+    out = await annotateWebBankCoverage(s, applyPostFilter(byCid));
     logSession(s, "info", `代碼搜尋(fallback)共 ${out.length} 筆`);
   }
   if (codeAuthFailed) {

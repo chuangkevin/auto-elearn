@@ -330,6 +330,11 @@ export interface CourseCandidate {
   isClassing: boolean;
   /** true if the user already signed up previously */
   already_enrolled: boolean;
+  /** rodiyer/web-bank title coverage for this course, checked while searching. */
+  webBankStatus?: "hit" | "miss" | "unknown";
+  webBankTitle?: string;
+  webBankSimilarity?: number;
+  webBankUrl?: string;
 }
 
 export interface ViewBounds {
