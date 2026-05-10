@@ -62,6 +62,8 @@ export interface ParsedQA {
 export interface PrefetchResult {
   /** 寫入 learned_answers 的題目總數（所有命中課程加總） */
   questionsWritten: number;
+  /** Per-course prefetch 成功寫入題目的 cid；用來判斷單一課考前是否仍需等 bulk。 */
+  hitCids: string[];
   /** 命中題庫網站且成功 parse 的課程數 */
   coursesHit: number;
   /** index 比對沒過 threshold 的課程數 */
@@ -358,19 +360,20 @@ export async function prefetchCoursesViaWebBank(
   cids: string[],
   courseNamesByCid: Map<string, string>,
   log: (msg: string) => void,
+  onCourseHit?: (cid: string) => void,
 ): Promise<PrefetchResult> {
-  if (cids.length === 0) return { questionsWritten: 0, coursesHit: 0, coursesMiss: 0, coursesFailed: 0 };
+  if (cids.length === 0) return { questionsWritten: 0, hitCids: [], coursesHit: 0, coursesMiss: 0, coursesFailed: 0 };
 
   let index: IndexEntry[];
   try {
     index = await loadIndex(log);
   } catch (e) {
     log(`索引載入失敗，跳過題庫 prefetch：${(e as Error).message}`);
-    return { questionsWritten: 0, coursesHit: 0, coursesMiss: 0, coursesFailed: cids.length };
+    return { questionsWritten: 0, hitCids: [], coursesHit: 0, coursesMiss: 0, coursesFailed: cids.length };
   }
   if (index.length === 0) {
     log(`索引為空，跳過題庫 prefetch`);
-    return { questionsWritten: 0, coursesHit: 0, coursesMiss: 0, coursesFailed: cids.length };
+    return { questionsWritten: 0, hitCids: [], coursesHit: 0, coursesMiss: 0, coursesFailed: cids.length };
   }
 
   // Match each course caption to the best bank entry (above threshold).
@@ -432,6 +435,7 @@ export async function prefetchCoursesViaWebBank(
           }
           hit += qas.length;
           succeeded.add(t.cid);
+          onCourseHit?.(t.cid);
           roundHit++;
           log(`✓「${t.caption.slice(0, 20)}」: ${qas.length} 題寫入 learned_answers (round ${round})`);
         }),
@@ -449,6 +453,7 @@ export async function prefetchCoursesViaWebBank(
   log(`題庫 prefetch 完成：${hit} 題寫入 / ${coursesHit} 課成功 / ${failed} 課失敗 / ${missCount} 課無對應`);
   return {
     questionsWritten: hit,
+    hitCids: [...succeeded],
     coursesHit,
     coursesMiss: missCount,
     coursesFailed: failed,

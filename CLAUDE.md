@@ -405,6 +405,11 @@ steady state：top-500 全 cached → bulk 一秒內就 skip。
 - 「測驗完成 ... DB 0/fuzzy 0/LLM 0/brute 0/random 4」漏列 web-prefetch — display bug，實際 6 題 web-prefetch 命中卻沒顯示。修法把 `題庫 N` 加在最前面
 - pipeline 結束時 log `📊 本批 N 門總結：✅ X 過 / ❌ Y 沒過；失敗：<list>`，省去使用者翻看每課 log
 
+### v0.8.28 — 考試前等待題庫實際可用
+實測三帳號（2026-05-10）：`aegis99999` 未通過課 8/9 可被 rodiyer top-500 精準命中；`ar8271` 未通過 20 門多為 Hahow/MOOCs/英文/COVID 語言課，rodiyer 課名覆蓋 0/20。結論：web-bank 是「覆蓋公務園常見題庫課」而不是萬能；沒覆蓋且 Gemini key 未設時仍會退回 DB/fuzzy/brute，失敗率高。
+
+本輪也修 pipeline ordering：skipRead（已過閱讀、直接進考試）的 chain 必須在 `prefetchPromise` / `bulkPrefetchPromise` 建立後才啟動。考試前先等 per-course prefetch 最多 30s；如果沒寫入題目，再等 full bulk prefetch 最多 300s，避免「全量題庫正在背景抓，但考試已先用舊 DB/brute 跑完失敗」。
+
 ### v0.8.20 — Slot 等候時告訴使用者為什麼
 chain log「開始測驗：xxx」之後常常沉默幾分鐘，使用者懷疑 hang。實際是 `acquireElearnWindowSlot` 排隊。
 

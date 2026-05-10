@@ -138,6 +138,8 @@ const HEARTBEAT_PARALLEL_MAX = 50;
 const HEARTBEAT_INTERVAL_MS = 300_000;
 const HEARTBEAT_JITTER_MS = 1000;
 const ENROLL_DELAY_MS = 1000;
+const PER_COURSE_PREFETCH_EXAM_WAIT_MS = 30_000;
+const BULK_PREFETCH_EXAM_WAIT_MS = 300_000;
 const HOMEPAGE = "https://elearn.hrd.gov.tw/mooc/index.php";
 const ECPA_LOGIN_URL = "https://ecpa.dgpa.gov.tw/uIAM/clogin.asp?destid=CrossHRD";
 
@@ -1428,6 +1430,15 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   const chainStarted = new Set<string>();
   const heartbeatDoneResolvers = new Map<string, () => void>();
   const heartbeatDonePromises = new Map<string, Promise<void>>();
+  let prefetchPromise: Promise<PrefetchResult> = Promise.resolve({
+    questionsWritten: 0,
+    hitCids: [],
+    coursesHit: 0,
+    coursesMiss: 0,
+    coursesFailed: 0,
+  });
+  let bulkPrefetchPromise: Promise<unknown> = Promise.resolve();
+  const prefetchHitCids = new Set<string>();
   const ensureHeartbeatDonePromise = (cid: string) => {
     if (heartbeatDonePromises.has(cid)) return;
     heartbeatDonePromises.set(
@@ -1441,6 +1452,14 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
       r();
       heartbeatDoneResolvers.delete(cid);
     }
+  };
+  const waitUnlessAborted = async (ms: number): Promise<boolean> => {
+    const stepMs = 1000;
+    const deadline = Date.now() + ms;
+    while (!s.abortSignal.aborted && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(stepMs, deadline - Date.now())));
+    }
+    return !s.abortSignal.aborted;
   };
   const startChainOnce = (cid: string, name: string, awaitHeartbeat: boolean) => {
     if (chainStarted.has(cid)) return;
@@ -1468,11 +1487,27 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
         // Edge path (skipRead courses with no heartbeat): chain hits this
         // before web-bank has finished — wait briefly so learned_answers
         // is populated before solveExam reads it.
-        const PREFETCH_TIMEOUT_MS = 30_000;
-        await Promise.race([
+        const prefetchRes = await Promise.race<PrefetchResult | null>([
           prefetchPromise,
-          new Promise<void>((resolve) => setTimeout(resolve, PREFETCH_TIMEOUT_MS)),
+          new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), PER_COURSE_PREFETCH_EXAM_WAIT_MS),
+          ),
         ]);
+        if (prefetchRes) {
+          for (const hitCid of prefetchRes.hitCids) prefetchHitCids.add(hitCid);
+        }
+        if (!prefetchHitCids.has(cid)) {
+          logSession(
+            s,
+            "info",
+            `[${name}] per-course 題庫尚未命中，等待全量題庫最多 ${Math.round(BULK_PREFETCH_EXAM_WAIT_MS / 1000)}s 再進測驗`,
+          );
+          await Promise.race([
+            bulkPrefetchPromise,
+            waitUnlessAborted(BULK_PREFETCH_EXAM_WAIT_MS),
+          ]);
+          if (s.abortSignal.aborted) return;
+        }
 
         try {
           const { solveExamFromHistory } = await import("./exam/history-solver");
@@ -1676,10 +1711,6 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     }
   };
 
-  for (const t of skipRead) {
-    startChainOnce(t.course.cid, t.course.caption, false);
-  }
-
   const allNeedReading = tracked.filter(
     (t) => selected.has(t.course.cid) && t.course.isClassing && t.phase === "reading",
   );
@@ -1724,7 +1755,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
   // v0.8.18: always fire bulk on every pipeline start. Bulk is incremental
   // (delta vs processedUrls snapshot) — no work if top-500 fully cached;
   // automatic retry of previously-failed pages.
-  bulkPrefetchBankIndex(
+  bulkPrefetchPromise = bulkPrefetchBankIndex(
     (msg) => logSession(s, "info", `[題庫·全量] ${msg}`),
     (p) => {
       if (s.abortSignal.aborted) return;
@@ -1743,7 +1774,6 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     }
   });
 
-  let prefetchPromise: Promise<PrefetchResult>;
   if (prefetchCids.length > 0) {
     s.state.webBankProgress = {
       running: true,
@@ -1758,6 +1788,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
       prefetchCids,
       courseNamesByCid,
       (msg) => logSession(s, "info", `[題庫] ${msg}`),
+      (hitCid) => prefetchHitCids.add(hitCid),
     )
       .then((res) => {
         if (s.abortSignal.aborted) return res; // session 已 abort，state 不要動
@@ -1776,6 +1807,7 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
         logSession(s, "warn", `[題庫] prefetch 例外：${(e as Error)?.message ?? e}`);
         const failResult: PrefetchResult = {
           questionsWritten: 0,
+          hitCids: [],
           coursesHit: 0,
           coursesMiss: 0,
           coursesFailed: prefetchCids.length,
@@ -1795,10 +1827,15 @@ async function runPipelineFor(s: AccountSession, cids: string[]): Promise<void> 
     pushState();
     prefetchPromise = Promise.resolve({
       questionsWritten: 0,
+      hitCids: [],
       coursesHit: 0,
       coursesMiss: 0,
       coursesFailed: 0,
     });
+  }
+
+  for (const t of skipRead) {
+    startChainOnce(t.course.cid, t.course.caption, false);
   }
 
   // v0.8.1：caption map 給 reauthFn 重抽 ticket 用 — extractTicket 需要 caption
