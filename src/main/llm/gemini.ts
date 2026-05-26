@@ -112,7 +112,7 @@ async function callOpenCode(
   // Build auth header if password env is set
   const password = process.env["OPENCODE_SERVER_PASSWORD"];
   const authHeaders: Record<string, string> = password
-    ? { Authorization: `Basic ${Buffer.from(password).toString("base64")}` }
+    ? { Authorization: `Basic ${Buffer.from(`:${password}`).toString("base64")}` }
     : {};
 
   // Split "providerID/modelId" on first slash
