@@ -43,6 +43,10 @@ declare global {
       onGeminiDialogRequest: (cb: () => void) => () => void;
       getGeminiKey: () => Promise<string>;
       setGeminiKey: (key: string) => Promise<void>;
+      getOpenCodeUrl: () => Promise<string>;
+      setOpenCodeUrl: (url: string) => Promise<void>;
+      getOpenCodeModel: () => Promise<string>;
+      setOpenCodeModel: (model: string) => Promise<void>;
       ackFirstRun: () => void;
       rendererLog: (level: "info" | "warn" | "error", msg: string) => void;
       openLogsFolder: () => void;
@@ -818,6 +822,164 @@ function GeminiKeyModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+/**
+ * OpenCode server settings modal — lets users configure the OpenCode base URL
+ * and model. OpenCode is tried before Gemini when a URL is set.
+ */
+function OpenCodeSettingsModal({ onClose }: { onClose: () => void }) {
+  const [urlValue, setUrlValue] = useState("");
+  const [modelValue, setModelValue] = useState("");
+  const [status, setStatus] = useState<{ msg: string; color: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const urlRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([window.api.getOpenCodeUrl(), window.api.getOpenCodeModel()])
+      .then(([url, model]) => {
+        if (cancelled) return;
+        if (url) setUrlValue(url);
+        if (model) setModelValue(model);
+      })
+      .catch(() => void 0);
+    setTimeout(() => urlRef.current?.focus(), 0);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await window.api.setOpenCodeUrl(urlValue.trim());
+      await window.api.setOpenCodeModel(modelValue.trim());
+      setStatus({ msg: "已儲存 ✓", color: "#a6e3a1" });
+      setTimeout(onClose, 700);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clear() {
+    setBusy(true);
+    try {
+      await window.api.setOpenCodeUrl("");
+      await window.api.setOpenCodeModel("");
+      setUrlValue("");
+      setModelValue("");
+      setStatus({ msg: "已清除（將改用 Gemini）", color: "#fab387" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="rounded-lg shadow-2xl w-[520px] max-w-[92vw] p-6"
+      style={{
+        background: "#1e1e2e",
+        color: "#cdd6f4",
+        fontFamily: "'Microsoft JhengHei', 'Segoe UI', sans-serif",
+      }}
+    >
+      <h3 className="text-sm font-semibold mb-2" style={{ color: "#89dceb" }}>
+        ⚡ OpenCode 伺服器設定
+      </h3>
+      <p className="text-[11px] mb-4" style={{ color: "#7f849c" }}>
+        設定 OpenCode session API 伺服器 URL，程式會優先使用 OpenCode 解題；未設定或失敗時自動 fallback 到 Gemini。
+      </p>
+      <label className="block text-xs mb-1" style={{ color: "#a6adc8" }}>
+        伺服器 URL（例如 http://localhost:3000）
+      </label>
+      <input
+        ref={urlRef}
+        type="text"
+        value={urlValue}
+        onChange={(e) => setUrlValue(e.target.value)}
+        placeholder="http://localhost:3000"
+        autoComplete="off"
+        spellCheck={false}
+        className="w-full px-2.5 py-2 rounded-md outline-none border text-[13px] mb-3"
+        style={{
+          background: "#313244",
+          borderColor: "#45475a",
+          color: "#cdd6f4",
+          fontFamily: "Consolas, monospace",
+        }}
+      />
+      <label className="block text-xs mb-1" style={{ color: "#a6adc8" }}>
+        Model（留空使用預設）
+      </label>
+      <input
+        type="text"
+        value={modelValue}
+        onChange={(e) => setModelValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void save();
+          }
+        }}
+        placeholder="opencode/deepseek-v4-flash-free"
+        autoComplete="off"
+        spellCheck={false}
+        className="w-full px-2.5 py-2 rounded-md outline-none border text-[13px]"
+        style={{
+          background: "#313244",
+          borderColor: "#45475a",
+          color: "#cdd6f4",
+          fontFamily: "Consolas, monospace",
+        }}
+      />
+      <div className="text-[11px] mt-1.5" style={{ color: "#6c7086" }}>
+        設定存在本機 config.json，不上傳。OpenCode 失敗時會自動 fallback 到 Gemini。
+      </div>
+      <div className="text-xs mt-2.5 min-h-[18px]" style={{ color: status?.color }}>
+        {status?.msg ?? ""}
+      </div>
+      <div className="flex justify-end gap-2 mt-4">
+        <button
+          disabled={busy}
+          onClick={clear}
+          className="px-4 py-1.5 rounded-md text-[13px] disabled:opacity-50"
+          style={{ background: "#45475a", color: "#cdd6f4" }}
+          title="清掉 OpenCode 設定（fallback 到 Gemini）"
+        >
+          清除
+        </button>
+        <button
+          disabled={busy}
+          onClick={onClose}
+          className="px-4 py-1.5 rounded-md text-[13px] border disabled:opacity-50"
+          style={{
+            background: "#313244",
+            borderColor: "#45475a",
+            color: "#a6adc8",
+          }}
+        >
+          取消
+        </button>
+        <button
+          disabled={busy}
+          onClick={save}
+          className="px-4 py-1.5 rounded-md text-[13px] font-semibold disabled:opacity-50"
+          style={{ background: "#89dceb", color: "#1e1e2e" }}
+        >
+          儲存
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Shell() {
   const [stealth, setStealth] = useState<StealthState | "loading">("loading");
   // React-managed setup dialog (Electron renderers return null from window.prompt,
@@ -830,6 +992,7 @@ export default function Shell() {
   // v0.6.7：Gemini key 改成 renderer 內的 React modal（原本是 child BrowserWindow，
   // 在多螢幕環境會跑到別的 monitor 看起來像「程式黑掉卡住」）。
   const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showOpenCodeSettings, setShowOpenCodeSettings] = useState(false);
   // v0.7.10：偽裝模式設定 modal —— 之前只有「馬上偽裝」按鈕，使用者要關偽裝
   // （清掉密碼讓下次打開直接看到真畫面）找不到入口。modal 提供「馬上偽裝」+
   // 「徹底解除偽裝模式」兩個選項。
@@ -951,6 +1114,14 @@ export default function Shell() {
         >
           ⚙ Gemini
         </button>
+        {/* ⚡ OpenCode —— 優先 AI provider，設定伺服器 URL 後優先使用 */}
+        <button
+          className="px-2 py-1 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-400 hover:text-cyan-300 hover:bg-slate-700 backdrop-blur shadow-lg"
+          title="設定 OpenCode 伺服器 URL（設定後優先使用 OpenCode，Gemini 作為 fallback）"
+          onClick={() => setShowOpenCodeSettings(true)}
+        >
+          ⚡ OpenCode
+        </button>
       </div>
 
       {/* Gemini 說明卡片 — 由 Shell 管理（按鈕在 Shell 層）。
@@ -979,6 +1150,15 @@ export default function Shell() {
         <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70">
           <ModalGuard>
             <GeminiKeyModal onClose={() => setShowGeminiKey(false)} />
+          </ModalGuard>
+        </div>
+      )}
+
+      {/* OpenCode 伺服器設定 modal */}
+      {showOpenCodeSettings && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70">
+          <ModalGuard>
+            <OpenCodeSettingsModal onClose={() => setShowOpenCodeSettings(false)} />
           </ModalGuard>
         </div>
       )}

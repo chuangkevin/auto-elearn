@@ -13,6 +13,10 @@ interface LocalConfig {
   geminiModel?: string;
   /** Plaintext secret for stealth Noteqad disguise (user's explicit choice, see memory) */
   stealthSecret?: string;
+  /** Base URL of an OpenCode session API server, e.g. http://localhost:3000 */
+  openCodeBaseUrl?: string;
+  /** Model to use with OpenCode, e.g. "opencode/deepseek-v4-flash-free" */
+  openCodeModel?: string;
 }
 
 function configPath(): string {
@@ -62,6 +66,12 @@ function markQuotaExhausted(): void {
   );
 }
 
+/** Returns true if an OpenCode server URL is configured. */
+export function isOpenCodeUsable(): boolean {
+  const cfg = loadConfig();
+  return !!cfg.openCodeBaseUrl;
+}
+
 /** v0.8.10：matcher / solver 用這個判斷該不該叫 LLM（取代 hasGeminiKey） */
 export function isGeminiUsable(): boolean {
   if (!hasGeminiKey()) return false;
@@ -83,11 +93,129 @@ function llog(msg: string): void {
   else console.warn("[gemini]", msg);
 }
 
+/**
+ * Call an OpenCode session API server.
+ * 1. POST {serverUrl}/session  → { id }
+ * 2. POST {serverUrl}/session/{id}/message  → parse text from response
+ * 3. DELETE {serverUrl}/session/{id}  (fire-and-forget)
+ * Returns null on any error so the caller can fall through to Gemini.
+ */
+async function callOpenCode(
+  serverUrl: string,
+  model: string,
+  prompt: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  // Strip trailing slash for clean URL concatenation
+  const base = serverUrl.replace(/\/$/, "");
+
+  // Build auth header if password env is set
+  const password = process.env["OPENCODE_SERVER_PASSWORD"];
+  const authHeaders: Record<string, string> = password
+    ? { Authorization: `Basic ${Buffer.from(password).toString("base64")}` }
+    : {};
+
+  // Split "providerID/modelId" on first slash
+  const slashIdx = model.indexOf("/");
+  const providerID = slashIdx >= 0 ? model.slice(0, slashIdx) : model;
+  const modelId = slashIdx >= 0 ? model.slice(slashIdx + 1) : model;
+
+  try {
+    // Step 1: create session
+    const sessionRes = await request(`${base}/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({ model: { providerID, id: modelId } }),
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+    });
+    if (sessionRes.statusCode >= 400) {
+      llog(`OpenCode POST /session 失敗 ${sessionRes.statusCode}`);
+      try { await sessionRes.body.dump(); } catch { /* ignore */ }
+      return null;
+    }
+    const sessionJson = (await sessionRes.body.json()) as { id?: string };
+    const sessionId = sessionJson.id;
+    if (!sessionId) {
+      llog("OpenCode /session 回應沒有 id");
+      return null;
+    }
+
+    // Step 2: send message
+    const msgRes = await request(`${base}/session/${sessionId}/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({ parts: [{ text: prompt }] }),
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+    });
+    if (msgRes.statusCode >= 400) {
+      llog(`OpenCode POST /session/${sessionId}/message 失敗 ${msgRes.statusCode}`);
+      try { await msgRes.body.dump(); } catch { /* ignore */ }
+      // Fire-and-forget cleanup
+      request(`${base}/session/${sessionId}`, {
+        method: "DELETE",
+        headers: authHeaders,
+        headersTimeout: timeoutMs,
+        bodyTimeout: timeoutMs,
+      }).catch(() => void 0);
+      return null;
+    }
+
+    // Parse response: array of items with type="text"/value or parts[].text
+    const items = (await msgRes.body.json()) as Array<
+      | { type: string; value?: string }
+      | { parts?: Array<{ text?: string }> }
+    >;
+
+    let text = "";
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if ("type" in item && item.type === "text" && typeof item.value === "string") {
+          text += item.value;
+        } else if ("parts" in item && Array.isArray(item.parts)) {
+          for (const part of item.parts) {
+            if (typeof part.text === "string") text += part.text;
+          }
+        }
+      }
+    }
+    text = text.trim();
+
+    // Step 3: delete session (fire-and-forget)
+    request(`${base}/session/${sessionId}`, {
+      method: "DELETE",
+      headers: authHeaders,
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+    }).catch(() => void 0);
+
+    if (!text) {
+      llog("OpenCode 回應 200 但解析出空字串");
+      return null;
+    }
+    return text;
+  } catch (e) {
+    llog(`OpenCode 呼叫失敗：${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
 export async function generateText(
   prompt: string,
   opts: { maxOutputTokens?: number; timeoutMs?: number } = {},
 ): Promise<string | null> {
   const cfg = loadConfig();
+  const timeoutMs = opts.timeoutMs ?? 20_000;
+
+  // Try OpenCode first if configured
+  if (cfg.openCodeBaseUrl) {
+    const model = cfg.openCodeModel ?? "opencode/deepseek-v4-flash-free";
+    const result = await callOpenCode(cfg.openCodeBaseUrl, model, prompt, timeoutMs);
+    if (result !== null) return result;
+    llog("OpenCode failed, falling back to Gemini");
+  }
+
   if (!cfg.geminiApiKey) {
     llog("hasGeminiKey=false — config.json 裡沒有 geminiApiKey，已跳過 LLM");
     return null;

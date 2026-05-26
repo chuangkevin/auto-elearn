@@ -3362,6 +3362,16 @@ ipcMain.handle(IPC.GEMINI_KEY_SET, (_evt, key: string) => {
 });
 ipcMain.on(IPC.OPEN_GEMINI_DIALOG, () => requestRendererGeminiDialog());
 
+// OpenCode
+ipcMain.handle(IPC.OPENCODE_URL_GET, () => loadConfig().openCodeBaseUrl ?? "");
+ipcMain.handle(IPC.OPENCODE_URL_SET, (_evt, url: string) => {
+  saveConfig({ openCodeBaseUrl: url.trim() || undefined });
+});
+ipcMain.handle(IPC.OPENCODE_MODEL_GET, () => loadConfig().openCodeModel ?? "");
+ipcMain.handle(IPC.OPENCODE_MODEL_SET, (_evt, model: string) => {
+  saveConfig({ openCodeModel: model.trim() || undefined });
+});
+
 // First run + logs + version
 ipcMain.on(IPC.ACK_FIRST_RUN, () => {
   ackFirstRun();

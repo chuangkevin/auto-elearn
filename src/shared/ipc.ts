@@ -221,6 +221,14 @@ export const IPC = {
    *  the OS menu「說明 → 設定 Gemini API Key」click handler (which runs in main)
    *  to forward into the renderer-owned modal. */
   GEMINI_DIALOG_REQUEST: "gemini:dialog-request",
+  /** renderer → main: get current OpenCode server URL */
+  OPENCODE_URL_GET: "opencode:url-get",
+  /** renderer → main: save OpenCode server URL (empty string to clear) */
+  OPENCODE_URL_SET: "opencode:url-set",
+  /** renderer → main: get current OpenCode model */
+  OPENCODE_MODEL_GET: "opencode:model-get",
+  /** renderer → main: save OpenCode model (empty string to clear / use default) */
+  OPENCODE_MODEL_SET: "opencode:model-set",
   /** renderer → main: list 次類別 under a 主類別 id */
   CATEGORY_CHILDREN: "category:children",
   /** renderer → main: 標記 SmartScreen 說明已讀過，以後不要再顯示 */

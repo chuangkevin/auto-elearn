@@ -56,6 +56,10 @@ const api = {
   getGeminiKey: (): Promise<string> => ipcRenderer.invoke(IPC.GEMINI_KEY_GET),
   setGeminiKey: (key: string): Promise<void> => ipcRenderer.invoke(IPC.GEMINI_KEY_SET, key),
   openGeminiDialog: () => ipcRenderer.send(IPC.OPEN_GEMINI_DIALOG),
+  getOpenCodeUrl: (): Promise<string> => ipcRenderer.invoke(IPC.OPENCODE_URL_GET),
+  setOpenCodeUrl: (url: string): Promise<void> => ipcRenderer.invoke(IPC.OPENCODE_URL_SET, url),
+  getOpenCodeModel: (): Promise<string> => ipcRenderer.invoke(IPC.OPENCODE_MODEL_GET),
+  setOpenCodeModel: (model: string): Promise<void> => ipcRenderer.invoke(IPC.OPENCODE_MODEL_SET, model),
   onGeminiDialogRequest: (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on(IPC.GEMINI_DIALOG_REQUEST, listener);
